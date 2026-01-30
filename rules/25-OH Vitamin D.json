@@ -45,7 +45,7 @@
   },
 
   "excel_rules": {
-    "excel_filename_template": "{assay_key}.xlsx",
+    "excel_filename_template": "{assay_name}.xlsx",
     "sheetname_template": "{lot_id}",
     "column_mapping": {
       "plate_name": "Plattenname",
