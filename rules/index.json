@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "assays": [
+    {
+      "assay_key": "(6bd7)",
+      "ruleset_file": "25-OH Vitamin D.json"
+    },
+    {
+      "assay_key": "(5f03)",
+      "ruleset_file": "Anti-TPO IgG.json"
+    },
+    {
+      "assay_key": "(c4d1)",
+      "ruleset_file": "Anti-PR3-hn-hr IgG.json"
+    },
+    {
+      "assay_key": "(3c84)",
+      "ruleset_file": "Anti-MPO IgG.json"
+    },
+    {
+      "assay_key": "(42d4)",
+      "ruleset_file": "Anti-Centromeres IgG.json"
+    }
+  ]
+}

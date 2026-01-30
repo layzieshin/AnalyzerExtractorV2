@@ -1,0 +1,60 @@
+{
+  "assay_name": "25-OH Vitamin D",
+  "assay_key": "(6bd7)",
+  "lot_rule": {
+    "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
+  },
+  "extract_rules": {
+    "fields": [
+      {
+        "key": "plate_name",
+        "regex": "Plattenname:\\s*(.+?)\\s+Zeit:",
+        "required": true
+      },
+      {
+        "key": "date",
+        "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "required": true
+      },
+      {
+        "key": "time",
+        "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
+        "required": true
+      },
+      {
+        "key": "user",
+        "regex": "Anwender:\\s*([^\\s]+)",
+        "required": true
+      },
+      {
+        "key": "test",
+        "regex": "Test:\\s*(.+)",
+        "required": false
+      },
+      {
+        "key": "lot_id",
+        "regex": "Kit\\s+(E[0-9A-Za-z]+)\\s+\\d{6}",
+        "required": true
+      },
+      {
+        "key": "lot_expiry_yymmdd",
+        "regex": "Kit\\s+E[0-9A-Za-z]+\\s+(\\d{6})",
+        "required": true
+      }
+    ]
+  },
+
+  "excel_rules": {
+    "excel_filename_template": "{assay_key}.xlsx",
+    "sheetname_template": "{lot_id}",
+    "column_mapping": {
+      "plate_name": "Plattenname",
+      "time": "Zeit",
+      "user": "Anwender",
+      "date": "Datum",
+      "test": "Test",
+      "lot_id": "Lot",
+      "lot_expiry_date": "Lot_Haltbarkeit"
+    }
+  }
+}
