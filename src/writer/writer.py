@@ -116,12 +116,14 @@ class Writer:
 
         # Create header row if empty
         if ws.max_row < 1 or ws.cell(1, 1).value is None:
-            ws.append(desired)
+            for col_idx, header in enumerate(desired, start=1):
+                ws.cell(row=1, column=col_idx).value = header
             return desired
 
         existing = [c.value for c in ws[1] if c.value is not None]
         if not existing:
-            ws.append(desired)
+            for col_idx, header in enumerate(desired, start=1):
+                ws.cell(row=1, column=col_idx).value = header
             return desired
 
         # Append missing columns (keeps existing order)
