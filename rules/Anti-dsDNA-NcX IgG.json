@@ -1,6 +1,5 @@
-{
-  "assay_name": "Anti-Centromeres IgG",
-  "assay_key": "(42d4)",
+{ "assay_name": "Anti-dsDNA-NcX IgG",
+  "assay_key": "(661f)",
   "lot_rule": {
     "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
   },
@@ -12,17 +11,12 @@
       "required": false
     },
     {
-      "key": "test",
-      "regex": "Test:\\s*(.+)",
-      "required": true
-    },
-    {
-      "key": "time",
+      "key": "ZEIT",
       "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
       "required": false
     },
     {
-      "key": "date",
+      "key": "DATUM",
       "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
       "required": false
     },
@@ -155,10 +149,10 @@
   "sheetname_template": "{lot_id}",
   "column_mapping": {
     "ANWENDER": "ANWENDER",
-    "time": "ZEIT",
-    "date": "DATUM",
+    "ZEIT": "ZEIT",
+    "DATUM": "DATUM",
     "PLATTE": "PLATTE",
-    "test": "test",
+
     "CHARGE": "CHARGE",
     "Haltbarkeit": "Haltbarkeit",
 
@@ -186,5 +180,58 @@
     "FILE_NAME": "FILE_NAME",
     "VALIDATION": "VALIDATION"
   }
-}
+},
+  "extract_rules": {
+    "fields": [
+      {
+        "key": "plate_name",
+        "regex": "Plattenname:\\s*(.+?)\\s+Zeit:",
+        "required": true
+      },
+      {
+        "key": "date",
+        "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "required": true
+      },
+      {
+        "key": "time",
+        "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
+        "required": true
+      },
+      {
+        "key": "user",
+        "regex": "Anwender:\\s*([^\\s]+)",
+        "required": true
+      },
+      {
+        "key": "test",
+        "regex": "Test:\\s*(.+)",
+        "required": false
+      },
+      {
+        "key": "lot_id",
+        "regex": "Kit\\s+(E[0-9A-Za-z]+)\\s+\\d{6}",
+        "required": true
+      },
+      {
+        "key": "lot_expiry_yymmdd",
+        "regex": "Kit\\s+E[0-9A-Za-z]+\\s+(\\d{6})",
+        "required": true
+      }
+    ]
+  },
+
+  "excel_rules": {
+    "excel_filename_template": "{assay_name}.xlsx",
+    "sheetname_template": "{lot_id}",
+    "column_mapping": {
+      "plate_name": "Plattenname",
+      "time": "Zeit",
+      "user": "Anwender",
+      "date": "Datum",
+      "test": "Test",
+      "lot_id": "Lot",
+      "lot_expiry_date": "Lot_Haltbarkeit"
+    }
+  }
 }

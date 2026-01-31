@@ -37,20 +37,42 @@ class Extractor:
         fields = extract_rules.get("fields", [])
         if not isinstance(fields, list) or not fields:
             raise ExtractionError("extract_rules.fields missing/empty")
+
         out: Dict[str, Any] = {}
+        lines = text.splitlines()
+
         for f in fields:
             key = f.get("key")
             regex = f.get("regex")
             req = bool(f.get("required", False))
+
             if not key or not regex:
                 raise ExtractionError("field requires key+regex")
-            m = re.search(regex, text)
+
+            search_text = text  # default: kompletter Block
+
+            # 🔹 optionaler Such-Start
+            search_from = f.get("search_from")
+            if isinstance(search_from, dict):
+                if "after" in search_from:
+                    marker = search_from["after"]
+                    for i, ln in enumerate(lines):
+                        if re.search(marker, ln):
+                            search_text = "\n".join(lines[i + 1:])
+                            break
+                elif "line" in search_from:
+                    start = int(search_from["line"])
+                    search_text = "\n".join(lines[start:])
+
+            m = re.search(regex, search_text)
             if not m:
                 if req:
                     raise ExtractionError(f"required field not found: {key}")
                 out[key] = None
                 continue
+
             out[key] = (m.group(1) if m.groups() else m.group(0)).strip()
+
         return out
 
     def _require_str(self, v: Any, key: str) -> str:

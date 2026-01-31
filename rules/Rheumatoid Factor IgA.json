@@ -1,6 +1,6 @@
 {
-  "assay_name": "Anti-Centromeres IgG",
-  "assay_key": "(42d4)",
+  "assay_name": "Rheumatoid Factor IgA",
+  "assay_key": "(6a74)",
   "lot_rule": {
     "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
   },
@@ -12,17 +12,12 @@
       "required": false
     },
     {
-      "key": "test",
-      "regex": "Test:\\s*(.+)",
-      "required": true
-    },
-    {
-      "key": "time",
+      "key": "ZEIT",
       "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
       "required": false
     },
     {
-      "key": "date",
+      "key": "DATUM",
       "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
       "required": false
     },
@@ -155,10 +150,10 @@
   "sheetname_template": "{lot_id}",
   "column_mapping": {
     "ANWENDER": "ANWENDER",
-    "time": "ZEIT",
-    "date": "DATUM",
+    "ZEIT": "ZEIT",
+    "DATUM": "DATUM",
     "PLATTE": "PLATTE",
-    "test": "test",
+
     "CHARGE": "CHARGE",
     "Haltbarkeit": "Haltbarkeit",
 
