@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 
 import json
 import os
@@ -31,7 +32,21 @@ class MinimalBatchGUI(tk.Tk):
         self.title("AnalyzerExtractorV2 – Minimal GUI + Regex Tester")
         self.geometry("1100x720")
 
-        self.project_root = str(Path(__file__).resolve().parent)
+        if getattr(sys, "frozen", False):
+            # läuft als PyInstaller-EXE
+            base_dir = Path(sys.executable).resolve().parent
+
+            # rules aus dem Bundle beim ersten Start kopieren
+            bundled_rules = Path(sys._MEIPASS) / "rules"
+            target_rules = base_dir / "rules"
+
+            if bundled_rules.exists() and not target_rules.exists():
+                shutil.copytree(bundled_rules, target_rules)
+        else:
+            # normales Python-Skript (PyCharm)
+            base_dir = Path(__file__).resolve().parent
+
+        self.project_root = str(base_dir)
         self.selected_files: list[str] = []
         self._is_running = False
 

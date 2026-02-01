@@ -20,6 +20,14 @@
     {
       "assay_key": "(42d4)",
       "ruleset_file": "Anti-Centromeres IgG.json"
+    },
+    {
+      "assay_key": "(3ccc)",
+      "ruleset_file": "Anti-Nucleosomes IgG.json"
+    },
+    {
+      "assay_key": "(6a74)",
+      "ruleset_file": "Rheumatoid Factor IgA.json"
     }
   ]
 }

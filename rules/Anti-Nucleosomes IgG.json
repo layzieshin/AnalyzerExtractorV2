@@ -1,6 +1,6 @@
 {
-  "assay_name": "25-OH Vitamin D",
-  "assay_key": "(6bd7)",
+  "assay_name": "Anti-Nucleosomes IgG",
+  "assay_key": "(3ccc)",
   "lot_rule": {
     "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
   },
@@ -13,7 +13,7 @@
     },
     {
       "key": "test",
-      "regex": "Test:\\s*(.+)",
+      "regex": "[^\\\\]+(?=\\.asy)",
       "required": true
     },
     {
@@ -33,11 +33,6 @@
     },
 
     {
-      "key": "CHARGE",
-      "regex": "Kit\\s+(E[0-9A-Za-z]+)\\s+\\d{6}",
-      "required": false
-    },
-    {
       "key": "Haltbarkeit",
       "regex": "Kit\\s+E[0-9A-Za-z]+\\s+(\\d{6})",
       "required": false
@@ -45,7 +40,7 @@
 
     {
       "key": "VALIDATION",
-      "regex": "^(Validationskriterien\\s+(?:nicht\\s+)?erfüllt)",
+      "regex": "(Validationskriterien\\s+(?:nicht\\s+)?erfüllt)",
       "required": false,
       "search_from": { "line": 0 }
     },
@@ -58,9 +53,8 @@
     },
     {
       "key": "ZIEL_PCQ1",
-      "regex": "\\bPCQ1\\s+\\d+(?:[\\.,]\\d+)?<=PCQ1<=\\d+(?:[\\.,]\\d+)?\\s+\\d+(?:[\\.,]\\d+)?<=\\s*(\\d+(?:[\\.,]\\d+)?)\\s*<=",
-      "required": false,
-      "search_from": { "after": "Validierungskriterien" }
+      "regex": "\\bPCQ1\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+RU/ml",
+      "required": false
     },
     {
       "key": "OG_PCQ1",
@@ -77,9 +71,8 @@
     },
     {
       "key": "ZIEL_NCQ1",
-      "regex": "\\bNCQ1\\s+\\d+(?:[\\.,]\\d+)?<=NCQ1<=\\d+(?:[\\.,]\\d+)?\\s+\\d+(?:[\\.,]\\d+)?<=\\s*(\\d+(?:[\\.,]\\d+)?)\\s*<=",
-      "required": false,
-      "search_from": { "after": "Validierungskriterien" }
+      "regex": "\\bNCQ1\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+RU/ml",
+      "required": false
     },
     {
       "key": "OG_NCQ1",
@@ -90,24 +83,27 @@
 
     {
       "key": "PCQ1",
-      "regex": "\\bPCQ1\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+RU/ml",
-      "required": false
+      "regex": "\\bPCQ1\\s+\\d+(?:[\\.,]\\d+)?<=PCQ1<=\\d+(?:[\\.,]\\d+)?\\s+\\d+(?:[\\.,]\\d+)?<=\\s*(\\d+(?:[\\.,]\\d+)?)\\s*<=",
+      "required": false,
+      "search_from": { "after": "Validierungskriterien" }
     },
     {
       "key": "NCQ1",
-      "regex": "\\bNCQ1\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+RU/ml",
-      "required": false
+      "regex": "\\bNCQ1\\s+\\d+(?:[\\.,]\\d+)?<=NCQ1<=\\d+(?:[\\.,]\\d+)?\\s+\\d+(?:[\\.,]\\d+)?<=\\s*(\\d+(?:[\\.,]\\d+)?)\\s*<=",
+      "required": false,
+      "search_from": { "after": "Validierungskriterien" }
     },
 
     {
       "key": "SOLL_S1",
-      "regex": "\\bS1\\b.*?\\s(>\\s*\\d+(?:[\\.,]\\d+)?)\\s+O\\.D\\.",
+      "regex": "\\bS1\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+O\\.D\\.",
       "required": false
     },
     {
       "key": "IST_S1",
-      "regex": "\\bS1\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+O\\.D\\.",
-      "required": false
+      "regex": "\\bS1\\s+(\\d+(?:[.,]\\d+)?)",
+      "required": false,
+      "search_from": { "line": 20 }
     },
     {
       "key": "S1_MIN",
@@ -117,13 +113,14 @@
 
     {
       "key": "SOLL_S2",
-      "regex": "\\bS2\\b.*?\\s(>\\s*\\d+(?:[\\.,]\\d+)?)\\s+O\\.D\\.",
+      "regex": "\\bS2\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+O\\.D\\.",
       "required": false
     },
     {
       "key": "IST_S2",
-      "regex": "\\bS2\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+O\\.D\\.",
-      "required": false
+      "regex": "\\bS2\\s+(\\d+(?:[.,]\\d+)?)",
+      "required": false,
+      "search_from": { "after": "Patient" }
     },
     {
       "key": "S2_MIN",
@@ -132,19 +129,15 @@
     },
 
     {
-      "key": "SOLL_S3",
-      "regex": "\\bS3\\b.*?\\s(>\\s*\\d+(?:[\\.,]\\d+)?)\\s+O\\.D\\.",
-      "required": false
-    },
-    {
       "key": "IST_S3",
-      "regex": "\\bS3\\b.*?\\s(\\d+(?:[\\.,]\\d+)?)\\s+O\\.D\\.",
-      "required": false
+      "regex": "\\bS3\\s+(\\d+(?:[.,]\\d+)?)",
+      "required": false,
+      "search_from": { "after": "Patient" }
     },
 
     {
       "key": "FILE_NAME",
-      "regex": "__FILE_NAME_NOT_IN_TEXT__",
+      "regex": "[^\\\\]+(?=\\.asy)\n",
       "required": false
     }
   ]
@@ -160,7 +153,26 @@
       "date": "Datum",
       "test": "Test",
       "lot_id": "Lot",
-      "lot_expiry_date": "Lot_Haltbarkeit"
+        "ANWENDER": "ANWENDER",
+        "PLATTE": "PLATTE",
+        "Haltbarkeit": "Haltbarkeit",
+        "VALIDATION": "VALIDATION",
+        "UG_PCQ1": "UG_PCQ1",
+        "ZIEL_PCQ1": "ZIEL_PCQ1",
+        "OG_PCQ1": "OG_PCQ1",
+        "UG_NCQ1": "UG_NCQ1",
+        "ZIEL_NCQ1": "ZIEL_NCQ1",
+        "OG_NCQ1": "OG_NCQ1",
+        "PCQ1": "PCQ1",
+        "NCQ1": "NCQ1",
+        "SOLL_S1": "SOLL S1",
+        "IST_S1": "IST S1",
+        "S1_MIN": "S1 MIN",
+        "SOLL_S2": "SOLL S2",
+        "IST_S2": "IST S2",
+        "S2_MIN": "S2 MIN",
+        "IST_S3": "IST S3",
+        "FILE_NAME": "FILE_NAME"
     }
   }
 }
