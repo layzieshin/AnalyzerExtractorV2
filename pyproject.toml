@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "analyzer-result-extractor-v2"
+version = "0.0.0"
+description = "Standalone PDF result extractor with embeddable Python APIs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PyMuPDF>=1.23",
+    "openpyxl>=3.1",
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["interfaces", "interfaces.*", "rule_editor", "rule_editor.*", "src", "src.*"]
