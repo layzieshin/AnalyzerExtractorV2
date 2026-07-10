@@ -9,6 +9,7 @@ from src.rulesuite.api import (
     add_field,
     adopt_candidate_field,
     batch_check_fields,
+    check_authoring_readiness,
     check_candidates,
     check_required_fields,
     create_blank_draft,
@@ -24,6 +25,7 @@ from src.rulesuite.api import (
     load_draft,
     locate_fields,
     move_field,
+    preview_extract,
     read_candidate_fields,
     remove_field,
     rename_field,
@@ -701,3 +703,102 @@ def test_adopt_candidate_field_allows_form_overrides(tmp_path: Path) -> None:
     assert field["regex"] == r"Haltbarkeit:\s*(\d+)"
     assert field["required"] is True
     assert field["search_from"] == {"line": 3}
+
+
+def test_check_authoring_readiness_structure_only(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+
+    report = check_authoring_readiness(draft, assay_text=None)
+    assert report["ok"] is True
+    assert report["structural_errors"] == []
+    assert report["required_field_status"] is None
+    assert report["missing_required"] == []
+    assert any("no_assay_text" in w for w in report["warnings"])
+
+
+def test_check_authoring_readiness_with_assay_text_all_confirmed(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    draft = create_draft_from_template(str(root), "(9100)", "Templated Assay")
+    text = "\n".join(
+        [
+            "Datum: 09.07.2026",
+            "Zeit: 10:15:00",
+            "Anwender: LAB01",
+            "Platte: P-12",
+            "Charge: CH-99",
+            "Validationskriterien erfuellt",
+        ]
+    )
+
+    report = check_authoring_readiness(draft, text)
+    assert report["ok"] is True
+    assert report["structural_errors"] == []
+    assert report["required_field_status"]["all_confirmed"] is True
+    assert report["missing_required"] == []
+    assert report["warnings"] == []
+
+
+def test_check_authoring_readiness_with_assay_text_missing_required(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    draft = create_draft_from_template(str(root), "(9100)", "Templated Assay")
+    text = "Datum: 09.07.2026"
+
+    report = check_authoring_readiness(draft, text)
+    assert report["ok"] is False
+    assert report["structural_errors"] == []
+    assert "DATUM" not in report["missing_required"]
+    assert len(report["missing_required"]) >= 1
+
+
+def test_preview_extract_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+
+    class _Record:
+        lot_id = "LOT1"
+        dedupe_key = "(1111)|LOT1|ABC"
+        data = {"test": "ABC"}
+
+    def _fake_get_assay_text(self, project_root, pdf_path, assay_key, assay_name, draft_path=None):
+        return {
+            "detected_assays": [assay_key],
+            "assay_block": "Test: ABC\nLot: LOT1",
+        }
+
+    monkeypatch.setattr("src.rulesuite.rulesuite.RuleSuite.get_assay_text", _fake_get_assay_text)
+    monkeypatch.setattr(
+        "src.rulesuite.rulesuite.extract_record",
+        lambda assay_block, ruleset: _Record(),
+    )
+
+    out = preview_extract(str(root), "dummy.pdf", "(1111)", draft_path=draft)
+    assert set(out.keys()) == {
+        "pdf_path",
+        "assay_key",
+        "detected_assays",
+        "used_ruleset",
+        "lot_id",
+        "dedupe_key",
+        "data",
+    }
+    assert out["pdf_path"] == "dummy.pdf"
+    assert out["assay_key"] == "(1111)"
+    assert out["detected_assays"] == ["(1111)"]
+    assert out["lot_id"] == "LOT1"
+    assert out["dedupe_key"] == "(1111)|LOT1|ABC"
+    assert out["data"] == {"test": "ABC"}
+    assert Path(str(out["used_ruleset"])).exists() or str(out["used_ruleset"]).endswith(".json")
+
+
+def test_activate_draft_overwrites_valid_draft(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    set_field_regex(draft, "test", r"Test:\s*(UPDATED)")
+
+    target = activate_draft(str(root), "(1111)", draft)
+    data = json.loads(Path(target).read_text(encoding="utf-8"))
+    field = next(f for f in data["extract_rules"]["fields"] if f["key"] == "test")
+    assert field["regex"] == r"Test:\s*(UPDATED)"

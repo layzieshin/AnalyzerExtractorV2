@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 from .rulesuite import RuleSuite
 from .templates import HEADER_FIELD_KEYS, REQUIRED_HEADER_FIELD_KEYS
 from .required_fields import check_required_fields as _check_required_fields
+from .authoring_readiness import check_authoring_readiness as _check_authoring_readiness
 from .header_aliases import LEGACY_HEADER_ALIASES, LEGACY_HEADER_ALIAS_KEYS
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "add_field",
     "adopt_candidate_field",
     "batch_check_fields",
+    "check_authoring_readiness",
     "check_candidates",
     "check_required_fields",
     "create_blank_draft",
@@ -159,6 +161,19 @@ def batch_check_fields(draft_path: str, assay_text: str, group: int = 1) -> Dict
 
 def check_required_fields(draft_path: str, assay_text: str, group: int = 1) -> Dict[str, Any]:
     return _check_required_fields(draft_path, assay_text, group=group)
+
+
+def check_authoring_readiness(
+    draft_path: str,
+    assay_text: str | None = None,
+    *,
+    group: int = 1,
+) -> Dict[str, Any]:
+    """Authoring-Readiness: Struktur optional + Pflichtfelder gegen Beispieltext.
+
+    Siehe ``authoring_readiness.check_authoring_readiness`` für Semantik (``no_assay_text`` vs. fachliche Freigabe).
+    """
+    return _check_authoring_readiness(draft_path, assay_text, group=group)
 
 
 def locate_fields(draft_path: str, assay_text: str, group: int = 1) -> Dict[str, Any]:

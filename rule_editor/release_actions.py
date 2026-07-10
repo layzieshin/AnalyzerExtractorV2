@@ -9,6 +9,7 @@ from tkinter import messagebox
 from src.rulesuite.api import (
     activate_draft,
     activate_new_draft,
+    check_authoring_readiness,
     diff_draft_vs_active,
     preview_extract,
     validate_draft,
@@ -46,6 +47,45 @@ class ReleaseMixin:
         if not messagebox.askyesno(
             "Validierung",
             f"{phase}: Draft ist nicht valide ({len(report.get('errors', []))} Fehler). Trotzdem fortfahren?",
+        ):
+            return False
+        return True
+
+    def _check_authoring_readiness_for_activate(self) -> bool:
+        if not self.current_draft_path:
+            return False
+        assay_text = (getattr(self, "assay_block_text", "") or "").strip()
+        try:
+            report = check_authoring_readiness(
+                self.current_draft_path,
+                assay_text if assay_text else None,
+            )
+        except Exception as e:
+            messagebox.showerror("Readiness", str(e))
+            return False
+
+        if report.get("structural_errors"):
+            messagebox.showerror(
+                "Aktivierung blockiert",
+                "Strukturfehler im Draft:\n" + "\n".join(report["structural_errors"][:12]),
+            )
+            return False
+
+        if assay_text:
+            if not report.get("ok"):
+                missing = report.get("missing_required") or []
+                messagebox.showerror(
+                    "Aktivierung blockiert",
+                    "Pflichtfelder nicht bestätigt im Beispieltext:\n"
+                    + (", ".join(missing) if missing else "unbekannt"),
+                )
+                return False
+            return True
+
+        if not messagebox.askyesno(
+            "Kein Beispieltext geprüft",
+            "Kein Beispieltext geladen. Pflichtfeld-Treffer gegen PDF wurden nicht verifiziert.\n\n"
+            "Trotzdem aktivieren?",
         ):
             return False
         return True
@@ -161,6 +201,9 @@ class ReleaseMixin:
             return
 
         if not self._quick_validate("Aktivierung"):
+            return
+
+        if not self._check_authoring_readiness_for_activate():
             return
 
         mode = "update" if key in self.known_assay_keys else "create"
