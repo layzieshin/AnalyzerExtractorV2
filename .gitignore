@@ -1,1 +1,22 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE/editor local state
+.idea/
+.vscode/
+
+# Build/package artifacts
+build/
+dist/
+*.egg-info/
+packaging/build_work/
+packaging/dist_output/
+
+# Runtime/output data
+output/
+jobs/
+
+# RuleSuite local drafts
 rules/drafts/
