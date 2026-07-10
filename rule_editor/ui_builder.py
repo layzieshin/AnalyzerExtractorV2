@@ -180,11 +180,19 @@ class UiBuilderMixin:
         self.txt_block.tag_config("field_emphasis", background="#ffd000")
         self.txt_block.bind("<<Selection>>", self._on_block_selection_changed)
 
-        self.frame_marking_panel = tk.Frame(split, width=430)
+        self.frame_marking_panel = tk.Frame(split, width=820)
         self.frame_marking_panel.pack(side="right", fill="y", padx=(8, 0))
         self.frame_marking_panel.pack_propagate(False)
 
-        marking_frame = tk.LabelFrame(self.frame_marking_panel, text="Markierungen")
+        marking_list = tk.Frame(self.frame_marking_panel, width=390)
+        marking_list.pack(side="left", fill="both", expand=True)
+        marking_list.pack_propagate(False)
+
+        marking_controls = tk.Frame(self.frame_marking_panel, width=420)
+        marking_controls.pack(side="right", fill="both", padx=(8, 0))
+        marking_controls.pack_propagate(False)
+
+        marking_frame = tk.LabelFrame(marking_controls, text="Markierungen")
         marking_frame.pack(fill="x", pady=(0, 6))
         marking_row_1 = tk.Frame(marking_frame)
         marking_row_1.pack(fill="x", padx=6, pady=(6, 3))
@@ -209,23 +217,24 @@ class UiBuilderMixin:
             textvariable=self.var_marking_status,
             anchor="w",
             justify="left",
-            wraplength=400,
+            wraplength=390,
             fg="#444",
         ).pack(fill="x", padx=6, pady=(0, 6))
 
-        selection_frame = tk.LabelFrame(self.frame_marking_panel, text="Textauswahl")
+        selection_frame = tk.LabelFrame(marking_controls, text="Textauswahl")
         selection_frame.pack(fill="x", pady=(0, 6))
         tk.Label(
             selection_frame,
             textvariable=self.var_marking_selection,
             anchor="w",
             justify="left",
-            wraplength=350,
+            wraplength=390,
             fg="#333",
         ).pack(fill="x", padx=6, pady=(6, 4))
         sel_btn_row_1 = tk.Frame(selection_frame)
         sel_btn_row_1.pack(fill="x", padx=6, pady=(0, 3))
         tk.Button(sel_btn_row_1, text="Regex aus Auswahl", command=self.on_marking_regex_from_selection).pack(side="left")
+        tk.Button(sel_btn_row_1, text="Baustein...", command=self.on_open_regex_builder).pack(side="left", padx=(6, 0))
         tk.Button(sel_btn_row_1, text="Suche ab: Zeile", command=self.on_marking_set_search_line).pack(
             side="left", padx=(6, 0)
         )
@@ -237,13 +246,13 @@ class UiBuilderMixin:
             command=self.on_marking_set_search_after_prev_line,
         ).pack(side="left")
 
-        legend_frame = tk.LabelFrame(self.frame_marking_panel, text="Felder und Treffer")
-        legend_frame.pack(fill="both", expand=True, pady=(0, 6))
+        legend_frame = tk.LabelFrame(marking_list, text="Felder und Treffer")
+        legend_frame.pack(fill="both", expand=True)
         self.tree_marking_legend = ttk.Treeview(
             legend_frame,
             columns=("status", "visible", "value"),
             show="tree headings",
-            height=14,
+            height=18,
         )
         self.tree_marking_legend.heading("#0", text="Feld")
         self.tree_marking_legend.heading("status", text="Status")
@@ -252,14 +261,14 @@ class UiBuilderMixin:
         self.tree_marking_legend.column("#0", width=120, anchor="w")
         self.tree_marking_legend.column("status", width=82, anchor="center")
         self.tree_marking_legend.column("visible", width=58, anchor="center")
-        self.tree_marking_legend.column("value", width=145, anchor="w")
+        self.tree_marking_legend.column("value", width=120, anchor="w")
         self.tree_marking_legend.pack(fill="both", expand=True, padx=6, pady=6)
         self.tree_marking_legend.bind("<<TreeviewSelect>>", self.on_marking_legend_selected)
 
-        param_frame = tk.LabelFrame(self.frame_marking_panel, text="Feld bearbeiten")
+        param_frame = tk.LabelFrame(marking_controls, text="Feld bearbeiten")
         param_frame.pack(fill="x", pady=(0, 6))
         tk.Label(param_frame, text="Feldname").grid(row=0, column=0, sticky="w", padx=(6, 0), pady=(6, 4))
-        tk.Entry(param_frame, textvariable=self.var_field_key, width=22).grid(row=0, column=1, sticky="we", padx=(4, 6), pady=(6, 4))
+        tk.Entry(param_frame, textvariable=self.var_field_key).grid(row=0, column=1, sticky="we", padx=(4, 6), pady=(6, 4))
         tk.Checkbutton(param_frame, text="Pflichtfeld", variable=self.var_field_required).grid(
             row=0, column=2, sticky="w", pady=(6, 4)
         )
@@ -268,8 +277,8 @@ class UiBuilderMixin:
         self.ent_marking_regex.grid(row=1, column=1, sticky="we", padx=(4, 6), pady=(0, 4))
         tk.Button(
             param_frame,
-            text="Bib...",
-            width=4,
+            text="Bib",
+            width=5,
             command=lambda: self.on_open_regex_library(self.ent_marking_regex),
         ).grid(row=1, column=2, sticky="w", padx=(0, 6), pady=(0, 4))
         tk.Label(param_frame, text="Suche ab").grid(row=2, column=0, sticky="w", padx=(6, 0), pady=(0, 6))
@@ -283,16 +292,29 @@ class UiBuilderMixin:
         sf_row = tk.Frame(param_frame)
         sf_row.grid(row=3, column=0, columnspan=3, sticky="we", padx=6, pady=(0, 6))
         tk.Label(sf_row, text="after").pack(side="left")
-        tk.Entry(sf_row, textvariable=self.var_search_after, width=18).pack(side="left", padx=(4, 8))
+        tk.Entry(sf_row, textvariable=self.var_search_after, width=32).pack(side="left", fill="x", expand=True, padx=(4, 8))
         tk.Label(sf_row, text="line").pack(side="left")
         tk.Entry(sf_row, textvariable=self.var_search_line, width=6).pack(side="left", padx=(4, 0))
         param_frame.columnconfigure(1, weight=1)
 
         action_frame = tk.Frame(param_frame)
         action_frame.grid(row=4, column=0, columnspan=3, sticky="we", padx=6, pady=(0, 6))
-        tk.Button(action_frame, text="Neues Feld anlegen", command=self.on_add_field).pack(side="left")
-        tk.Button(action_frame, text="Feld übernehmen", command=self.on_apply_field).pack(side="left", padx=(6, 0))
+        tk.Button(action_frame, text="Neues Feld", command=self.on_add_field).pack(side="left")
+        tk.Button(action_frame, text="Uebernehmen", command=self.on_apply_field).pack(side="left", padx=(6, 0))
         tk.Button(action_frame, text="Formular leeren", command=self._reset_field_form).pack(side="left", padx=(6, 0))
+
+        action_frame_2 = tk.Frame(param_frame)
+        action_frame_2.grid(row=5, column=0, columnspan=3, sticky="we", padx=6, pady=(0, 6))
+        tk.Button(action_frame_2, text="Duplizieren", command=self.on_duplicate_field).pack(side="left")
+        tk.Button(action_frame_2, text="Loeschen", command=self.on_remove_field).pack(side="left", padx=(6, 0))
+        tk.Button(action_frame_2, text="Regex testen", command=self.on_test_regex).pack(side="left", padx=(6, 0))
+
+        preview_frame = tk.LabelFrame(marking_controls, text="Regex-Test")
+        preview_frame.pack(fill="both", expand=True)
+        self.txt_marking_regex_preview = tk.Text(preview_frame, wrap="word", height=8)
+        self.txt_marking_regex_preview.pack(fill="both", expand=True, padx=6, pady=6)
+        self.txt_marking_regex_preview.tag_config("hit", background="#f7d774")
+        self.txt_marking_regex_preview.configure(state="disabled")
 
     def _build_fields_tab(self, parent: tk.Frame) -> None:
         container = tk.Frame(parent)

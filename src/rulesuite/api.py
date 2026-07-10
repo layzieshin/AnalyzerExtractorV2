@@ -7,6 +7,9 @@ from .templates import HEADER_FIELD_KEYS, REQUIRED_HEADER_FIELD_KEYS
 from .required_fields import check_required_fields as _check_required_fields
 from .authoring_readiness import check_authoring_readiness as _check_authoring_readiness
 from .header_aliases import LEGACY_HEADER_ALIASES, LEGACY_HEADER_ALIAS_KEYS
+from .regex_builder import build_regex_from_builder_spec as _build_regex_from_builder_spec
+from .regex_builder import suggest_builder_spec_from_selection as _suggest_builder_spec_from_selection
+from .regex_suggest import suggest_regex_from_selection as _suggest_regex_from_selection
 
 __all__ = [
     "HEADER_FIELD_KEYS",
@@ -18,6 +21,7 @@ __all__ = [
     "add_field",
     "adopt_candidate_field",
     "batch_check_fields",
+    "build_regex_from_builder_spec",
     "check_authoring_readiness",
     "check_candidates",
     "check_required_fields",
@@ -43,6 +47,8 @@ __all__ = [
     "set_excel_rules",
     "set_field_regex",
     "set_lot_rule",
+    "suggest_builder_spec_from_selection",
+    "suggest_regex_from_selection",
     "test_regex",
     "update_field",
     "validate_draft",
@@ -139,6 +145,41 @@ def test_regex(text: str, regex: str, group: int = 1) -> Dict[str, Any]:
 
 
 test_regex.__test__ = False
+
+
+def suggest_regex_from_selection(
+    line_text: str,
+    selected_text: str,
+    selection_start: int | None = None,
+    selection_end: int | None = None,
+) -> Dict[str, Any]:
+    return _suggest_regex_from_selection(
+        line_text,
+        selected_text,
+        selection_start=selection_start,
+        selection_end=selection_end,
+    )
+
+
+def build_regex_from_builder_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
+    return _build_regex_from_builder_spec(spec)
+
+
+def suggest_builder_spec_from_selection(
+    line_text: str,
+    selected_text: str,
+    selection_start: int | None = None,
+    selection_end: int | None = None,
+    *,
+    line_index: int | None = None,
+) -> Dict[str, Any]:
+    return _suggest_builder_spec_from_selection(
+        line_text,
+        selected_text,
+        selection_start=selection_start,
+        selection_end=selection_end,
+        line_index=line_index,
+    )
 
 
 def get_assay_text(

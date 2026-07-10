@@ -84,6 +84,49 @@ REGEX_LIBRARY: list[dict[str, str]] = [
         "pattern": r"\s+",
         "explain": "Steht fuer ein oder mehrere Leerzeichen/Tabs. Robust, wenn die Abstaende im PDF schwanken.",
     },
+    {
+        "name": "Analyzer Label + Wert",
+        "pattern": r"Label:\s*(\S+)",
+        "explain": (
+            "Basis fuer Header-Zeilen wie 'Datum: 14.01.2026' oder 'Anwender: Fischer'. "
+            "Ersetzen Sie 'Label' durch den echten Text vor dem Doppelpunkt."
+        ),
+    },
+    {
+        "name": "Analyzer Dezimalzahl",
+        "pattern": r"(\d+(?:[\.,]\d+)?)",
+        "explain": "Findet Werte wie 2,343, 17.3 oder 50 ohne eine Einheit festzulegen.",
+    },
+    {
+        "name": "Analyzer Wert mit Einheit",
+        "pattern": r"(\d+(?:[\.,]\d+)?\s*[A-Za-z/%]+(?:/[A-Za-z]+)?)",
+        "explain": "Findet Werte wie 17,3 ng/ml oder 271 IU/ml. Einheit bleibt Teil des Treffers.",
+    },
+    {
+        "name": "Analyzer Bereich",
+        "pattern": r"(\d+(?:[\.,]\d+)?\s*-\s*\d+(?:[\.,]\d+)?)",
+        "explain": "Findet Bereiche wie 8,7-26,0 oder 190-352.",
+    },
+    {
+        "name": "Analyzer Dateiname .asy",
+        "pattern": r"Test:.*[\\/]([^\\/]+\.asy)",
+        "explain": "Findet in einer Test-Pfad-Zeile nur den Assay-Dateinamen, z.B. 25-OH Vitamin D.asy.",
+    },
+    {
+        "name": "Analyzer Validation",
+        "pattern": r"(Validationskriterien\s+(?:nicht\s+)?erfuellt)",
+        "explain": "Findet den Validationsstatus. Bei Umlaut-Ausgabe ggf. erfuellt manuell anpassen.",
+    },
+    {
+        "name": "Kit Charge",
+        "pattern": r"Kit\s+([A-Za-z0-9]+)\s+\d{6}",
+        "explain": "Findet die Kit-Charge in Zeilen wie 'Kit E251127AF 261126'.",
+    },
+    {
+        "name": "Kit Haltbarkeit",
+        "pattern": r"Kit\s+[A-Za-z0-9]+\s+(\d{6})",
+        "explain": "Findet die sechsstellige Haltbarkeit hinter der Kit-Charge.",
+    },
 ]
 
 

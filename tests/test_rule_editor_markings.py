@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import rule_editor.marking_actions as marking_actions
 from rule_editor.marking_actions import MarkingsMixin
+from rule_editor.regex_actions import RegexMixin
 
 
 class _Var:
@@ -19,6 +21,18 @@ class _Text:
         self.tags: dict[str, list[tuple[str, str]]] = {}
         self.seen: list[str] = []
         self.bound: set[str] = set()
+        self.text = ""
+        self.state = "normal"
+
+    def configure(self, **kwargs: object) -> None:
+        if "state" in kwargs:
+            self.state = str(kwargs["state"])
+
+    def delete(self, _start: str, _end: str) -> None:
+        self.text = ""
+
+    def insert(self, _index: str, text: str) -> None:
+        self.text += text
 
     def tag_remove(self, tag: str, _start: str, _end: str) -> None:
         self.tags[tag] = []
@@ -87,6 +101,11 @@ class _DummyMarkings(MarkingsMixin):
         self.txt_block = _Text()
         self.tree_marking_legend = _Tree()
         self.var_field_key = _Var("")
+        self.var_field_regex = _Var("")
+        self.var_search_mode = _Var("none")
+        self.var_search_line = _Var("")
+        self.var_search_after = _Var("")
+        self.assay_block_text = "Block"
         self._field_marking_data = {
             "A": {"key": "A", "matched": True, "span": [2, 5], "value": "hit", "error": None},
             "B": {"key": "B", "matched": False, "span": None, "value": None, "error": None},
@@ -100,6 +119,23 @@ class _DummyMarkings(MarkingsMixin):
 
     def _set_hint(self, text: str) -> None:
         self.hints.append(text)
+
+
+class _SelectionMarkings(_DummyMarkings):
+    def _get_block_selection(self) -> dict[str, object]:
+        return {
+            "text": "0,722",
+            "line_text": "25-OH Vitamin D S5 0013200223 261126 0,722 O.D.",
+            "line_idx": 0,
+            "sel_start_in_line": 38,
+            "sel_end_in_line": 43,
+        }
+
+
+class _DummyRegex(RegexMixin):
+    def __init__(self) -> None:
+        self.txt_field_preview = _Text()
+        self.txt_marking_regex_preview = _Text()
 
 
 def test_marking_visibility_shows_only_matched_fields() -> None:
@@ -136,3 +172,52 @@ def test_hidden_active_marking_still_scrolls_with_emphasis() -> None:
     assert markings._active_marking_key == "A"
     assert markings.txt_block.tags["field_emphasis"] == [("1.0+2c", "1.0+5c")]
     assert markings.txt_block.seen == ["1.0+2c"]
+
+
+def test_regex_from_selection_uses_backend_result(monkeypatch) -> None:
+    markings = _SelectionMarkings()
+
+    monkeypatch.setattr(
+        marking_actions,
+        "suggest_regex_from_selection",
+        lambda *args, **kwargs: {
+            "regex": r"\bS5\s+\S+\s+\d{6}\s+(\d+(?:[\.,]\d+)?)\s+O\.D\.",
+            "strategy": "anchored_left+decimal+unit_right",
+            "warnings": [],
+        },
+    )
+
+    markings.on_marking_regex_from_selection()
+
+    assert markings.var_field_regex.get() == r"\bS5\s+\S+\s+\d{6}\s+(\d+(?:[\.,]\d+)?)\s+O\.D\."
+    assert "anchored_left+decimal+unit_right" in markings.hints[-1]
+
+
+def test_regex_builder_popup_acceptance_updates_field_form(monkeypatch) -> None:
+    markings = _SelectionMarkings()
+
+    class _FakePopup:
+        def __init__(self, _master, *, assay_text, selection, on_accept):
+            assert assay_text == "Block"
+            assert selection["text"] == "0,722"
+            on_accept(r"\bS5\b[^\n]*?(\d+(?:[\.,]\d+)?)\s*O\.D\.", {"line": 4})
+
+    monkeypatch.setattr(marking_actions, "RegexBuilderPopup", _FakePopup)
+
+    markings.on_open_regex_builder()
+
+    assert markings.var_field_regex.get() == r"\bS5\b[^\n]*?(\d+(?:[\.,]\d+)?)\s*O\.D\."
+    assert markings.var_search_mode.get() == "line"
+    assert markings.var_search_line.get() == "4"
+    assert markings.var_search_after.get() == ""
+
+
+def test_field_preview_updates_pdf_panel_preview_when_present() -> None:
+    regex = _DummyRegex()
+
+    regex._set_field_preview_text("Treffer: 123", (9, 12))
+
+    assert regex.txt_field_preview.text == "Treffer: 123"
+    assert regex.txt_marking_regex_preview.text == "Treffer: 123"
+    assert regex.txt_field_preview.tags["hit"] == [("1.0+9c", "1.0+12c")]
+    assert regex.txt_marking_regex_preview.tags["hit"] == [("1.0+9c", "1.0+12c")]

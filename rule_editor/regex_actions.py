@@ -60,19 +60,23 @@ class RegexMixin:
             else:
                 self._set_hint("Kein Regex-Treffer.")
 
-    def _set_field_preview_text(self, text: str, span: tuple[int, int] | None = None) -> None:
-        if self.txt_field_preview is None:
+    def _write_preview_text(self, widget: tk.Text | None, text: str, span: tuple[int, int] | None = None) -> None:
+        if widget is None:
             return
-        self.txt_field_preview.configure(state="normal")
-        self.txt_field_preview.delete("1.0", tk.END)
-        self.txt_field_preview.insert(tk.END, text)
-        self.txt_field_preview.tag_remove("hit", "1.0", tk.END)
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        widget.insert(tk.END, text)
+        widget.tag_remove("hit", "1.0", tk.END)
         if span is not None:
             start_idx = f"1.0+{span[0]}c"
             end_idx = f"1.0+{span[1]}c"
-            self.txt_field_preview.tag_add("hit", start_idx, end_idx)
-            self.txt_field_preview.see(start_idx)
-        self.txt_field_preview.configure(state="disabled")
+            widget.tag_add("hit", start_idx, end_idx)
+            widget.see(start_idx)
+        widget.configure(state="disabled")
+
+    def _set_field_preview_text(self, text: str, span: tuple[int, int] | None = None) -> None:
+        self._write_preview_text(self.txt_field_preview, text, span)
+        self._write_preview_text(getattr(self, "txt_marking_regex_preview", None), text, span)
 
     def _build_regex_result_record(
         self,

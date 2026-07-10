@@ -8,9 +8,10 @@ from __future__ import annotations
 import re
 import tkinter as tk
 
-from src.rulesuite.api import locate_fields
+from src.rulesuite.api import locate_fields, suggest_regex_from_selection
 
 from .constants import FIELD_MARKING_COLORS as _FIELD_MARKING_COLORS
+from .regex_builder_popup import RegexBuilderPopup
 
 
 class MarkingsMixin:
@@ -99,41 +100,6 @@ class MarkingsMixin:
         except tk.TclError:
             return None
 
-    def _suggest_regex_from_line_selection(self, line_text: str, selected: str) -> str:
-        idx = line_text.find(selected)
-        if idx < 0:
-            if re.fullmatch(r"\d+", selected):
-                return rf"(\d+)"
-            if re.fullmatch(r"[\w.\-/]+", selected):
-                return r"(\S+)"
-            return re.escape(selected)
-
-        before = line_text[:idx]
-        after = line_text[idx + len(selected) :]
-
-        def _part(text: str) -> str:
-            if not text:
-                return ""
-            chunks = re.split(r"(\s+)", text)
-            out: list[str] = []
-            for chunk in chunks:
-                if not chunk:
-                    continue
-                if chunk.isspace():
-                    out.append(r"\s+")
-                else:
-                    out.append(re.escape(chunk))
-            return "".join(out)
-
-        if re.fullmatch(r"\d+", selected):
-            cap = r"(\d+)"
-        elif re.fullmatch(r"[\w.\-/]+", selected):
-            cap = r"(\S+)"
-        else:
-            cap = f"({re.escape(selected)})"
-
-        return _part(before) + cap + _part(after)
-
     def _on_block_selection_changed(self, _event: object = None) -> None:
         sel = self._get_block_selection()
         if sel is None:
@@ -149,9 +115,37 @@ class MarkingsMixin:
         if sel is None:
             self._set_hint("Bitte zuerst Text im Assay-Block markieren.")
             return
-        regex = self._suggest_regex_from_line_selection(str(sel["line_text"]), str(sel["text"]))
-        self.var_field_regex.set(regex)
-        self._set_hint("Regex-Vorschlag aus Auswahl übernommen. Feldname prüfen und speichern.")
+        result = suggest_regex_from_selection(
+            str(sel["line_text"]),
+            str(sel["text"]),
+            selection_start=int(sel["sel_start_in_line"]),
+            selection_end=int(sel["sel_end_in_line"]),
+        )
+        self.var_field_regex.set(str(result.get("regex", "")))
+        strategy = str(result.get("strategy") or "regex_suggest")
+        warnings = result.get("warnings") or []
+        suffix = f" ({strategy})"
+        if warnings:
+            suffix += f"; Hinweis: {', '.join(str(w) for w in warnings)}"
+        self._set_hint("Regex-Vorschlag aus Auswahl uebernommen. Feldname pruefen und speichern." + suffix)
+
+    def on_open_regex_builder(self) -> None:
+        selection = self._get_block_selection()
+
+        def _accept(regex: str, search_from: dict[str, object] | None) -> None:
+            self.var_field_regex.set(regex)
+            if search_from and "line" in search_from:
+                self.var_search_mode.set("line")
+                self.var_search_line.set(str(search_from.get("line", "")))
+                self.var_search_after.set("")
+            self._set_hint("Regex-Baustein uebernommen. Feldname pruefen und speichern.")
+
+        RegexBuilderPopup(
+            self,
+            assay_text=self.assay_block_text,
+            selection=selection,
+            on_accept=_accept,
+        )
 
     def on_marking_set_search_line(self) -> None:
         sel = self._get_block_selection()
