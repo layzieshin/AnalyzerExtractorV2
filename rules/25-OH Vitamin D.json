@@ -13,7 +13,7 @@
     },
     {
       "key": "test",
-      "regex": "Test:\\s*(.+)",
+      "regex": "Test:.*[\\\\/](.+?\\.asy)",
       "required": true
     },
     {
@@ -45,7 +45,7 @@
 
     {
       "key": "VALIDATION",
-      "regex": "^(Validationskriterien\\s+(?:nicht\\s+)?erfüllt)",
+      "regex": "(Validationskriterien\\s+(?:nicht\\s+)?erfüllt)",
       "required": false,
       "search_from": { "line": 0 }
     },
