@@ -53,7 +53,7 @@
       "date": "Datum",
       "test": "Test",
       "lot_id": "Lot",
-      "lot_expiry_date": "Lot_Haltbarkeit"
+      "lot_expiry_yymmdd": "Lot_Haltbarkeit"
     }
   }
 }

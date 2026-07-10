@@ -1,9 +1,10 @@
-QC:
+## Integritaet und aktiver Regelprozess
 
-* role_scope: OK
-* assumptions: NONE
-* rule_conflicts: NONE
-* action_allowed: YES
+- Aktive RuleSets werden ueber `rules/index.json` gesteuert.
+- `template.json` ist ein reines Authoring-Template und absichtlich **nicht** im aktiven Laufindex.
+- Integritaetscheck:
+  - `python rules_validate_main.py`
+  - validiert Index-Konsistenz, doppelte JSON-Keys und Orphans (mit Ausnahme von `template.json`).
 
 Alles klar. Wir reden hier vom **RuleSet JSON pro Assay** (z. B. `Anti-TPO IgG.json`). Ich erkläre dir jetzt:
 
