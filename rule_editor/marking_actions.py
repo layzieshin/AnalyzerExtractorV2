@@ -14,7 +14,18 @@ from .constants import FIELD_MARKING_COLORS as _FIELD_MARKING_COLORS
 
 
 class MarkingsMixin:
+    def _ensure_marking_state(self) -> None:
+        if not hasattr(self, "_field_marking_data"):
+            self._field_marking_data = {}
+        if not hasattr(self, "_field_marking_tags"):
+            self._field_marking_tags = set()
+        if not hasattr(self, "_visible_marking_keys"):
+            self._visible_marking_keys = set()
+        if not hasattr(self, "_active_marking_key"):
+            self._active_marking_key = None
+
     def _toggle_marking_panel(self) -> None:
+        self._ensure_marking_state()
         if self.frame_marking_panel is None or self.btn_toggle_markings is None:
             return
         if self._marking_panel_visible:
@@ -34,7 +45,8 @@ class MarkingsMixin:
     def _field_marking_tag(self, key: str) -> str:
         return f"field::{key}"
 
-    def _clear_field_markings(self) -> None:
+    def _clear_field_markings(self, *, clear_visibility: bool = True) -> None:
+        self._ensure_marking_state()
         for tag in list(self._field_marking_tags):
             self.txt_block.tag_remove(tag, "1.0", tk.END)
             self.txt_block.tag_unbind(tag, "<Button-1>")
@@ -42,6 +54,8 @@ class MarkingsMixin:
         self.txt_block.tag_remove("field_emphasis", "1.0", tk.END)
         self._field_marking_data.clear()
         self._active_marking_key = None
+        if clear_visibility:
+            self._visible_marking_keys.clear()
         if self.tree_marking_legend is not None:
             for row in self.tree_marking_legend.get_children():
                 self.tree_marking_legend.delete(row)
@@ -180,7 +194,25 @@ class MarkingsMixin:
                 self.tree_fields.see(item)
                 return
 
+    def _is_matched_marking(self, key: str) -> bool:
+        row = self._field_marking_data.get(key)
+        return bool(row and row.get("matched") and isinstance(row.get("span"), list) and len(row.get("span")) == 2)
+
+    def _scroll_to_marking(self, key: str) -> bool:
+        row = self._field_marking_data.get(key)
+        if not row:
+            return False
+        span = row.get("span")
+        if not (row.get("matched") and isinstance(span, list) and len(span) == 2):
+            return False
+        start_idx = f"1.0+{int(span[0])}c"
+        end_idx = f"1.0+{int(span[1])}c"
+        self.txt_block.tag_add("field_emphasis", start_idx, end_idx)
+        self.txt_block.see(start_idx)
+        return True
+
     def _emphasize_field_marking(self, key: str) -> None:
+        self._ensure_marking_state()
         self.txt_block.tag_remove("field_emphasis", "1.0", tk.END)
         self._active_marking_key = key
         tag = self._field_marking_tag(key)
@@ -188,6 +220,8 @@ class MarkingsMixin:
         if ranges:
             self.txt_block.tag_add("field_emphasis", ranges[0], ranges[1])
             self.txt_block.see(ranges[0])
+        else:
+            self._scroll_to_marking(key)
         if self.tree_marking_legend is not None:
             for item in self.tree_marking_legend.get_children():
                 if self.tree_marking_legend.item(item, "text") == key:
@@ -200,12 +234,14 @@ class MarkingsMixin:
                     break
 
     def on_marking_selected(self, key: str) -> None:
+        self._ensure_marking_state()
         if self._marking_sync_guard:
             return
         if key not in self._field_marking_data:
             return
         # Zustand bereits synchron -> nichts tun (bricht asynchrone Event-Ketten).
         if key == self._active_marking_key and self.var_field_key.get().strip() == key:
+            self._emphasize_field_marking(key)
             return
         self._marking_sync_guard = True
         try:
@@ -224,7 +260,96 @@ class MarkingsMixin:
         key = str(self.tree_marking_legend.item(sel[0], "text"))
         self.on_marking_selected(key)
 
+    def _legend_values_for_key(self, key: str, row: dict[str, object]) -> tuple[str, str, str]:
+        matched = bool(row.get("matched"))
+        value = str(row.get("value") or "").strip()
+        error = str(row.get("error") or "").strip()
+        visible = "AN" if key in self._visible_marking_keys and self._is_matched_marking(key) else "AUS"
+        if error:
+            return "FEHLER", visible, error
+        if matched:
+            return "TREFFER", visible, value if value else "(leer)"
+        return "KEIN TREFFER", "AUS", "-"
+
+    def _apply_marking_visibility(self) -> None:
+        self._ensure_marking_state()
+        valid_visible = {key for key in self._visible_marking_keys if self._is_matched_marking(key)}
+        self._visible_marking_keys = valid_visible
+
+        for tag in list(self._field_marking_tags):
+            self.txt_block.tag_remove(tag, "1.0", tk.END)
+            self.txt_block.tag_unbind(tag, "<Button-1>")
+
+        for key in sorted(self._visible_marking_keys):
+            row = self._field_marking_data.get(key)
+            if not row:
+                continue
+            span = row.get("span")
+            if not isinstance(span, list) or len(span) != 2:
+                continue
+            tag = self._field_marking_tag(key)
+            start_idx = f"1.0+{int(span[0])}c"
+            end_idx = f"1.0+{int(span[1])}c"
+            self.txt_block.tag_add(tag, start_idx, end_idx)
+            self.txt_block.tag_bind(tag, "<Button-1>", lambda _e, field_key=key: self.on_marking_selected(field_key))
+
+        if self.tree_marking_legend is not None:
+            for item in self.tree_marking_legend.get_children():
+                key = str(self.tree_marking_legend.item(item, "text"))
+                row = self._field_marking_data.get(key, {})
+                self.tree_marking_legend.item(item, values=self._legend_values_for_key(key, row))
+
+        if self._active_marking_key:
+            self._emphasize_field_marking(self._active_marking_key)
+
+    def _set_all_markings_visible(self, visible: bool) -> None:
+        self._ensure_marking_state()
+        self._visible_marking_keys = {key for key in self._field_marking_data if visible and self._is_matched_marking(key)}
+        self._apply_marking_visibility()
+        label = "eingeblendet" if visible else "ausgeblendet"
+        self._set_hint(f"Alle Treffer-Markierungen {label}.")
+
+    def _show_only_matched_markings(self) -> None:
+        self._set_all_markings_visible(True)
+        self._set_hint("Nur Treffer-Markierungen sind sichtbar.")
+
+    def _show_only_active_marking(self) -> None:
+        self._ensure_marking_state()
+        key = self._active_marking_key or self.var_field_key.get().strip()
+        if key and self._is_matched_marking(key):
+            self._visible_marking_keys = {key}
+            self._apply_marking_visibility()
+            self._set_hint(f"Nur '{key}' ist sichtbar.")
+            return
+        self._visible_marking_keys.clear()
+        self._apply_marking_visibility()
+        self._set_hint("Aktives Feld hat keine Fundstelle.")
+
+    def _toggle_selected_marking_visibility(self) -> None:
+        self._ensure_marking_state()
+        key = ""
+        if self.tree_marking_legend is not None:
+            sel = self.tree_marking_legend.selection()
+            if sel:
+                key = str(self.tree_marking_legend.item(sel[0], "text"))
+        if not key:
+            key = self.var_field_key.get().strip()
+        if not key:
+            self._set_hint("Bitte zuerst ein Feld auswaehlen.")
+            return
+        if not self._is_matched_marking(key):
+            self._set_hint(f"'{key}' hat keine sichtbare Fundstelle.")
+            return
+        if key in self._visible_marking_keys:
+            self._visible_marking_keys.remove(key)
+            self._set_hint(f"Markierung fuer '{key}' ausgeblendet.")
+        else:
+            self._visible_marking_keys.add(key)
+            self._set_hint(f"Markierung fuer '{key}' eingeblendet.")
+        self._apply_marking_visibility()
+
     def _render_field_markings(self) -> None:
+        self._ensure_marking_state()
         if not self._marking_panel_visible:
             return
         if not self.current_draft_path or not self.assay_block_text.strip():
@@ -244,11 +369,16 @@ class MarkingsMixin:
             self.var_marking_status.set(f"Markierungen fehlgeschlagen: {e}")
             return
 
-        self._clear_field_markings()
+        previous_visible = set(self._visible_marking_keys)
+        previous_keys = set(self._field_marking_data.keys())
+        active_key = self.var_field_key.get().strip() or self._active_marking_key
+
+        self._clear_field_markings(clear_visibility=False)
         results = out.get("results", [])
         if not isinstance(results, list):
             results = []
 
+        new_visible: set[str] = set()
         for idx, row in enumerate(results):
             if not isinstance(row, dict):
                 continue
@@ -262,19 +392,6 @@ class MarkingsMixin:
             self._field_marking_tags.add(tag)
             self._field_marking_data[key] = row
 
-            matched = bool(row.get("matched"))
-            value = str(row.get("value") or "").strip()
-            error = str(row.get("error") or "").strip()
-            if error:
-                status = "FEHLER"
-                display_value = error
-            elif matched:
-                status = "TREFFER"
-                display_value = value if value else "(leer)"
-            else:
-                status = "KEIN TREFFER"
-                display_value = "-"
-
             legend_tag = f"legend_{idx}"
             if self.tree_marking_legend is not None:
                 self.tree_marking_legend.tag_configure(legend_tag, background=color)
@@ -282,22 +399,24 @@ class MarkingsMixin:
                     "",
                     tk.END,
                     text=key,
-                    values=(status, display_value),
+                    values=self._legend_values_for_key(key, row),
                     tags=(legend_tag,),
                 )
 
-            span = row.get("span")
-            if matched and isinstance(span, list) and len(span) == 2:
-                start_idx = f"1.0+{int(span[0])}c"
-                end_idx = f"1.0+{int(span[1])}c"
-                self.txt_block.tag_add(tag, start_idx, end_idx)
-                self.txt_block.tag_bind(tag, "<Button-1>", lambda _e, field_key=key: self.on_marking_selected(field_key))
+            if self._is_matched_marking(key):
+                if key in previous_keys:
+                    if key in previous_visible:
+                        new_visible.add(key)
+                else:
+                    new_visible.add(key)
 
         hits = int(out.get("hits", 0))
         total = int(out.get("total_fields", 0))
         self.var_marking_status.set(f"{hits} von {total} Feldern gefunden.")
+        self._visible_marking_keys = new_visible
+        self._active_marking_key = active_key or None
+        self._apply_marking_visibility()
 
-        active_key = self.var_field_key.get().strip()
         if active_key and active_key in self._field_marking_data:
             self._emphasize_field_marking(active_key)
         if active_key:

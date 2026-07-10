@@ -180,21 +180,38 @@ class UiBuilderMixin:
         self.txt_block.tag_config("field_emphasis", background="#ffd000")
         self.txt_block.bind("<<Selection>>", self._on_block_selection_changed)
 
-        self.frame_marking_panel = tk.Frame(split, width=380)
+        self.frame_marking_panel = tk.Frame(split, width=430)
         self.frame_marking_panel.pack(side="right", fill="y", padx=(8, 0))
         self.frame_marking_panel.pack_propagate(False)
 
-        panel_ctrl = tk.Frame(self.frame_marking_panel)
-        panel_ctrl.pack(fill="x", pady=(0, 6))
-        tk.Button(panel_ctrl, text="Markierungen aktualisieren", command=self._render_field_markings).pack(side="left")
+        marking_frame = tk.LabelFrame(self.frame_marking_panel, text="Markierungen")
+        marking_frame.pack(fill="x", pady=(0, 6))
+        marking_row_1 = tk.Frame(marking_frame)
+        marking_row_1.pack(fill="x", padx=6, pady=(6, 3))
+        tk.Button(marking_row_1, text="Aktualisieren", command=self._render_field_markings).pack(side="left")
+        tk.Button(marking_row_1, text="Alle anzeigen", command=lambda: self._set_all_markings_visible(True)).pack(
+            side="left", padx=(6, 0)
+        )
+        tk.Button(marking_row_1, text="Alle ausblenden", command=lambda: self._set_all_markings_visible(False)).pack(
+            side="left", padx=(6, 0)
+        )
+        marking_row_2 = tk.Frame(marking_frame)
+        marking_row_2.pack(fill="x", padx=6, pady=(0, 6))
+        tk.Button(marking_row_2, text="Nur Treffer", command=self._show_only_matched_markings).pack(side="left")
+        tk.Button(marking_row_2, text="Nur aktives Feld", command=self._show_only_active_marking).pack(
+            side="left", padx=(6, 0)
+        )
+        tk.Button(marking_row_2, text="Feld AN/AUS", command=self._toggle_selected_marking_visibility).pack(
+            side="left", padx=(6, 0)
+        )
         tk.Label(
-            self.frame_marking_panel,
+            marking_frame,
             textvariable=self.var_marking_status,
             anchor="w",
             justify="left",
-            wraplength=360,
+            wraplength=400,
             fg="#444",
-        ).pack(fill="x", pady=(0, 6))
+        ).pack(fill="x", padx=6, pady=(0, 6))
 
         selection_frame = tk.LabelFrame(self.frame_marking_panel, text="Textauswahl")
         selection_frame.pack(fill="x", pady=(0, 6))
@@ -206,30 +223,36 @@ class UiBuilderMixin:
             wraplength=350,
             fg="#333",
         ).pack(fill="x", padx=6, pady=(6, 4))
-        sel_btn_row = tk.Frame(selection_frame)
-        sel_btn_row.pack(fill="x", padx=6, pady=(0, 6))
-        tk.Button(sel_btn_row, text="Regex aus Auswahl", command=self.on_marking_regex_from_selection).pack(side="left")
-        tk.Button(sel_btn_row, text="Suche ab: Zeile", command=self.on_marking_set_search_line).pack(side="left", padx=(6, 0))
+        sel_btn_row_1 = tk.Frame(selection_frame)
+        sel_btn_row_1.pack(fill="x", padx=6, pady=(0, 3))
+        tk.Button(sel_btn_row_1, text="Regex aus Auswahl", command=self.on_marking_regex_from_selection).pack(side="left")
+        tk.Button(sel_btn_row_1, text="Suche ab: Zeile", command=self.on_marking_set_search_line).pack(
+            side="left", padx=(6, 0)
+        )
+        sel_btn_row_2 = tk.Frame(selection_frame)
+        sel_btn_row_2.pack(fill="x", padx=6, pady=(0, 6))
         tk.Button(
-            sel_btn_row,
+            sel_btn_row_2,
             text="Suche ab: Zeile davor",
             command=self.on_marking_set_search_after_prev_line,
-        ).pack(side="left", padx=(6, 0))
+        ).pack(side="left")
 
         legend_frame = tk.LabelFrame(self.frame_marking_panel, text="Felder und Treffer")
         legend_frame.pack(fill="both", expand=True, pady=(0, 6))
         self.tree_marking_legend = ttk.Treeview(
             legend_frame,
-            columns=("status", "value"),
+            columns=("status", "visible", "value"),
             show="tree headings",
-            height=10,
+            height=14,
         )
         self.tree_marking_legend.heading("#0", text="Feld")
         self.tree_marking_legend.heading("status", text="Status")
+        self.tree_marking_legend.heading("visible", text="Sichtbar")
         self.tree_marking_legend.heading("value", text="Ergebnis")
         self.tree_marking_legend.column("#0", width=120, anchor="w")
-        self.tree_marking_legend.column("status", width=80, anchor="center")
-        self.tree_marking_legend.column("value", width=140, anchor="w")
+        self.tree_marking_legend.column("status", width=82, anchor="center")
+        self.tree_marking_legend.column("visible", width=58, anchor="center")
+        self.tree_marking_legend.column("value", width=145, anchor="w")
         self.tree_marking_legend.pack(fill="both", expand=True, padx=6, pady=6)
         self.tree_marking_legend.bind("<<TreeviewSelect>>", self.on_marking_legend_selected)
 
@@ -265,8 +288,8 @@ class UiBuilderMixin:
         tk.Entry(sf_row, textvariable=self.var_search_line, width=6).pack(side="left", padx=(4, 0))
         param_frame.columnconfigure(1, weight=1)
 
-        action_frame = tk.Frame(self.frame_marking_panel)
-        action_frame.pack(fill="x")
+        action_frame = tk.Frame(param_frame)
+        action_frame.grid(row=4, column=0, columnspan=3, sticky="we", padx=6, pady=(0, 6))
         tk.Button(action_frame, text="Neues Feld anlegen", command=self.on_add_field).pack(side="left")
         tk.Button(action_frame, text="Feld übernehmen", command=self.on_apply_field).pack(side="left", padx=(6, 0))
         tk.Button(action_frame, text="Formular leeren", command=self._reset_field_form).pack(side="left", padx=(6, 0))
