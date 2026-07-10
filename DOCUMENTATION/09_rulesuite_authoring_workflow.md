@@ -16,18 +16,16 @@ Dieses Dokument beschreibt den aktuellen Workflow fuer die Regelerstellung.
 ## Gefuehrter Anlage-Wizard (Neues Regelset)
 - Start ueber den Button `Neues Regelset (gefuehrt)...` in der Kachel `Regelset-Verwaltung` (Tab `Draft`).
 - Eigenes modales Fenster mit 5 Schritten (Zurueck/Weiter/Abbrechen):
-  1. Grunddaten: `assay_key` + `assay_name`; Wahl zwischen
-     - "Aehnlich wie ein bestehendes Regelset" (alle Regeln der Vorlage werden uebernommen) oder
-     - "Von Grund auf neu" (sechs Pflicht-Headerfelder aus `rules/template.json`: `DATUM`, `ZEIT`, `ANWENDER`, `PLATTE`, `CHARGE`, `VALIDATION` + `lot_rule` und passende `column_mapping`-Eintraege; jeweils `required: true`).
-       Fehlende Pflichtfelder im Template werden im Draft mit leerer Regex angelegt — Regex-Inhalte pflegt der Chef manuell.
-       Optionale Header wie `Haltbarkeit` und `FILE_NAME` gehoeren nicht mehr zur Pflichtbasis.
+  1. Grunddaten: `assay_key` + `assay_name`; zwei Modi:
+     - **Aehnlich wie Vorlage** (Default): Sechs Pflicht-Header aus dem gewaehlten Quell-Regelset (canonical keys, Legacy-Alias-Aufloesung); weitere Felder des Quell-Regelsets erscheinen als **Kandidaten**.
+     - **Von Grund auf neu**: Sechs Pflicht-Header aus `rules/template.json`; Zusatzfelder aus `template.json` als **Kandidaten**.
+     Kandidaten sind sichtbar und testbar, werden aber erst nach manueller Uebernahme in `extract_rules.fields` geschrieben.
+     `derive_draft()` (Vollklon) bleibt nur fuer Editor/CLI verfuegbar — **nicht** im Wizard.
   2. Beispiel-PDF waehlen und Text laden (mit Volltext-Fallback, wenn der Assay-Block nicht getrennt werden kann).
-     Danach erscheint eine Pflichtfeld-Checkliste (Treffer / Regex fehlt / kein Treffer / Fehler).
-  3. Pflichtfelder bestaetigen (Focus Mode): Feld waehlen, Regex manuell pflegen, Treffer im Text pruefen;
-     Buttons `Pflichtfeld pruefen`, `Passt - weiter`, `Erneut testen`, `Suche ab Cursor-Zeile`, `Suche ab vorheriger Zeile`.
-     Pflichtfelder koennen nicht entfernt werden. Direkte Aktivierung bleibt blockiert, solange nicht alle Pflichtfelder Treffer haben.
-  4. Eigene Felder hinzufuegen (optional): Regex-Test mit Treffer-Markierung + Zugriff auf die Regex-Bibliothek.
-  5. Abschluss: Zusammenfassung + Validierung + Pflichtfeld-Status; Draft im Editor oeffnen (empfohlen) oder direkt aktivieren (nur bei vollstaendigen Pflichtfeld-Treffern).
+     Danach Pflichtfeld-Checkliste und Kandidaten-Vorschau (Treffer / Regex fehlt / kein Treffer / Fehler).
+  3. Pflichtfelder bestaetigen (Focus Mode): Regex manuell pflegen, Treffer pruefen; Pflichtfelder koennen nicht entfernt werden.
+  4. Kandidaten aus Vorlage (Testen / Uebernehmen / Verwerfen, session-only) plus eigene Felder (optional).
+  5. Abschluss: Zusammenfassung + Validierung + Pflichtfeld-Status; Draft im Editor oeffnen oder direkt aktivieren.
 - Abbruch laesst den bisherigen Stand als Draft unter `rules/drafts/` liegen.
 
 ## Pflichtfeld-Vertrag (neue Assays)
@@ -45,9 +43,29 @@ Sechs Header-Pflichtfelder fuer "von Grund auf neu":
 
 API:
 
-- Konstante: `REQUIRED_HEADER_FIELD_KEYS` in `src/rulesuite/api.py`
-- Draft aus Template: `create_draft_from_template()` — garantiert alle sechs Felder (`required: true`); fehlende Template-Eintraege werden mit leerer Regex angelegt
+- Konstante: `REQUIRED_HEADER_FIELD_KEYS`, `LEGACY_HEADER_ALIASES` in `src/rulesuite/api.py`
+- Draft aus Template: `create_draft_from_template()` — guided Modus „Von Grund auf“
+- Draft aus Ruleset: `create_draft_from_ruleset()` — guided Modus „Aehnlich wie Vorlage“ (Header-Normalisierung)
+- Kandidaten: `read_candidate_fields()`, `check_candidates()`, `adopt_candidate_field()`
 - Struktureller Check: `check_required_fields(draft_path, assay_text)` — nutzt `locate_fields`, erzeugt keine Regex-Inhalte
+- Vollklon (nur Editor/CLI): `derive_draft()` — nicht im Wizard
+
+### Legacy-Header-Alias (Modus „Aehnlich wie Vorlage“)
+
+| Legacy-Key | Canonical |
+|---|---|
+| `date` | `DATUM` |
+| `time` | `ZEIT` |
+| `user` | `ANWENDER` |
+| `plate_name` | `PLATTE` |
+| `lot_id` | `CHARGE` |
+
+Canonical keys in der Quelle haben Vorrang. Regex/`search_from` werden unveraendert unter dem canonical key gespeichert. Legacy-Header erscheinen nicht als Kandidaten. `VALIDATION` hat keinen Legacy-Alias.
+
+### Terminologie: search_hint vs. search_from
+
+- **search_hint / Suchbegriff**: Authoring-Hilfe im Wizard (session-only), nicht in `extract_rules.fields`.
+- **search_from**: Technischer Suchstart, Teil der Extraktionslogik; wird beim Uebernehmen persistiert.
 
 Status pro Pflichtfeld:
 
@@ -59,9 +77,9 @@ Status pro Pflichtfeld:
 | `error` | Regex oder `search_from` fehlerhaft |
 | `missing_field` | Pflichtfeld fehlt im Draft (sollte nach Template-Draft nicht vorkommen) |
 
-Zeilennummern dienen nur als Orientierung und `search_from`-Hilfe (`{"line": N}` oder `{"after": "..."}`), nicht als Primaervertrag.
+Zeilennummern dienen als Orientierung fuer `search_from` (`{"line": N}` oder `{"after": "..."}`) in der Extraktionslogik.
 
-Siehe auch: `docs/AP2_ACCEPTANCE.md` (Abgrenzung zu pre-existing `rules/`-Diffs im Worktree).
+Siehe auch: `docs/AP2_ACCEPTANCE.md`, `docs/AP3_ACCEPTANCE.md`.
 
 ## Regex-Bibliothek
 - Popup mit gaengigen Regex-Bausteinen und Mini-Erklaerung in einfachem Deutsch.

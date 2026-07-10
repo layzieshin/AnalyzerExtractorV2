@@ -7,10 +7,13 @@ from src.rulesuite.api import (
     activate_draft,
     activate_new_draft,
     add_field,
+    adopt_candidate_field,
     batch_check_fields,
+    check_candidates,
     check_required_fields,
     create_blank_draft,
     create_draft,
+    create_draft_from_ruleset,
     create_draft_from_template,
     delete_ruleset,
     diff_draft_vs_active,
@@ -21,6 +24,7 @@ from src.rulesuite.api import (
     load_draft,
     locate_fields,
     move_field,
+    read_candidate_fields,
     remove_field,
     rename_field,
     REQUIRED_HEADER_FIELD_KEYS,
@@ -32,6 +36,7 @@ from src.rulesuite.api import (
     update_field,
     validate_draft,
 )
+from src.rulesuite.header_aliases import LEGACY_HEADER_ALIAS_KEYS, resolve_required_headers_from_source
 from src.ruleresolver.api import resolve_ruleset, validate_rules_integrity
 from src.ruleresolver.ruleresolver import RuleResolverError
 from src.rulesuite.rulesuite import RuleSuiteError
@@ -552,3 +557,147 @@ def test_resolve_ruleset_rejects_invalid_search_from_marker_regex(tmp_path: Path
 
     with pytest.raises(RuleResolverError, match="search_from.after invalid"):
         resolve_ruleset("(1111)", str(root / "rules"), str(root / "rules" / "index.json"))
+
+
+def _write_legacy_source_ruleset(root: Path) -> None:
+    ruleset = {
+        "assay_name": "Legacy Source",
+        "assay_key": "(1111)",
+        "lot_rule": {"regex": r"Kit\s+(\S+)\s+\d{6}"},
+        "extract_rules": {
+            "fields": [
+                {"key": "plate_name", "regex": r"Plattenname:\s*(.+?)\s+Zeit:", "required": True},
+                {"key": "date", "regex": r"Datum:\s*(\d{2}\.\d{2}\.\d{4})", "required": True},
+                {"key": "time", "regex": r"Zeit:\s*(\d{2}:\d{2}:\d{2})", "required": True},
+                {"key": "user", "regex": r"Anwender:\s*([^\s]+)", "required": True},
+                {"key": "lot_id", "regex": r"Kit\s+(E[0-9A-Za-z]+)\s+\d{6}", "required": True},
+                {"key": "test", "regex": r"Test:\s*(.+)", "required": False},
+                {"key": "lot_expiry_yymmdd", "regex": r"Kit\s+E[0-9A-Za-z]+\s+(\d{6})", "required": False},
+            ],
+            "dedupe_fields": ["test"],
+        },
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {
+                "plate_name": "Plattenname",
+                "date": "Datum",
+                "time": "Zeit",
+                "user": "Anwender",
+                "lot_id": "CHARGE",
+                "test": "TEST",
+                "lot_expiry_yymmdd": "Haltbarkeit",
+            },
+        },
+    }
+    (root / "rules" / "AssayA.json").write_text(json.dumps(ruleset), encoding="utf-8")
+
+
+def test_resolve_required_headers_maps_legacy_keys_to_canonical() -> None:
+    fields = [
+        {"key": "date", "regex": r"Datum:\s*(\d+)", "required": False},
+        {"key": "time", "regex": r"Zeit:\s*(\d+)", "required": False},
+    ]
+    col = {"date": "Datum", "time": "Zeit"}
+    out = resolve_required_headers_from_source(fields, col)
+    by_key = {f["key"]: f for f in out["fields"]}
+    assert by_key["DATUM"]["regex"] == r"Datum:\s*(\d+)"
+    assert by_key["ZEIT"]["regex"] == r"Zeit:\s*(\d+)"
+    assert by_key["VALIDATION"]["regex"] == ""
+    assert out["column_mapping"]["DATUM"] == "Datum"
+
+
+def test_create_draft_from_ruleset_normalizes_legacy_headers(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_legacy_source_ruleset(root)
+
+    draft = create_draft_from_ruleset(str(root), "(1111)", "(9102)", "Similar Assay")
+    data = load_draft(draft)
+
+    keys = [f["key"] for f in data["extract_rules"]["fields"]]
+    assert keys == list(REQUIRED_HEADER_FIELD_KEYS)
+    assert "date" not in keys
+    assert "plate_name" not in keys
+
+    by_key = {f["key"]: f for f in data["extract_rules"]["fields"]}
+    assert by_key["DATUM"]["regex"] == r"Datum:\s*(\d{2}\.\d{2}\.\d{4})"
+    assert by_key["CHARGE"]["regex"] == r"Kit\s+(E[0-9A-Za-z]+)\s+\d{6}"
+    assert by_key["PLATTE"]["regex"] == r"Plattenname:\s*(.+?)\s+Zeit:"
+    assert data["excel_rules"]["column_mapping"]["DATUM"] == "Datum"
+    assert data["excel_rules"]["column_mapping"]["CHARGE"] == "CHARGE"
+    assert data["extract_rules"]["dedupe_fields"] == []
+
+
+def test_read_candidate_fields_excludes_headers_and_legacy_aliases(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    _write_legacy_source_ruleset(root)
+
+    template_cands = read_candidate_fields(str(root), source="template")
+    template_keys = {f["key"] for f in template_cands["fields"]}
+    assert "Haltbarkeit" in template_keys
+    assert "PCQ1" in template_keys
+    assert "DATUM" not in template_keys
+
+    ruleset_cands = read_candidate_fields(str(root), source_assay_key="(1111)")
+    ruleset_keys = {f["key"] for f in ruleset_cands["fields"]}
+    assert "test" in ruleset_keys
+    assert "lot_expiry_yymmdd" in ruleset_keys
+    assert "date" not in ruleset_keys
+    assert LEGACY_HEADER_ALIAS_KEYS.isdisjoint(ruleset_keys)
+
+
+def test_check_and_adopt_candidate_field(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    draft = create_draft_from_template(str(root), "(9103)", "Blank Assay")
+    source = {"source": "template"}
+
+    report = check_candidates(str(root), "PCQ1 42", draft, source)
+    by_key = {row["key"]: row for row in report["results"]}
+    assert by_key["PCQ1"]["status"] == "confirmed"
+
+    adopt_candidate_field(
+        str(root),
+        draft,
+        "PCQ1",
+        source,
+        required=True,
+        search_from_set=False,
+    )
+    data = load_draft(draft)
+    keys = [f["key"] for f in data["extract_rules"]["fields"]]
+    assert "PCQ1" in keys
+    pcq = next(f for f in data["extract_rules"]["fields"] if f["key"] == "PCQ1")
+    assert pcq["required"] is True
+    assert pcq["regex"] == r"PCQ1\s+(\d+)"
+    assert data["excel_rules"]["column_mapping"]["PCQ1"] == "PCQ1"
+
+    report2 = check_candidates(str(root), "PCQ1 42", draft, source)
+    assert all(row["key"] != "PCQ1" for row in report2["results"])
+
+    with pytest.raises(RuleSuiteError, match="field_exists"):
+        adopt_candidate_field(str(root), draft, "PCQ1", source)
+
+
+def test_adopt_candidate_field_allows_form_overrides(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    draft = create_draft_from_template(str(root), "(9104)", "Override Assay")
+    source = {"source": "template"}
+
+    adopt_candidate_field(
+        str(root),
+        draft,
+        "Haltbarkeit",
+        source,
+        regex=r"Haltbarkeit:\s*(\d+)",
+        required=True,
+        search_from={"line": 3},
+        search_from_set=True,
+    )
+    data = load_draft(draft)
+    field = next(f for f in data["extract_rules"]["fields"] if f["key"] == "Haltbarkeit")
+    assert field["regex"] == r"Haltbarkeit:\s*(\d+)"
+    assert field["required"] is True
+    assert field["search_from"] == {"line": 3}

@@ -6,21 +6,23 @@ from tkinter import ttk
 
 from .regex_library import RegexLibraryPopup
 
-_STEPS = ["basis", "pdf", "confirm", "custom", "finish"]
-_STEP_TITLES = {
-    "basis": "Schritt 1 von 5: Grunddaten",
-    "pdf": "Schritt 2 von 5: Beispiel-PDF laden",
-    "confirm": "Schritt 3 von 5: Pflichtfelder bestaetigen",
-    "custom": "Schritt 4 von 5: Eigene Felder hinzufuegen (optional)",
-    "finish": "Schritt 5 von 5: Abschluss",
-}
-
 _REQUIRED_STATUS_LABELS = {
     "confirmed": "Treffer",
     "missing_regex": "Regex fehlt",
     "miss": "Kein Treffer",
     "error": "Fehler",
     "missing_field": "Feld fehlt",
+}
+
+_CANDIDATE_STATUS_LABELS = _REQUIRED_STATUS_LABELS
+
+_STEPS = ["basis", "pdf", "confirm", "custom", "finish"]
+_STEP_TITLES = {
+    "basis": "Schritt 1 von 5: Grunddaten",
+    "pdf": "Schritt 2 von 5: Beispiel-PDF laden",
+    "confirm": "Schritt 3 von 5: Pflichtfelder bestaetigen",
+    "custom": "Schritt 4 von 5: Kandidaten und eigene Felder (optional)",
+    "finish": "Schritt 5 von 5: Abschluss",
 }
 
 
@@ -73,9 +75,9 @@ class WizardUiMixin:
 
         tk.Radiobutton(
             form,
-            text="Aehnlich wie ein bestehendes Regelset (alle Regeln werden als Vorlage uebernommen)",
+            text="Aehnlich wie Vorlage (Pflicht-Header aus Quell-Regelset; weitere Felder als Kandidaten)",
             variable=self.var_mode,
-            value="derive",
+            value="similar",
         ).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(8, 2))
         src_row = tk.Frame(form)
         src_row.grid(row=2, column=0, columnspan=4, sticky="w", padx=(28, 6))
@@ -93,7 +95,7 @@ class WizardUiMixin:
 
         tk.Radiobutton(
             form,
-            text="Von Grund auf neu (nur die sechs Pflicht-Headerfelder aus template.json werden uebernommen)",
+            text="Von Grund auf neu (Pflicht-Header aus template.json; Zusatzfelder als Kandidaten)",
             variable=self.var_mode,
             value="blank",
         ).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(6, 8))
@@ -136,6 +138,13 @@ class WizardUiMixin:
         self.list_required.pack(fill="x", padx=6, pady=(0, 8))
         self.list_required.bind("<<ListboxSelect>>", self._on_required_field_selected)
 
+        cand = tk.LabelFrame(card, text="Kandidaten (Vorschau)")
+        cand.pack(fill="x", pady=(8, 0))
+        self.lbl_candidates_summary = tk.Label(cand, text="", anchor="w", fg="#444", wraplength=1000)
+        self.lbl_candidates_summary.pack(fill="x", padx=6, pady=(8, 4))
+        self.list_candidates_preview = tk.Listbox(cand, height=4, exportselection=False)
+        self.list_candidates_preview.pack(fill="x", padx=6, pady=(0, 8))
+
     def _build_confirm_card(self, card: tk.Frame) -> None:
         form = tk.LabelFrame(card, text="Pflichtfeld pruefen")
         form.pack(fill="x")
@@ -176,8 +185,26 @@ class WizardUiMixin:
         ).pack(side="right")
 
     def _build_custom_card(self, card: tk.Frame) -> None:
+        cand = tk.LabelFrame(card, text="Kandidaten aus Vorlage")
+        cand.pack(fill="x")
+        tk.Label(
+            cand,
+            textvariable=self.var_candidates_summary,
+            anchor="w",
+            fg="#444",
+            wraplength=1000,
+        ).pack(fill="x", padx=6, pady=(8, 4))
+        self.list_candidates = tk.Listbox(cand, height=5, exportselection=False)
+        self.list_candidates.pack(fill="x", padx=6, pady=(0, 4))
+        self.list_candidates.bind("<<ListboxSelect>>", self._on_candidate_selected)
+        cand_btns = tk.Frame(cand)
+        cand_btns.pack(fill="x", padx=6, pady=(0, 8))
+        tk.Button(cand_btns, text="Kandidat testen", command=self._on_test_candidate).pack(side="left")
+        tk.Button(cand_btns, text="Kandidat uebernehmen", command=self._on_adopt_candidate).pack(side="left", padx=(6, 0))
+        tk.Button(cand_btns, text="Verwerfen", command=self._on_dismiss_candidate).pack(side="left", padx=(6, 0))
+
         form = tk.LabelFrame(card, text="Eigenes Feld anlegen (optional)")
-        form.pack(fill="x")
+        form.pack(fill="x", pady=(8, 0))
         head = tk.Frame(form)
         head.pack(fill="x", padx=6, pady=(8, 2))
         tk.Label(head, textvariable=self.var_custom_count, fg="#444").pack(side="left")

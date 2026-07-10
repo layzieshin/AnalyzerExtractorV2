@@ -5,17 +5,23 @@ from typing import Any, Dict, List
 from .rulesuite import RuleSuite
 from .templates import HEADER_FIELD_KEYS, REQUIRED_HEADER_FIELD_KEYS
 from .required_fields import check_required_fields as _check_required_fields
+from .header_aliases import LEGACY_HEADER_ALIASES, LEGACY_HEADER_ALIAS_KEYS
 
 __all__ = [
     "HEADER_FIELD_KEYS",
+    "LEGACY_HEADER_ALIASES",
+    "LEGACY_HEADER_ALIAS_KEYS",
     "REQUIRED_HEADER_FIELD_KEYS",
     "activate_draft",
     "activate_new_draft",
     "add_field",
+    "adopt_candidate_field",
     "batch_check_fields",
+    "check_candidates",
     "check_required_fields",
     "create_blank_draft",
     "create_draft",
+    "create_draft_from_ruleset",
     "create_draft_from_template",
     "delete_ruleset",
     "derive_draft",
@@ -25,6 +31,7 @@ __all__ = [
     "list_rulesets",
     "load_draft",
     "locate_fields",
+    "read_candidate_fields",
     "move_field",
     "preview_extract",
     "remove_field",
@@ -185,6 +192,77 @@ def create_draft_from_template(project_root: str, assay_key: str, assay_name: st
     from .templates import create_draft_from_template as _impl
 
     return str(_impl(project_root, assay_key, assay_name))
+
+
+def create_draft_from_ruleset(
+    project_root: str,
+    source_assay_key: str,
+    new_assay_key: str,
+    new_assay_name: str,
+) -> str:
+    from .candidates import create_draft_from_ruleset as _impl
+
+    return str(_impl(project_root, source_assay_key, new_assay_key, new_assay_name))
+
+
+def read_candidate_fields(
+    project_root: str,
+    *,
+    source: str | None = None,
+    source_assay_key: str | None = None,
+) -> Dict[str, Any]:
+    from .candidates import read_candidate_fields as _impl
+
+    return _impl(project_root, source=source, source_assay_key=source_assay_key)
+
+
+def check_candidates(
+    project_root: str,
+    assay_text: str,
+    draft_path: str,
+    candidate_source: Dict[str, Any],
+    *,
+    dismissed_keys: tuple[str, ...] | list[str] = (),
+    group: int = 1,
+) -> Dict[str, Any]:
+    from .candidates import check_candidates as _impl
+
+    return _impl(
+        project_root,
+        assay_text,
+        draft_path,
+        candidate_source,
+        dismissed_keys=dismissed_keys,
+        group=group,
+    )
+
+
+def adopt_candidate_field(
+    project_root: str,
+    draft_path: str,
+    field_key: str,
+    candidate_source: Dict[str, Any],
+    *,
+    regex: str | None = None,
+    required: bool | None = None,
+    search_from: Dict[str, Any] | None = None,
+    search_from_set: bool = False,
+) -> str:
+    from .candidates import _SEARCH_FROM_UNSET
+    from .candidates import adopt_candidate_field as _impl
+
+    sf = search_from if search_from_set else _SEARCH_FROM_UNSET
+    return str(
+        _impl(
+            project_root,
+            draft_path,
+            field_key,
+            candidate_source,
+            regex=regex,
+            required=required,
+            search_from=sf,  # type: ignore[arg-type]
+        )
+    )
 
 
 def list_rulesets(project_root: str) -> List[Dict[str, Any]]:

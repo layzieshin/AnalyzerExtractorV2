@@ -7,7 +7,20 @@ from src.extractor.api import AssayRecord, ExtractionError
 from src.jobcontroller.api import JobResult, submit
 from src.jobqueue.api import QueueJob, claim_next_job, list_jobs, mark_job_done, mark_job_failed, mark_job_pending, recover_stale_jobs
 from src.ruleresolver.api import RuleResolverError, RuleSet, resolve_ruleset, validate_rules_integrity
-from src.rulesuite.api import HEADER_FIELD_KEYS, REQUIRED_HEADER_FIELD_KEYS, check_required_fields, create_draft, create_draft_from_template, list_rulesets, preview_extract
+from src.rulesuite.api import (
+    HEADER_FIELD_KEYS,
+    LEGACY_HEADER_ALIASES,
+    REQUIRED_HEADER_FIELD_KEYS,
+    adopt_candidate_field,
+    check_candidates,
+    check_required_fields,
+    create_draft,
+    create_draft_from_ruleset,
+    create_draft_from_template,
+    list_rulesets,
+    preview_extract,
+    read_candidate_fields,
+)
 from src.runtime.api import (
     RuntimeConfig,
     is_stale_lock,
@@ -42,6 +55,11 @@ def test_public_embedding_imports_are_available() -> None:
     assert REQUIRED_HEADER_FIELD_KEYS
     assert check_required_fields is not None
     assert create_draft_from_template is not None
+    assert create_draft_from_ruleset is not None
+    assert read_candidate_fields is not None
+    assert check_candidates is not None
+    assert adopt_candidate_field is not None
+    assert LEGACY_HEADER_ALIASES["date"] == "DATUM"
 
 
 def test_public_embedding_types_are_exported() -> None:

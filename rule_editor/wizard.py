@@ -1,14 +1,11 @@
 """Gefuehrter Anlage-Wizard fuer neue Regelsets.
 
 Eigenes modales Fenster mit festen Schritten:
-1. Basis (assay_key/assay_name, aehnlich-wie-Vorlage oder nur Header-Regeln)
-2. Beispiel-PDF laden
-3. Feld fuer Feld bestaetigen (Treffer im Text markiert)
-4. Eigene Felder hinzufuegen (mit Regex-Test und Regex-Bibliothek)
-5. Abschluss (validieren, im Editor oeffnen oder direkt aktivieren)
-
-Der Wizard erzeugt einen normalen Draft und schreibt ausschliesslich ueber die
-RuleSuite-API; Abbruch laesst den Draft als Entwurf liegen.
+1. Basis (assay_key/assay_name, aehnlich-wie-Vorlage oder von Grund auf)
+2. Beispiel-PDF laden (+ Kandidaten-Vorschau)
+3. Pflichtfelder bestaetigen (Focus Mode)
+4. Kandidaten uebernehmen + eigene Felder (optional)
+5. Abschluss
 """
 from __future__ import annotations
 
@@ -18,22 +15,23 @@ from typing import Callable
 from tkinter import filedialog, messagebox
 
 from src.rulesuite.api import (
-    HEADER_FIELD_KEYS,
     REQUIRED_HEADER_FIELD_KEYS,
     add_field,
+    adopt_candidate_field,
+    check_candidates,
     check_required_fields,
+    create_draft_from_ruleset,
     create_draft_from_template,
-    derive_draft,
     get_assay_text,
     load_draft,
     locate_fields,
-    remove_field,
+    read_candidate_fields,
     test_regex,
     update_field,
     validate_draft,
 )
 
-from .wizard_ui import _REQUIRED_STATUS_LABELS, _STEP_TITLES, _STEPS, WizardUiMixin
+from .wizard_ui import _CANDIDATE_STATUS_LABELS, _REQUIRED_STATUS_LABELS, _STEP_TITLES, _STEPS, WizardUiMixin
 
 
 class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
@@ -63,18 +61,23 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self._fields: list[dict] = []
         self._field_idx = 0
         self._busy = False
-        self._template_mode = False
         self._required_check: dict | None = None
+        self._candidate_source: dict = {"source": "template"}
+        self._dismissed_candidates: set[str] = set()
+        self._candidate_check: dict | None = None
+        self._selected_candidate_key: str | None = None
+        self._candidate_fields_by_key: dict[str, dict] = {}
 
         self.var_key = tk.StringVar(value="")
         self.var_name = tk.StringVar(value="")
-        self.var_mode = tk.StringVar(value="derive")
+        self.var_mode = tk.StringVar(value="similar")
         self.var_source = tk.StringVar(value="")
         self.var_pdf = tk.StringVar(value="")
         self.var_status = tk.StringVar(value="")
         self.var_match = tk.StringVar(value="")
         self.var_progress = tk.StringVar(value="")
         self.var_custom_count = tk.StringVar(value="")
+        self.var_candidates_summary = tk.StringVar(value="")
         self.var_finish_action = tk.StringVar(value="editor")
 
         self.var_f_key = tk.StringVar(value="")
@@ -111,8 +114,9 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self._configure_confirm_step()
         elif key == "custom":
             self._refresh_custom_count()
+            self._refresh_candidate_list()
             self._clear_field_form()
-            self.var_status.set("Eigene Felder hinzufuegen oder direkt mit 'Weiter' fortfahren.")
+            self.var_status.set("Kandidaten pruefen/uebernehmen oder eigene Felder anlegen; 'Weiter' zum Abschluss.")
         elif key == "finish":
             self._render_summary()
             self.var_status.set("Pruefen Sie die Zusammenfassung und schliessen Sie ab.")
@@ -129,8 +133,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                 self.var_status.set("Bitte zuerst eine PDF waehlen und 'Text laden' ausfuehren.")
                 return
             self._reload_fields()
-            if self._template_mode:
-                self._fields = self._ordered_required_fields()
+            self._fields = self._ordered_required_fields()
             if not self._fields:
                 self._show_step(3)
                 return
@@ -146,7 +149,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             else:
                 self._show_step(3)
         elif key == "custom":
-            if self._template_mode and not self._required_fields_confirmed():
+            if not self._required_fields_confirmed():
                 self.var_status.set(
                     "Noch nicht alle Pflichtfelder bestaetigt. Bitte Schritt 3 abschliessen oder Regex manuell pruefen."
                 )
@@ -197,22 +200,24 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self.var_status.set(f"Assay-Key {key} existiert bereits. Bitte einen neuen Key vergeben.")
             return False
         try:
-            if self.var_mode.get() == "derive":
+            if self.var_mode.get() == "similar":
                 source_key = self._assay_display_to_key.get(self.var_source.get().strip())
                 if not source_key:
                     self.var_status.set("Bitte eine Vorlage auswaehlen.")
                     return False
-                self.draft_path = derive_draft(self._project_root, source_key, key, name)
-                self._template_mode = False
+                self.draft_path = create_draft_from_ruleset(self._project_root, source_key, key, name)
+                self._candidate_source = {"source_assay_key": source_key}
             else:
                 self.draft_path = create_draft_from_template(self._project_root, key, name)
-                self._template_mode = True
+                self._candidate_source = {"source": "template"}
+            self._dismissed_candidates.clear()
+            self._candidate_check = None
+            self._selected_candidate_key = None
         except Exception as e:
             messagebox.showerror("Fehler", str(e), parent=self)
             return False
         self._reload_fields()
-        label = "Pflichtfelder" if self._template_mode else "Felder"
-        self.var_status.set(f"Draft erstellt ({len(self._fields)} {label} uebernommen): {self.draft_path}")
+        self.var_status.set(f"Draft erstellt ({len(self._fields)} Pflichtfelder): {self.draft_path}")
         return True
 
     def _ordered_required_fields(self) -> list[dict]:
@@ -287,6 +292,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self.assay_text = text
         self._set_preview_text(text)
         self._refresh_required_checklist()
+        self._refresh_candidates_preview()
         if error:
             self.var_status.set(
                 "Assay-Abschnitt nicht gefunden - Volltext der PDF geladen. "
@@ -334,8 +340,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         if key not in REQUIRED_HEADER_FIELD_KEYS:
             return
         self._reload_fields()
-        if self._template_mode:
-            self._fields = self._ordered_required_fields()
+        self._fields = self._ordered_required_fields()
         try:
             self._field_idx = next(i for i, field in enumerate(self._fields) if field.get("key") == key)
         except StopIteration:
@@ -344,12 +349,8 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self._show_current_field()
 
     def _configure_confirm_step(self) -> None:
-        if self._template_mode:
-            self.btn_remove_field.config(state=tk.DISABLED)
-            self.chk_required.config(state=tk.DISABLED)
-        else:
-            self.btn_remove_field.config(state=tk.NORMAL)
-            self.chk_required.config(state=tk.NORMAL)
+        self.btn_remove_field.config(state=tk.DISABLED)
+        self.chk_required.config(state=tk.DISABLED)
         self._set_preview_editable(True)
 
     # ------------------------------------------------------------ Schritt 3: Pflichtfelder bestaetigen
@@ -359,8 +360,6 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         key = str(field.get("key", ""))
 
         tag = " (Pflichtfeld)" if key in REQUIRED_HEADER_FIELD_KEYS else ""
-        if key in HEADER_FIELD_KEYS and key not in REQUIRED_HEADER_FIELD_KEYS:
-            tag = " (Header-Regel)"
         self.var_progress.set(f"Feld {self._field_idx + 1} von {len(self._fields)}: {key}{tag}")
         self.var_f_key.set(key)
         self.var_f_regex.set(str(field.get("regex", "")))
@@ -449,8 +448,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             messagebox.showerror("Fehler", str(e), parent=self)
             return False
         self._reload_fields()
-        if self._template_mode:
-            self._fields = self._ordered_required_fields()
+        self._fields = self._ordered_required_fields()
         return True
 
     def _on_retest_field(self) -> None:
@@ -458,26 +456,219 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             return
         self._locate_and_highlight(self.var_f_key.get().strip())
 
-    def _on_remove_field(self) -> None:
-        if not self.draft_path or not self._fields:
-            return
-        key = self.var_f_key.get().strip()
-        if key in REQUIRED_HEADER_FIELD_KEYS:
-            self.var_status.set("Pflichtfelder aus dem Vertrag koennen nicht entfernt werden.")
-            return
-        if not messagebox.askyesno("Feld entfernen", f"Feld '{key}' wirklich aus dem Regelset entfernen?", parent=self):
+    # ------------------------------------------------------------ Schritt 4: Kandidaten + eigene Felder
+
+    def _refresh_candidates_preview(self) -> None:
+        self.list_candidates_preview.delete(0, tk.END)
+        self.lbl_candidates_summary.config(text="")
+        if not self.draft_path or not self.assay_text.strip():
             return
         try:
-            remove_field(self.draft_path, key)
+            report = check_candidates(
+                self._project_root,
+                self.assay_text,
+                self.draft_path,
+                self._candidate_source,
+                dismissed_keys=tuple(self._dismissed_candidates),
+                group=1,
+            )
+        except Exception as exc:
+            self.lbl_candidates_summary.config(text=f"Kandidaten-Check fehlgeschlagen: {exc}")
+            return
+        total = report.get("total", 0)
+        confirmed = report.get("confirmed", 0)
+        self.lbl_candidates_summary.config(
+            text=f"{total} Kandidaten aus Vorlage, {confirmed} mit Treffer im Beispieltext."
+        )
+        for row in report.get("results", []):
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key", ""))
+            status = str(row.get("status", ""))
+            label = _CANDIDATE_STATUS_LABELS.get(status, status)
+            self.list_candidates_preview.insert(tk.END, f"{key:<16} {label}")
+
+    def _refresh_candidate_list(self) -> None:
+        self.list_candidates.delete(0, tk.END)
+        self._candidate_fields_by_key = {}
+        if not self.draft_path:
+            self.var_candidates_summary.set("")
+            return
+        try:
+            bundle = read_candidate_fields(self._project_root, **self._candidate_source_kwargs())
+            self._candidate_check = check_candidates(
+                self._project_root,
+                self.assay_text,
+                self.draft_path,
+                self._candidate_source,
+                dismissed_keys=tuple(self._dismissed_candidates),
+                group=1,
+            )
+        except Exception as exc:
+            self.var_candidates_summary.set(f"Kandidaten konnten nicht geladen werden: {exc}")
+            self._candidate_check = None
+            return
+
+        status_by_key = {
+            str(row.get("key", "")): str(row.get("status", ""))
+            for row in (self._candidate_check or {}).get("results", [])
+            if isinstance(row, dict)
+        }
+        in_draft = {str(f.get("key", "")).strip() for f in self._fields if isinstance(f, dict)}
+        active_keys = []
+        for field in bundle.get("fields", []):
+            if not isinstance(field, dict):
+                continue
+            key = str(field.get("key", "")).strip()
+            if not key or key in self._dismissed_candidates or key in in_draft:
+                continue
+            self._candidate_fields_by_key[key] = field
+            active_keys.append(key)
+            label = _CANDIDATE_STATUS_LABELS.get(status_by_key.get(key, ""), status_by_key.get(key, ""))
+            self.list_candidates.insert(tk.END, f"{key:<16} {label}")
+
+        confirmed = (self._candidate_check or {}).get("confirmed", 0)
+        self.var_candidates_summary.set(
+            f"{len(active_keys)} offene Kandidaten, {confirmed} mit Treffer. "
+            "Auswahl laedt Regex/search_from; Uebernehmen schreibt ins Regelset."
+        )
+
+    def _candidate_source_kwargs(self) -> dict:
+        if "source_assay_key" in self._candidate_source:
+            return {"source_assay_key": self._candidate_source["source_assay_key"]}
+        return {"source": "template"}
+
+    def _on_candidate_selected(self, _event=None) -> None:
+        sel = self.list_candidates.curselection()
+        if not sel:
+            return
+        line = self.list_candidates.get(sel[0])
+        key = line.split()[0].strip()
+        field = self._candidate_fields_by_key.get(key)
+        if not field:
+            return
+        self._selected_candidate_key = key
+        self._load_candidate_into_form(field)
+
+    def _load_candidate_into_form(self, field: dict) -> None:
+        key = str(field.get("key", ""))
+        self.var_f_key.set(key)
+        self.var_f_regex.set(str(field.get("regex", "")))
+        self.var_f_required.set(bool(field.get("required", False)))
+        sf = field.get("search_from")
+        if isinstance(sf, dict) and "after" in sf:
+            self.var_f_mode.set("after")
+            self.var_f_after.set(str(sf.get("after", "")))
+            self.var_f_line.set("")
+        elif isinstance(sf, dict) and "line" in sf:
+            self.var_f_mode.set("line")
+            self.var_f_line.set(str(sf.get("line", "")))
+            self.var_f_after.set("")
+        else:
+            self.var_f_mode.set("none")
+            self.var_f_after.set("")
+            self.var_f_line.set("")
+        self._locate_candidate_highlight(key, field)
+
+    def _locate_candidate_highlight(self, key: str, field: dict | None = None) -> None:
+        self._clear_highlight()
+        if not self.assay_text.strip():
+            return
+        if field is None and key:
+            field = self._candidate_fields_by_key.get(key)
+        if not isinstance(field, dict):
+            return
+        try:
+            out = locate_fields([field], self.assay_text, group=1)
+        except Exception as e:
+            self.var_match.set(f"Pruefung fehlgeschlagen: {e}")
+            return
+        row = next((r for r in out.get("results", []) if isinstance(r, dict) and r.get("key") == key), None)
+        if row is None:
+            self.var_match.set("Feld nicht pruefbar (leerer key/regex).")
+            return
+        if row.get("error"):
+            self.var_match.set(f"FEHLER: {row['error']}")
+        elif row.get("matched"):
+            span = row.get("span")
+            self.var_match.set(f"TREFFER: {row.get('value')}")
+            if isinstance(span, list) and len(span) == 2:
+                self._highlight_span(int(span[0]), int(span[1]))
+        else:
+            self.var_match.set("KEIN TREFFER im Beispiel-Text.")
+
+    def _on_test_candidate(self) -> None:
+        key = self.var_f_key.get().strip()
+        regex = self.var_f_regex.get().strip()
+        if not key or key not in self._candidate_fields_by_key:
+            self.var_status.set("Bitte zuerst einen Kandidaten aus der Liste waehlen.")
+            return
+        if not regex:
+            self.var_status.set("Bitte zuerst einen Regex eingeben.")
+            return
+        field = {
+            "key": key,
+            "regex": regex,
+            "required": self.var_f_required.get(),
+        }
+        try:
+            sf = self._build_search_from()
+            if sf is not None:
+                field["search_from"] = sf
+        except ValueError as e:
+            self.var_status.set(str(e))
+            return
+        self._locate_candidate_highlight(key, field)
+
+    def _on_adopt_candidate(self) -> None:
+        if not self.draft_path:
+            return
+        key = self.var_f_key.get().strip()
+        regex = self.var_f_regex.get().strip()
+        if not key or key not in self._candidate_fields_by_key:
+            self.var_status.set("Bitte zuerst einen Kandidaten aus der Liste waehlen.")
+            return
+        if not regex:
+            self.var_status.set("Regex darf nicht leer sein.")
+            return
+        try:
+            sf = self._build_search_from()
+            adopt_candidate_field(
+                self._project_root,
+                self.draft_path,
+                key,
+                self._candidate_source,
+                regex=regex,
+                required=self.var_f_required.get(),
+                search_from=sf if self.var_f_mode.get() != "none" else {},
+                search_from_set=True,
+            )
         except Exception as e:
             messagebox.showerror("Fehler", str(e), parent=self)
             return
-        self._reload_fields()
-        if not self._fields:
-            self._show_step(3)
+        self._dismissed_candidates.discard(key)
+        self._selected_candidate_key = None
+        self._refresh_custom_count()
+        self._refresh_candidate_list()
+        self._refresh_candidates_preview()
+        self._clear_field_form()
+        self.var_status.set(f"Kandidat '{key}' uebernommen.")
+
+    def _on_dismiss_candidate(self) -> None:
+        key = self.var_f_key.get().strip()
+        if not key or key not in self._candidate_fields_by_key:
+            sel = self.list_candidates.curselection()
+            if sel:
+                key = self.list_candidates.get(sel[0]).split()[0].strip()
+        if not key or key not in self._candidate_fields_by_key:
+            self.var_status.set("Bitte zuerst einen Kandidaten waehlen.")
             return
-        self._field_idx = min(self._field_idx, len(self._fields) - 1)
-        self._show_current_field()
+        self._dismissed_candidates.add(key)
+        self._selected_candidate_key = None
+        self._refresh_candidate_list()
+        self._refresh_candidates_preview()
+        self._clear_field_form()
+        self.var_status.set(f"Kandidat '{key}' verworfen (nur diese Sitzung).")
 
     def _locate_and_highlight(self, key: str) -> None:
         self._clear_highlight()
@@ -523,11 +714,12 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         except Exception:
             return 0
 
-    # ------------------------------------------------------------ Schritt 4: Eigene Felder
+    # ------------------------------------------------------------ Schritt 4 (Fortsetzung): Eigene Felder
 
     def _refresh_custom_count(self) -> None:
         self._reload_fields()
         self.var_custom_count.set(f"Aktuell {len(self._fields)} Felder im Regelset.")
+        self._refresh_candidate_list()
 
     def _clear_field_form(self) -> None:
         self.var_f_key.set("")
