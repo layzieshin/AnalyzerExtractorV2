@@ -53,6 +53,7 @@ def test_public_embedding_imports_are_available() -> None:
     assert format_write_outputs is not None
     assert HEADER_FIELD_KEYS
     assert REQUIRED_HEADER_FIELD_KEYS
+    assert len(REQUIRED_HEADER_FIELD_KEYS) == 8
     assert check_required_fields is not None
     assert create_draft_from_template is not None
     assert create_draft_from_ruleset is not None
@@ -60,6 +61,8 @@ def test_public_embedding_imports_are_available() -> None:
     assert check_candidates is not None
     assert adopt_candidate_field is not None
     assert LEGACY_HEADER_ALIASES["date"] == "DATUM"
+    assert LEGACY_HEADER_ALIASES["test"] == "TEST"
+    assert LEGACY_HEADER_ALIASES["Haltbarkeit"] == "HALTBARKEIT"
 
 
 def test_public_embedding_types_are_exported() -> None:

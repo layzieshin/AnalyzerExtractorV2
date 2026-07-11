@@ -13,7 +13,9 @@ REQUIRED_HEADER_FIELD_KEYS = (
     "ZEIT",
     "ANWENDER",
     "PLATTE",
+    "TEST",
     "CHARGE",
+    "HALTBARKEIT",
     "VALIDATION",
 )
 

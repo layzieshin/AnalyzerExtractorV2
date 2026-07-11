@@ -11,7 +11,7 @@ from .errors import RuleSuiteError
 from .header_aliases import excluded_candidate_keys_for_ruleset_source, resolve_required_headers_from_source
 from .json_io import _read_json_object, _safe_key, _write_json_atomic
 from .regex_tools import locate_fields
-from .required_fields import REQUIRED_HEADER_FIELD_KEYS, _result_row
+from .required_fields import _result_row
 
 _SEARCH_FROM_UNSET = object()
 
@@ -60,8 +60,7 @@ def _extract_fields_and_mapping(data: Dict[str, Any]) -> tuple[List[Dict[str, An
 
 
 def _candidate_excluded_keys(source_kind: str) -> Set[str]:
-    if source_kind == "template":
-        return set(REQUIRED_HEADER_FIELD_KEYS)
+    del source_kind
     return set(excluded_candidate_keys_for_ruleset_source())
 
 

@@ -3,7 +3,7 @@
 Semantik (AP-6.1):
 - ``check_authoring_readiness`` ohne *assay_text*: nur Strukturcheck via ``_validate_draft_data``.
   ``ok=true`` ist möglich, enthält aber immer Warning ``no_assay_text`` — **keine** fachliche Freigabe.
-- Mit *assay_text* (oder CLI ``--pdf``): zusätzlich ``check_required_fields`` für die sechs Pflicht-Header.
+- Mit *assay_text* (oder CLI ``--pdf``): zusätzlich ``check_required_fields`` für die acht Pflicht-Header.
   ``ok=true`` bedeutet Struktur + alle Pflichtfelder confirmed → fachliche Readiness für Testbetrieb.
 - ``check_required`` / ``readiness --assay-text`` sind die fachlichen Vorab-Checks mit Beispieltext/PDF.
 - ``activate_draft`` / ``activate_new_draft`` bleiben strukturell (``validate_draft`` only); PDF-Treffer-Gate
@@ -25,7 +25,7 @@ def check_authoring_readiness(
     *,
     group: int = 1,
 ) -> Dict[str, Any]:
-    """Prüft Draft-Struktur und optional die sechs Pflicht-Header gegen *assay_text*.
+    """Prüft Draft-Struktur und optional die acht Pflicht-Header gegen *assay_text*.
 
   Ohne Text: ``ok`` nur strukturell; ``warnings`` enthält ``no_assay_text``.
   Mit Text: ``ok`` nur wenn Struktur ok und ``required_field_status.all_confirmed``.

@@ -67,6 +67,8 @@ def _write_template(root: Path) -> None:
                 {"key": "ANWENDER", "regex": r"Anwender:\s*([^\s]+)", "required": False},
                 {"key": "PLATTE", "regex": r"Platte:\s*(\S+)", "required": False},
                 {"key": "CHARGE", "regex": r"Charge:\s*(\S+)", "required": False},
+                {"key": "TEST", "regex": r"Test:\s*(\S+)", "required": False},
+                {"key": "Haltbarkeit", "regex": r"Haltbarkeit:\s*(\S+)", "required": False},
                 {
                     "key": "VALIDATION",
                     "regex": r"(Validationskriterien\s+erf)",
@@ -84,6 +86,8 @@ def _write_template(root: Path) -> None:
                 "ANWENDER": "ANWENDER",
                 "PLATTE": "PLATTE",
                 "CHARGE": "CHARGE",
+                "TEST": "TEST",
+                "Haltbarkeit": "Haltbarkeit",
                 "VALIDATION": "VALIDATION",
             },
         },
@@ -98,7 +102,9 @@ def _confirmed_assay_text() -> str:
             "Zeit: 10:15:00",
             "Anwender: LAB01",
             "Platte: P-12",
+            "Test: RUN01",
             "Charge: CH-99",
+            "Haltbarkeit: 261208",
             "Validationskriterien erfuellt",
         ]
     )

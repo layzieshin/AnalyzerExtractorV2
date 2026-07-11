@@ -11,12 +11,16 @@ LEGACY_HEADER_ALIASES: Dict[str, str] = {
     "time": "ZEIT",
     "user": "ANWENDER",
     "plate_name": "PLATTE",
+    "test": "TEST",
     "lot_id": "CHARGE",
+    "lot_expiry_yymmdd": "HALTBARKEIT",
+    "lot_expiry_date": "HALTBARKEIT",
+    "Haltbarkeit": "HALTBARKEIT",
 }
 
 LEGACY_HEADER_ALIAS_KEYS = frozenset(LEGACY_HEADER_ALIASES.keys())
 
-CANONICAL_TO_LEGACY: Dict[str, str] = {v: k for k, v in LEGACY_HEADER_ALIASES.items()}
+_HALTBARKEIT_LEGACY_PRIORITY = ("lot_expiry_yymmdd", "Haltbarkeit", "lot_expiry_date")
 
 
 def excluded_candidate_keys_for_ruleset_source() -> frozenset[str]:
@@ -54,15 +58,24 @@ def resolve_required_headers_from_source(
     return {"fields": fields, "column_mapping": column_mapping}
 
 
+def _legacy_keys_for_canonical(canonical: str) -> List[str]:
+    keys = [legacy for legacy, target in LEGACY_HEADER_ALIASES.items() if target == canonical]
+    if canonical == "HALTBARKEIT":
+        ordered = [legacy for legacy in _HALTBARKEIT_LEGACY_PRIORITY if legacy in keys]
+        rest = [legacy for legacy in keys if legacy not in ordered]
+        return ordered + rest
+    return keys
+
+
 def _pick_source_header_field(
     canonical: str,
     field_by_key: Dict[str, Dict[str, Any]],
 ) -> Tuple[str | None, Dict[str, Any] | None]:
     if canonical in field_by_key:
         return canonical, field_by_key[canonical]
-    legacy = CANONICAL_TO_LEGACY.get(canonical)
-    if legacy and legacy in field_by_key:
-        return legacy, field_by_key[legacy]
+    for legacy in _legacy_keys_for_canonical(canonical):
+        if legacy in field_by_key:
+            return legacy, field_by_key[legacy]
     return None, None
 
 

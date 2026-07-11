@@ -17,8 +17,8 @@ Dieses Dokument beschreibt den aktuellen Workflow fuer die Regelerstellung.
 - Start ueber den Button `Neues Regelset (gefuehrt)...` in der Kachel `Regelset-Verwaltung` (Tab `Draft`).
 - Eigenes modales Fenster mit 5 Schritten (Zurueck/Weiter/Abbrechen):
   1. Grunddaten: `assay_key` + `assay_name`; zwei Modi:
-     - **Aehnlich wie Vorlage** (Default): Sechs Pflicht-Header aus dem gewaehlten Quell-Regelset (canonical keys, Legacy-Alias-Aufloesung); weitere Felder des Quell-Regelsets erscheinen als **Kandidaten**.
-     - **Von Grund auf neu**: Sechs Pflicht-Header aus `rules/template.json`; Zusatzfelder aus `template.json` als **Kandidaten**.
+     - **Aehnlich wie Vorlage** (Default): Acht Pflicht-Header aus dem gewaehlten Quell-Regelset (canonical keys, Legacy-Alias-Aufloesung); weitere Felder des Quell-Regelsets erscheinen als **Kandidaten**.
+     - **Von Grund auf neu**: Acht Pflicht-Header aus `rules/template.json`; Zusatzfelder aus `template.json` als **Kandidaten**.
      Kandidaten sind sichtbar und testbar, werden aber erst nach manueller Uebernahme in `extract_rules.fields` geschrieben.
      `derive_draft()` (Vollklon) bleibt nur fuer Editor/CLI verfuegbar — **nicht** im Wizard.
   2. Beispiel-PDF waehlen und Text laden (mit Volltext-Fallback, wenn der Assay-Block nicht getrennt werden kann).
@@ -30,7 +30,7 @@ Dieses Dokument beschreibt den aktuellen Workflow fuer die Regelerstellung.
 
 ## Pflichtfeld-Vertrag (neue Assays)
 
-Sechs Header-Pflichtfelder fuer "von Grund auf neu":
+Acht Header-Pflichtfelder fuer "von Grund auf neu" und "aehnlich wie Vorlage" (canonical keys in `extract_rules.fields`):
 
 | Feld | Rolle |
 |---|---|
@@ -38,8 +38,12 @@ Sechs Header-Pflichtfelder fuer "von Grund auf neu":
 | `ZEIT` | Uhrzeit im Ergebnisblock |
 | `ANWENDER` | Anwender/Kuerzel |
 | `PLATTE` | Plattenname |
+| `TEST` | Test-/Laufkennung im Ergebnisblock |
 | `CHARGE` | Charge/Lot als Ergebnisfeld (eigenes Feld, auch wenn `lot_id` denselben Wert nutzt) |
+| `HALTBARKEIT` | Haltbarkeitsdatum/-code (z.B. YYMMDD) |
 | `VALIDATION` | Validierungstext (kein Boolean) |
+
+Keine separate JSON-Struktur (`header_contract` o.ä.). Bestehende produktive Rulesets werden durch AP-9 nicht automatisch umgeschrieben; der Vertrag gilt fuer RuleSuite-Drafts, Readiness und Wizard.
 
 API:
 
@@ -58,9 +62,13 @@ API:
 | `time` | `ZEIT` |
 | `user` | `ANWENDER` |
 | `plate_name` | `PLATTE` |
+| `test` | `TEST` |
 | `lot_id` | `CHARGE` |
+| `lot_expiry_yymmdd` | `HALTBARKEIT` |
+| `lot_expiry_date` | `HALTBARKEIT` |
+| `Haltbarkeit` | `HALTBARKEIT` |
 
-Canonical keys in der Quelle haben Vorrang. Regex/`search_from` werden unveraendert unter dem canonical key gespeichert. Legacy-Header erscheinen nicht als Kandidaten. `VALIDATION` hat keinen Legacy-Alias.
+Canonical keys in der Quelle haben Vorrang. Regex/`search_from` werden unveraendert unter dem canonical key gespeichert. Legacy-Header und canonical Headerfelder erscheinen nicht als Kandidaten. `VALIDATION` hat keinen Legacy-Alias.
 
 ### Terminologie: search_hint vs. search_from
 

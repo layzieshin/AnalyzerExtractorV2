@@ -125,7 +125,7 @@ class WizardUiMixin:
         tk.Label(
             req,
             text=(
-                "Nach dem Laden sehen Sie den Status der sechs Pflichtfelder. "
+                "Nach dem Laden sehen Sie den Status der acht Pflichtfelder. "
                 "Im naechsten Schritt waehlen Sie ein Feld, pflegen den Regex manuell "
                 "und pruefen den Treffer gegen den Beispieltext."
             ),

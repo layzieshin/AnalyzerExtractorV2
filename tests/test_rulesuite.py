@@ -102,6 +102,7 @@ def _write_template(root: Path) -> None:
                 {"key": "ANWENDER", "regex": r"Anwender:\s*([^\s]+)", "required": False},
                 {"key": "PLATTE", "regex": r"Platte:\s*(\S+)", "required": False},
                 {"key": "CHARGE", "regex": r"Charge:\s*(\S+)", "required": False},
+                {"key": "TEST", "regex": r"Test:\s*(\S+)", "required": False},
                 {"key": "VALIDATION", "regex": r"(Validationskriterien\s+erf)", "required": False, "search_from": {"line": 0}},
                 {"key": "Haltbarkeit", "regex": r"Haltbarkeit:\s*(\S+)", "required": False},
                 {"key": "FILE_NAME", "regex": r"Datei:\s*(\S+)", "required": False},
@@ -117,6 +118,7 @@ def _write_template(root: Path) -> None:
                 "ANWENDER": "ANWENDER",
                 "PLATTE": "PLATTE",
                 "CHARGE": "CHARGE",
+                "TEST": "TEST",
                 "VALIDATION": "VALIDATION",
                 "Haltbarkeit": "Haltbarkeit",
                 "FILE_NAME": "FILE_NAME",
@@ -408,15 +410,21 @@ def test_create_draft_from_template_takes_required_header_rules(tmp_path: Path) 
     keys = [f["key"] for f in data["extract_rules"]["fields"]]
     assert keys == list(REQUIRED_HEADER_FIELD_KEYS)
     assert "Haltbarkeit" not in keys
+    assert "HALTBARKEIT" in keys
     assert "FILE_NAME" not in keys
     assert "PCQ1" not in keys
     assert all(bool(f.get("required")) for f in data["extract_rules"]["fields"])
+
+    by_key = {f["key"]: f for f in data["extract_rules"]["fields"]}
+    assert by_key["HALTBARKEIT"]["regex"] == r"Haltbarkeit:\s*(\S+)"
+    assert by_key["TEST"]["regex"] == r"Test:\s*(\S+)"
 
     validation = next(f for f in data["extract_rules"]["fields"] if f["key"] == "VALIDATION")
     assert validation["search_from"] == {"line": 0}
 
     col_map = data["excel_rules"]["column_mapping"]
     assert set(col_map.keys()) == set(REQUIRED_HEADER_FIELD_KEYS)
+    assert col_map["HALTBARKEIT"] == "Haltbarkeit"
 
 
 def test_create_draft_from_template_fills_missing_required_fields_with_empty_regex(tmp_path: Path) -> None:
@@ -450,7 +458,38 @@ def test_create_draft_from_template_fills_missing_required_fields_with_empty_reg
     assert by_key["ZEIT"]["regex"] == r"Zeit:\s*(\d{2}:\d{2}:\d{2})"
     assert by_key["DATUM"]["regex"] == ""
     assert by_key["PLATTE"]["regex"] == ""
+    assert by_key["TEST"]["regex"] == ""
+    assert by_key["HALTBARKEIT"]["regex"] == ""
     assert set(data["excel_rules"]["column_mapping"].keys()) == set(REQUIRED_HEADER_FIELD_KEYS)
+
+
+def test_create_draft_from_template_maps_haltbarkeit_legacy_key(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    template = {
+        "assay_name": "Template",
+        "assay_key": "(0000)",
+        "lot_rule": {"regex": r"Lot:\s*(\S+)"},
+        "extract_rules": {
+            "fields": [
+                {"key": "Haltbarkeit", "regex": r"Kit\s+E[0-9A-Za-z]+\s+(\d{6})", "required": False},
+            ]
+        },
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {"Haltbarkeit": "Haltbarkeit"},
+        },
+    }
+    (root / "rules" / "template.json").write_text(json.dumps(template), encoding="utf-8")
+
+    draft = create_draft_from_template(str(root), "(9102)", "Legacy Haltbarkeit")
+    data = load_draft(draft)
+    by_key = {f["key"]: f for f in data["extract_rules"]["fields"]}
+
+    assert [f["key"] for f in data["extract_rules"]["fields"]] == list(REQUIRED_HEADER_FIELD_KEYS)
+    assert by_key["HALTBARKEIT"]["regex"] == r"Kit\s+E[0-9A-Za-z]+\s+(\d{6})"
+    assert by_key["TEST"]["regex"] == ""
+    assert data["excel_rules"]["column_mapping"]["HALTBARKEIT"] == "Haltbarkeit"
 
 
 def test_create_draft_from_template_requires_template_file(tmp_path: Path) -> None:
@@ -471,15 +510,17 @@ def test_check_required_fields_reports_confirmed_and_misses(tmp_path: Path) -> N
             "Zeit: 10:15:00",
             "Anwender: LAB01",
             "Platte: P-12",
+            "Test: RUN01",
             "Charge: CH-99",
+            "Haltbarkeit: 261208",
             "Validationskriterien erfuellt",
         ]
     )
 
     report = check_required_fields(draft, text, group=1)
-    assert report["total"] == 6
+    assert report["total"] == 8
     assert report["all_confirmed"] is True
-    assert report["confirmed"] == 6
+    assert report["confirmed"] == 8
     by_key = {row["key"]: row for row in report["results"]}
     assert by_key["DATUM"]["status"] == "confirmed"
     assert by_key["DATUM"]["matched"] is True
@@ -626,14 +667,28 @@ def test_resolve_required_headers_maps_legacy_keys_to_canonical() -> None:
     fields = [
         {"key": "date", "regex": r"Datum:\s*(\d+)", "required": False},
         {"key": "time", "regex": r"Zeit:\s*(\d+)", "required": False},
+        {"key": "test", "regex": r"Test:\s*(\w+)", "required": False},
+        {"key": "lot_expiry_yymmdd", "regex": r"Kit\s+(\d{6})", "required": False},
+        {"key": "Haltbarkeit", "regex": r"Haltbarkeit:\s*(\d+)", "required": False},
     ]
-    col = {"date": "Datum", "time": "Zeit"}
+    col = {
+        "date": "Datum",
+        "time": "Zeit",
+        "test": "TEST",
+        "lot_expiry_yymmdd": "Haltbarkeit",
+        "Haltbarkeit": "Haltbarkeit",
+    }
     out = resolve_required_headers_from_source(fields, col)
     by_key = {f["key"]: f for f in out["fields"]}
+    assert [f["key"] for f in out["fields"]] == list(REQUIRED_HEADER_FIELD_KEYS)
     assert by_key["DATUM"]["regex"] == r"Datum:\s*(\d+)"
     assert by_key["ZEIT"]["regex"] == r"Zeit:\s*(\d+)"
+    assert by_key["TEST"]["regex"] == r"Test:\s*(\w+)"
+    assert by_key["HALTBARKEIT"]["regex"] == r"Kit\s+(\d{6})"
     assert by_key["VALIDATION"]["regex"] == ""
     assert out["column_mapping"]["DATUM"] == "Datum"
+    assert out["column_mapping"]["TEST"] == "TEST"
+    assert out["column_mapping"]["HALTBARKEIT"] == "Haltbarkeit"
 
 
 def test_create_draft_from_ruleset_normalizes_legacy_headers(tmp_path: Path) -> None:
@@ -652,6 +707,8 @@ def test_create_draft_from_ruleset_normalizes_legacy_headers(tmp_path: Path) -> 
     assert by_key["DATUM"]["regex"] == r"Datum:\s*(\d{2}\.\d{2}\.\d{4})"
     assert by_key["CHARGE"]["regex"] == r"Kit\s+(E[0-9A-Za-z]+)\s+\d{6}"
     assert by_key["PLATTE"]["regex"] == r"Plattenname:\s*(.+?)\s+Zeit:"
+    assert by_key["TEST"]["regex"] == r"Test:\s*(.+)"
+    assert by_key["HALTBARKEIT"]["regex"] == r"Kit\s+E[0-9A-Za-z]+\s+(\d{6})"
     assert data["excel_rules"]["column_mapping"]["DATUM"] == "Datum"
     assert data["excel_rules"]["column_mapping"]["CHARGE"] == "CHARGE"
     assert data["extract_rules"]["dedupe_fields"] == []
@@ -664,14 +721,18 @@ def test_read_candidate_fields_excludes_headers_and_legacy_aliases(tmp_path: Pat
 
     template_cands = read_candidate_fields(str(root), source="template")
     template_keys = {f["key"] for f in template_cands["fields"]}
-    assert "Haltbarkeit" in template_keys
+    assert "Haltbarkeit" not in template_keys
+    assert "HALTBARKEIT" not in template_keys
+    assert "TEST" not in template_keys
+    assert "test" not in template_keys
     assert "PCQ1" in template_keys
     assert "DATUM" not in template_keys
+    assert "FILE_NAME" in template_keys
 
     ruleset_cands = read_candidate_fields(str(root), source_assay_key="(1111)")
     ruleset_keys = {f["key"] for f in ruleset_cands["fields"]}
-    assert "test" in ruleset_keys
-    assert "lot_expiry_yymmdd" in ruleset_keys
+    assert "test" not in ruleset_keys
+    assert "lot_expiry_yymmdd" not in ruleset_keys
     assert "date" not in ruleset_keys
     assert LEGACY_HEADER_ALIAS_KEYS.isdisjoint(ruleset_keys)
 
@@ -718,16 +779,16 @@ def test_adopt_candidate_field_allows_form_overrides(tmp_path: Path) -> None:
     adopt_candidate_field(
         str(root),
         draft,
-        "Haltbarkeit",
+        "PCQ1",
         source,
-        regex=r"Haltbarkeit:\s*(\d+)",
+        regex=r"PCQ1\s+(\d+)",
         required=True,
         search_from={"line": 3},
         search_from_set=True,
     )
     data = load_draft(draft)
-    field = next(f for f in data["extract_rules"]["fields"] if f["key"] == "Haltbarkeit")
-    assert field["regex"] == r"Haltbarkeit:\s*(\d+)"
+    field = next(f for f in data["extract_rules"]["fields"] if f["key"] == "PCQ1")
+    assert field["regex"] == r"PCQ1\s+(\d+)"
     assert field["required"] is True
     assert field["search_from"] == {"line": 3}
 
@@ -754,7 +815,9 @@ def test_check_authoring_readiness_with_assay_text_all_confirmed(tmp_path: Path)
             "Zeit: 10:15:00",
             "Anwender: LAB01",
             "Platte: P-12",
+            "Test: RUN01",
             "Charge: CH-99",
+            "Haltbarkeit: 261208",
             "Validationskriterien erfuellt",
         ]
     )
