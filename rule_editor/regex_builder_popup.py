@@ -39,6 +39,8 @@ class RegexBuilderPopup(tk.Toplevel):
         self.var_right_regex = tk.BooleanVar(value=bool(spec.get("right_marker_is_regex", False)))
         self.var_value_type = tk.StringVar(value=str(spec.get("value_type", "auto")))
         self.var_match_index = tk.StringVar(value=str(spec.get("match_index", "")))
+        self.var_value_min_len = tk.StringVar(value="")
+        self.var_value_max_len = tk.StringVar(value="")
         self.var_expected = tk.StringVar(value=str(spec.get("expected_value", "")))
         self.var_use_search_from = tk.BooleanVar(value=bool(spec.get("line_index", "")))
 
@@ -63,7 +65,8 @@ class RegexBuilderPopup(tk.Toplevel):
             self,
             text=(
                 "Optionale Bausteine setzen. Der Builder erzeugt nur einen Regex; "
-                "im Ruleset wird keine Baustein-Spec gespeichert."
+                "im Ruleset wird keine Baustein-Spec gespeichert. "
+                "Min./Max. Wertlaenge begrenzen den extrahierten Wert."
             ),
             anchor="w",
             justify="left",
@@ -113,8 +116,13 @@ class RegexBuilderPopup(tk.Toplevel):
         tk.Label(form, text="Treffer Nr.").grid(row=5, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
         tk.Entry(form, textvariable=self.var_match_index, width=8).grid(row=5, column=3, sticky="w", pady=(0, 6))
 
-        tk.Label(form, text="Erwartet").grid(row=6, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_expected).grid(row=6, column=1, columnspan=4, sticky="we", pady=(0, 6), padx=(0, 6))
+        tk.Label(form, text="Min. Wertlaenge").grid(row=6, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
+        tk.Entry(form, textvariable=self.var_value_min_len, width=8).grid(row=6, column=1, sticky="w", pady=(0, 6))
+        tk.Label(form, text="Max. Wertlaenge").grid(row=6, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
+        tk.Entry(form, textvariable=self.var_value_max_len, width=8).grid(row=6, column=3, sticky="w", pady=(0, 6))
+
+        tk.Label(form, text="Erwartet").grid(row=7, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
+        tk.Entry(form, textvariable=self.var_expected).grid(row=7, column=1, columnspan=4, sticky="we", pady=(0, 6), padx=(0, 6))
 
         btns = tk.Frame(self)
         btns.pack(fill="x", padx=10, pady=(0, 8))
@@ -174,6 +182,8 @@ class RegexBuilderPopup(tk.Toplevel):
             "right_marker_is_regex": self.var_right_regex.get(),
             "value_type": self.var_value_type.get().strip(),
             "match_index": self.var_match_index.get().strip(),
+            "value_min_len": self.var_value_min_len.get().strip(),
+            "value_max_len": self.var_value_max_len.get().strip(),
             "expected_value": self.var_expected.get().strip(),
         }
 

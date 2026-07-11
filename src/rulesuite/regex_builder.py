@@ -37,7 +37,7 @@ def build_regex_from_builder_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = []
     value_type = str(spec.get("value_type") or "auto").strip() or "auto"
     expected_value = str(spec.get("expected_value") or "").strip()
-    capture, capture_type = _capture_for_value(value_type, expected_value)
+    capture, capture_type = _capture_for_value(value_type, expected_value, spec, warnings)
 
     prefix = _line_prefix(spec, warnings)
     left = _left_boundary(spec, warnings)
@@ -116,9 +116,43 @@ def suggest_builder_spec_from_selection(
     return {"spec": spec, "warnings": []}
 
 
-def _capture_for_value(value_type: str, expected_value: str) -> tuple[str, str]:
+def _capture_for_value(
+    value_type: str,
+    expected_value: str,
+    spec: Dict[str, Any],
+    warnings: List[str],
+) -> tuple[str, str]:
     selected_type = _infer_value_type(expected_value) if value_type == "auto" else value_type
-    return _VALUE_PATTERNS.get(selected_type, _VALUE_PATTERNS["text"]), selected_type
+    capture = _VALUE_PATTERNS.get(selected_type, _VALUE_PATTERNS["text"])
+
+    min_len = _positive_int(spec.get("value_min_len"))
+    max_len = _positive_int(spec.get("value_max_len"))
+    if min_len is None and max_len is None:
+        return capture, selected_type
+    if min_len is not None and max_len is not None and min_len > max_len:
+        warnings.append("value_length_range_invalid")
+        return capture, selected_type
+
+    quantifier = _length_quantifier(min_len, max_len)
+    if selected_type == "decimal":
+        return rf"(?<![\d.,])((?=[\d.,]{quantifier}(?![\d.,]))\d+(?:[\.,]\d+)?)(?![\d.,])", selected_type
+    if selected_type == "token":
+        return rf"(?<!\S)(\S{quantifier})(?!\S)", selected_type
+    if selected_type == "text":
+        if not str(spec.get("left_marker") or "").strip() and not str(spec.get("right_marker") or "").strip():
+            warnings.append("value_length_text_without_marker")
+        return rf"(.{quantifier}?)", selected_type
+
+    warnings.append("length_ignored_for_value_type")
+    return capture, selected_type
+
+
+def _length_quantifier(min_len: int | None, max_len: int | None) -> str:
+    if min_len is not None and max_len is not None:
+        return "{" + str(min_len) + "," + str(max_len) + "}"
+    if min_len is not None:
+        return "{" + str(min_len) + ",}"
+    return "{1," + str(max_len) + "}"
 
 
 def _infer_value_type(value: str) -> str:
@@ -239,7 +273,7 @@ def _find_line_anchor(left_text: str) -> str:
 
 
 def _nearest_left_marker(left_text: str) -> str:
-    for marker in ("ng/ml", "IU/ml", "U/ml", "O.D."):
+    for marker in ("ng/ml", "IU/ml", "RU/ml", "U/ml", "O.D."):
         if marker in left_text:
             return marker
     return ""
@@ -247,7 +281,7 @@ def _nearest_left_marker(left_text: str) -> str:
 
 def _nearest_right_marker(right_text: str) -> str:
     stripped = right_text.lstrip()
-    for marker in ("ng/ml", "IU/ml", "U/ml", "O.D."):
+    for marker in ("ng/ml", "IU/ml", "RU/ml", "U/ml", "O.D."):
         if stripped.startswith(marker):
             return marker
     return ""
