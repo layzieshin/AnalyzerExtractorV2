@@ -49,6 +49,8 @@ def resolve_required_headers_from_source(
             copied = deepcopy(field)
             copied["key"] = canonical
             copied["required"] = True
+            if canonical == "VALIDATION":
+                copied["regex"] = _normalize_validation_regex(str(copied.get("regex", "")))
             fields.append(copied)
             column_mapping[canonical] = _column_name_for_key(source_key or canonical, source_column_mapping, canonical)
         else:
@@ -77,6 +79,11 @@ def _pick_source_header_field(
         if legacy in field_by_key:
             return legacy, field_by_key[legacy]
     return None, None
+
+
+def _normalize_validation_regex(regex: str) -> str:
+    """Drop a leading line anchor; template.json still uses ^ but drafts/rulesets should not."""
+    return regex[1:] if regex.startswith("^") else regex
 
 
 def _column_name_for_key(source_key: str, source_column_mapping: Dict[str, str], canonical: str) -> str:

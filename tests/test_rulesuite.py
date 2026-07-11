@@ -421,10 +421,44 @@ def test_create_draft_from_template_takes_required_header_rules(tmp_path: Path) 
 
     validation = next(f for f in data["extract_rules"]["fields"] if f["key"] == "VALIDATION")
     assert validation["search_from"] == {"line": 0}
+    assert not validation["regex"].startswith("^")
+    assert validation["regex"] == r"(Validationskriterien\s+erf)"
 
     col_map = data["excel_rules"]["column_mapping"]
     assert set(col_map.keys()) == set(REQUIRED_HEADER_FIELD_KEYS)
     assert col_map["HALTBARKEIT"] == "Haltbarkeit"
+
+
+def test_create_draft_from_template_strips_validation_line_anchor(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    template = {
+        "assay_name": "Template",
+        "assay_key": "(0000)",
+        "lot_rule": {"regex": r"Lot:\s*(\S+)"},
+        "extract_rules": {
+            "fields": [
+                {
+                    "key": "VALIDATION",
+                    "regex": r"^(Validationskriterien\s+(?:nicht\s+)?erfüllt)",
+                    "required": False,
+                    "search_from": {"line": 0},
+                },
+            ]
+        },
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {"VALIDATION": "VALIDATION"},
+        },
+    }
+    (root / "rules" / "template.json").write_text(json.dumps(template), encoding="utf-8")
+
+    draft = create_draft_from_template(str(root), "(9105)", "Anchor Strip Assay")
+    data = load_draft(draft)
+    validation = next(f for f in data["extract_rules"]["fields"] if f["key"] == "VALIDATION")
+
+    assert validation["regex"] == r"(Validationskriterien\s+(?:nicht\s+)?erfüllt)"
+    assert validation["search_from"] == {"line": 0}
 
 
 def test_create_draft_from_template_fills_missing_required_fields_with_empty_regex(tmp_path: Path) -> None:
