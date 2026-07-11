@@ -109,7 +109,7 @@ class UiBuilderMixin:
         tk.Entry(row2, textvariable=self.var_new_assay_key, width=16).pack(side="left", padx=(4, 8))
         tk.Label(row2, text="Neuer Assay-Name").pack(side="left")
         tk.Entry(row2, textvariable=self.var_new_assay_name, width=42).pack(side="left", padx=(4, 8))
-        tk.Button(row2, text="Neues leeres Draft", command=self.on_create_blank).pack(side="left")
+        tk.Button(row2, text="Neues Draft mit Headern", command=self.on_create_blank).pack(side="left")
         tk.Button(row2, text="Aus aktivem ableiten", command=self.on_derive).pack(side="left", padx=(6, 0))
 
         row3 = tk.Frame(control)

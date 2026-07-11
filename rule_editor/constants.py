@@ -5,7 +5,7 @@ HELP_TEXTS: dict[str, str] = {
     "draft_control": (
         "Hier starten Sie immer. "
         "Bestehendes Regelset bearbeiten: Assay auswaehlen und 'Draft aus aktivem Assay' klicken. "
-        "Neues Regelset anlegen: neuen assay_key + assay_name eintragen und 'Neues leeres Draft' "
+        "Neues Regelset anlegen: neuen assay_key + assay_name eintragen und 'Neues Draft mit Headern' "
         "oder 'Aus aktivem ableiten' verwenden."
     ),
     "pdf_block": (
@@ -59,7 +59,7 @@ STEP_BY_STEP_GUIDE: list[dict[str, str]] = [
             "Wenn Sie ein bestehendes Regelset bearbeiten wollen: Assay auswaehlen und "
             "'Draft aus aktivem Assay' klicken.\n\n"
             "Wenn Sie ein neues Regelset brauchen: assay_key + assay_name eintragen und "
-            "'Neues leeres Draft' oder 'Aus aktivem ableiten' nutzen."
+            "'Neues Draft mit Headern' oder 'Aus aktivem ableiten' nutzen."
         ),
     },
     {

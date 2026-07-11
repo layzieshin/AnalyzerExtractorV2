@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
-from src.rulesuite.api import create_blank_draft, create_draft, derive_draft, load_draft
+from src.rulesuite.api import create_draft, create_draft_from_template, derive_draft, load_draft
 
 
 class DraftMixin:
@@ -88,10 +88,11 @@ class DraftMixin:
             self._set_hint("neuer assay_key und assay_name sind erforderlich.")
             return
         try:
-            path = create_blank_draft(self.var_root.get().strip(), key, name)
+            path = create_draft_from_template(self.var_root.get().strip(), key, name)
             self.var_draft_path.set(path)
             self.on_load_draft_into_editor()
-            self._log(f"Leeres Draft erstellt: {path}")
+            self._log(f"Draft mit Header-Vertrag erstellt: {path}")
+            self._set_hint("Draft mit Header-Vertrag erstellt.")
         except Exception as e:
             messagebox.showerror("Fehler", str(e))
 
