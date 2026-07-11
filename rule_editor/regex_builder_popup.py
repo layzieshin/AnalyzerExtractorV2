@@ -185,9 +185,19 @@ class RegexBuilderPopup(tk.Toplevel):
     def _test_regex(self) -> None:
         result = self._build_regex()
         regex = str(result.get("regex", ""))
-        test = test_regex(self._assay_text, regex, group=1) if self._assay_text.strip() else {"error": "no_assay_text"}
+        search_from = None
+        if self.var_use_search_from.get():
+            proposed = result.get("proposed_search_from")
+            if isinstance(proposed, dict):
+                search_from = proposed
+        if self._assay_text.strip():
+            test = test_regex(self._assay_text, regex, group=1, search_from=search_from)
+        else:
+            test = {"error": "no_assay_text"}
         result = dict(result)
         result["test"] = test
+        if search_from is not None:
+            result["test_search_from"] = search_from
         self._last_result = result
         self._render_result(result)
 
@@ -203,6 +213,13 @@ class RegexBuilderPopup(tk.Toplevel):
             lines.append(f"search_from Vorschlag: {proposed}")
         warnings = result.get("warnings") or []
         lines.append("Warnungen: " + (", ".join(str(w) for w in warnings) if warnings else "keine"))
+
+        test_search_from = result.get("test_search_from")
+        if isinstance(test_search_from, dict):
+            if "line" in test_search_from:
+                lines.append(f"Test-Kontext: search_from line={test_search_from.get('line')}")
+            elif "after" in test_search_from:
+                lines.append(f"Test-Kontext: search_from after={test_search_from.get('after')!r}")
 
         test = result.get("test")
         if isinstance(test, dict):

@@ -227,6 +227,33 @@ def test_regex_and_validate_draft(tmp_path: Path) -> None:
     assert any("column_mapping unknown keys" in err for err in bad_draft["errors"])
 
 
+def test_regex_honors_search_from_line() -> None:
+    text = "Header: alpha\nFooter: beta"
+    regex = r"Footer:\s*(\w+)"
+
+    full = test_regex(text, regex)
+    assert full["matched"] is True
+    assert full["value"] == "beta"
+    assert full["span"] == [22, 26]
+
+    after_start = test_regex(text, regex, search_from={"line": 1})
+    assert after_start["matched"] is True
+    assert after_start["value"] == "beta"
+    assert after_start["span"] == [22, 26]
+
+    before_start = test_regex(text, regex, search_from={"line": 2})
+    assert before_start["matched"] is False
+    assert before_start["error"] is None
+
+    only_on_first_line = test_regex(text, r"Header:\s*(\w+)", search_from={"line": 1})
+    assert only_on_first_line["matched"] is False
+    assert only_on_first_line["error"] is None
+
+    invalid = test_regex(text, regex, search_from={"line": -1})
+    assert invalid["matched"] is False
+    assert invalid["error"] == "search_from.line must be >= 0"
+
+
 def test_activate_new_draft_updates_index_and_rejects_duplicates(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
     draft = create_blank_draft(str(root), "(9000)", "Fresh Assay")

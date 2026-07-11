@@ -140,8 +140,13 @@ def set_excel_rules(
     return str(RuleSuite().set_excel_rules(draft_path, filename_template, sheet_template, column_mapping))
 
 
-def test_regex(text: str, regex: str, group: int = 1) -> Dict[str, Any]:
-    return RuleSuite().test_regex(text, regex, group=group)
+def test_regex(
+    text: str,
+    regex: str,
+    group: int = 1,
+    search_from: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    return RuleSuite().test_regex(text, regex, group=group, search_from=search_from)
 
 
 test_regex.__test__ = False

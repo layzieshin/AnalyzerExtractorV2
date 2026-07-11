@@ -9,7 +9,26 @@ import re
 from typing import Any, Dict, List
 
 
-def test_regex(text: str, regex: str, group: int = 1) -> Dict[str, Any]:
+def test_regex(
+    text: str,
+    regex: str,
+    group: int = 1,
+    search_from: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    lines = text.splitlines()
+    search_text = text
+    slice_offset = 0
+    if search_from is not None:
+        search_text, slice_offset, slice_error = _resolve_search_slice(text, lines, search_from)
+        if slice_error:
+            return {
+                "matched": False,
+                "value": None,
+                "span": None,
+                "context_snippet": "",
+                "error": slice_error,
+            }
+
     try:
         pattern = re.compile(regex)
     except re.error as e:
@@ -21,7 +40,7 @@ def test_regex(text: str, regex: str, group: int = 1) -> Dict[str, Any]:
             "error": f"invalid_regex: {e}",
         }
 
-    m = pattern.search(text)
+    m = pattern.search(search_text)
     if not m:
         return {
             "matched": False,
@@ -32,7 +51,7 @@ def test_regex(text: str, regex: str, group: int = 1) -> Dict[str, Any]:
         }
 
     if group == 0:
-        span = m.span(0)
+        local_span = m.span(0)
         value = m.group(0)
     else:
         if group > (m.lastindex or 0):
@@ -43,15 +62,16 @@ def test_regex(text: str, regex: str, group: int = 1) -> Dict[str, Any]:
                 "context_snippet": "",
                 "error": f"group_out_of_range: {group}",
             }
-        span = m.span(group)
+        local_span = m.span(group)
         value = m.group(group)
 
+    span = [local_span[0] + slice_offset, local_span[1] + slice_offset]
     left = max(0, span[0] - 120)
     right = min(len(text), span[1] + 120)
     return {
         "matched": True,
         "value": value,
-        "span": [span[0], span[1]],
+        "span": span,
         "context_snippet": text[left:right],
         "error": None,
     }

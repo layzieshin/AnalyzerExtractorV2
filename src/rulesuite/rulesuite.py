@@ -286,8 +286,14 @@ class RuleSuite:
         excel_rules["column_mapping"] = dict(column_mapping)
         return self.save_draft(draft_path, data)
 
-    def test_regex(self, text: str, regex: str, group: int = 1) -> Dict[str, Any]:
-        return regex_tools.test_regex(text, regex, group=group)
+    def test_regex(
+        self,
+        text: str,
+        regex: str,
+        group: int = 1,
+        search_from: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return regex_tools.test_regex(text, regex, group=group, search_from=search_from)
 
     def batch_check_fields(self, draft_path: str, assay_text: str, group: int = 1) -> Dict[str, Any]:
         fields = self._load_fields_list(draft_path)
