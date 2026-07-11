@@ -492,7 +492,7 @@ def test_create_draft_from_template_fills_missing_required_fields_with_empty_reg
     assert by_key["ZEIT"]["regex"] == r"Zeit:\s*(\d{2}:\d{2}:\d{2})"
     assert by_key["DATUM"]["regex"] == ""
     assert by_key["PLATTE"]["regex"] == ""
-    assert by_key["TEST"]["regex"] == ""
+    assert by_key["TEST"]["regex"] == r"Test:[^\n]*?[\\/]([^\\/]+\.asy)\s*\("
     assert by_key["HALTBARKEIT"]["regex"] == ""
     assert set(data["excel_rules"]["column_mapping"].keys()) == set(REQUIRED_HEADER_FIELD_KEYS)
 
@@ -522,8 +522,33 @@ def test_create_draft_from_template_maps_haltbarkeit_legacy_key(tmp_path: Path) 
 
     assert [f["key"] for f in data["extract_rules"]["fields"]] == list(REQUIRED_HEADER_FIELD_KEYS)
     assert by_key["HALTBARKEIT"]["regex"] == r"Kit\s+E[0-9A-Za-z]+\s+(\d{6})"
-    assert by_key["TEST"]["regex"] == ""
+    assert by_key["TEST"]["regex"] == r"Test:[^\n]*?[\\/]([^\\/]+\.asy)\s*\("
     assert data["excel_rules"]["column_mapping"]["HALTBARKEIT"] == "Haltbarkeit"
+
+
+def test_create_draft_from_template_default_test_regex_matches_analyzer_path(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    template = {
+        "assay_name": "Template",
+        "assay_key": "(0000)",
+        "lot_rule": {"regex": r"Lot:\s*(\S+)"},
+        "extract_rules": {"fields": []},
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {},
+        },
+    }
+    (root / "rules" / "template.json").write_text(json.dumps(template), encoding="utf-8")
+
+    draft = create_draft_from_template(str(root), "(9106)", "Default Test")
+    data = load_draft(draft)
+    by_key = {f["key"]: f for f in data["extract_rules"]["fields"]}
+    regex = by_key["TEST"]["regex"]
+    text = r"Test: C:\ProgramData\Euroimmun_Analyzer_I\Assays\ANA Screen IgG.asy (1c9e)"
+
+    assert regex == r"Test:[^\n]*?[\\/]([^\\/]+\.asy)\s*\("
+    assert test_regex(text, regex)["value"] == "ANA Screen IgG.asy"
 
 
 def test_create_draft_from_template_requires_template_file(tmp_path: Path) -> None:
@@ -559,6 +584,31 @@ def test_check_required_fields_reports_confirmed_and_misses(tmp_path: Path) -> N
     assert by_key["DATUM"]["status"] == "confirmed"
     assert by_key["DATUM"]["matched"] is True
     assert by_key["VALIDATION"]["search_from"] == {"line": 0}
+
+
+def test_check_required_fields_confirms_default_test_regex(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    template = {
+        "assay_name": "Template",
+        "assay_key": "(0000)",
+        "lot_rule": {"regex": r"Lot:\s*(\S+)"},
+        "extract_rules": {"fields": []},
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {},
+        },
+    }
+    (root / "rules" / "template.json").write_text(json.dumps(template), encoding="utf-8")
+
+    draft = create_draft_from_template(str(root), "(9107)", "Default Test Check")
+    text = r"Test: C:\ProgramData\Euroimmun_Analyzer_I\Assays\ANA Screen IgG.asy (1c9e)"
+
+    report = check_required_fields(draft, text, group=1)
+    by_key = {row["key"]: row for row in report["results"]}
+
+    assert by_key["TEST"]["status"] == "confirmed"
+    assert by_key["TEST"]["value"] == "ANA Screen IgG.asy"
 
 
 def test_check_required_fields_reports_missing_regex_miss_error_and_missing_field(tmp_path: Path) -> None:
@@ -723,6 +773,15 @@ def test_resolve_required_headers_maps_legacy_keys_to_canonical() -> None:
     assert out["column_mapping"]["DATUM"] == "Datum"
     assert out["column_mapping"]["TEST"] == "TEST"
     assert out["column_mapping"]["HALTBARKEIT"] == "Haltbarkeit"
+
+
+def test_resolve_required_headers_defaults_missing_test_regex() -> None:
+    out = resolve_required_headers_from_source([], {})
+    by_key = {f["key"]: f for f in out["fields"]}
+
+    assert by_key["TEST"]["regex"] == r"Test:[^\n]*?[\\/]([^\\/]+\.asy)\s*\("
+    assert by_key["TEST"]["required"] is True
+    assert by_key["HALTBARKEIT"]["regex"] == ""
 
 
 def test_create_draft_from_ruleset_normalizes_legacy_headers(tmp_path: Path) -> None:

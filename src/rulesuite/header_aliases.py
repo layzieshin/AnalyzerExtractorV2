@@ -21,6 +21,9 @@ LEGACY_HEADER_ALIASES: Dict[str, str] = {
 LEGACY_HEADER_ALIAS_KEYS = frozenset(LEGACY_HEADER_ALIASES.keys())
 
 _HALTBARKEIT_LEGACY_PRIORITY = ("lot_expiry_yymmdd", "Haltbarkeit", "lot_expiry_date")
+_DEFAULT_HEADER_REGEX: Dict[str, str] = {
+    "TEST": r"Test:[^\n]*?[\\/]([^\\/]+\.asy)\s*\(",
+}
 
 
 def excluded_candidate_keys_for_ruleset_source() -> frozenset[str]:
@@ -54,7 +57,7 @@ def resolve_required_headers_from_source(
             fields.append(copied)
             column_mapping[canonical] = _column_name_for_key(source_key or canonical, source_column_mapping, canonical)
         else:
-            fields.append({"key": canonical, "regex": "", "required": True})
+            fields.append({"key": canonical, "regex": _default_header_regex(canonical), "required": True})
             column_mapping[canonical] = _column_name_for_key(canonical, source_column_mapping, canonical)
 
     return {"fields": fields, "column_mapping": column_mapping}
@@ -84,6 +87,10 @@ def _pick_source_header_field(
 def _normalize_validation_regex(regex: str) -> str:
     """Drop a leading line anchor; template.json still uses ^ but drafts/rulesets should not."""
     return regex[1:] if regex.startswith("^") else regex
+
+
+def _default_header_regex(canonical: str) -> str:
+    return _DEFAULT_HEADER_REGEX.get(canonical, "")
 
 
 def _column_name_for_key(source_key: str, source_column_mapping: Dict[str, str], canonical: str) -> str:
