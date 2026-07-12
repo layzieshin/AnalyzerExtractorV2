@@ -64,7 +64,55 @@ def test_builder_line_index_is_search_from_not_regex_context() -> None:
 
     assert out["regex"] == r"(\d+(?:[\.,]\d+)?)"
     assert out["proposed_search_from"] == {"line": 12}
+    assert "line_index_unstable_hint" in out["warnings"]
     assert "line_index_used_as_search_from_only" in out["warnings"]
+
+
+def test_builder_search_anchor_after_literal_is_escaped() -> None:
+    out = build_regex_from_builder_spec(
+        {
+            "search_anchor_mode": "after",
+            "search_anchor": "O.D.",
+            "search_anchor_is_regex": False,
+            "value_type": "decimal",
+        }
+    )
+
+    assert out["proposed_search_from"] == {"after": r"O\.D\."}
+
+
+def test_builder_search_anchor_after_regex_is_raw() -> None:
+    out = build_regex_from_builder_spec(
+        {
+            "search_anchor_mode": "after",
+            "search_anchor": r"Validationskriterien|Validierungskriterien",
+            "search_anchor_is_regex": True,
+            "value_type": "decimal",
+        }
+    )
+
+    assert out["proposed_search_from"] == {"after": r"Validationskriterien|Validierungskriterien"}
+
+
+def test_builder_search_anchor_after_missing_warns() -> None:
+    out = build_regex_from_builder_spec({"search_anchor_mode": "after", "value_type": "decimal"})
+
+    assert out["proposed_search_from"] is None
+    assert "search_anchor_missing" in out["warnings"]
+
+
+def test_builder_search_anchor_line_uses_line_index_with_stability_warning() -> None:
+    out = build_regex_from_builder_spec(
+        {
+            "search_anchor_mode": "line",
+            "line_index": "4",
+            "line_contains": "PCQ1",
+            "value_type": "decimal",
+        }
+    )
+
+    assert out["proposed_search_from"] == {"line": 4}
+    assert "line_index_unstable_hint" in out["warnings"]
 
 
 def test_builder_literal_marker_is_escaped_and_regex_marker_can_be_raw() -> None:

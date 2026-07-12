@@ -138,6 +138,10 @@ class MarkingsMixin:
                 self.var_search_mode.set("line")
                 self.var_search_line.set(str(search_from.get("line", "")))
                 self.var_search_after.set("")
+            elif search_from and "after" in search_from:
+                self.var_search_mode.set("after")
+                self.var_search_after.set(str(search_from.get("after", "")))
+                self.var_search_line.set("")
             self._set_hint("Regex-Baustein uebernommen. Feldname pruefen und speichern.")
 
         RegexBuilderPopup(
@@ -156,6 +160,20 @@ class MarkingsMixin:
         self.var_search_line.set(str(sel["line_idx"]))
         self.var_search_after.set("")
         self._set_hint(f"Suche ab Zeile {sel['line_idx']} gesetzt.")
+
+    def on_marking_set_search_after_selection(self) -> None:
+        sel = self._get_block_selection()
+        if sel is None:
+            self._set_hint("Bitte zuerst Text im Assay-Block markieren.")
+            return
+        marker = _first_nonempty_line(str(sel["text"]))
+        if not marker:
+            self._set_hint("Auswahl enthaelt keinen nutzbaren Marker.")
+            return
+        self.var_search_mode.set("after")
+        self.var_search_after.set(re.escape(marker))
+        self.var_search_line.set("")
+        self._set_hint("Suche ab Marker aus Auswahl gesetzt.")
 
     def on_marking_set_search_after_prev_line(self) -> None:
         sel = self._get_block_selection()
@@ -436,3 +454,11 @@ class MarkingsMixin:
                 f"'{key}' hat noch keine Fundstelle: Text markieren, 'Regex aus Auswahl' bzw. "
                 "'Suche ab' setzen und 'Feld uebernehmen' klicken."
             )
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""

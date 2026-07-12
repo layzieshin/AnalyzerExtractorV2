@@ -19,13 +19,17 @@ class RegexBuilderPopup(tk.Toplevel):
     ) -> None:
         super().__init__(master)
         self.title("Regex-Baustein")
-        self.geometry("760x560")
+        self.geometry("800x620")
         self.transient(master)
         self._assay_text = assay_text
         self._on_accept = on_accept
         self._last_result: dict[str, Any] | None = None
 
         spec = self._initial_spec(selection)
+        initial_mode = "line" if str(spec.get("line_index", "")).strip() else "none"
+        self.var_search_anchor_mode = tk.StringVar(value=str(spec.get("search_anchor_mode", initial_mode)))
+        self.var_search_anchor = tk.StringVar(value=str(spec.get("search_anchor", "")))
+        self.var_search_anchor_regex = tk.BooleanVar(value=bool(spec.get("search_anchor_is_regex", False)))
         self.var_line_contains = tk.StringVar(value=str(spec.get("line_contains", "")))
         self.var_line_contains_regex = tk.BooleanVar(value=bool(spec.get("line_contains_is_regex", False)))
         self.var_line_startswith = tk.StringVar(value=str(spec.get("line_startswith", "")))
@@ -42,7 +46,7 @@ class RegexBuilderPopup(tk.Toplevel):
         self.var_value_min_len = tk.StringVar(value="")
         self.var_value_max_len = tk.StringVar(value="")
         self.var_expected = tk.StringVar(value=str(spec.get("expected_value", "")))
-        self.var_use_search_from = tk.BooleanVar(value=bool(spec.get("line_index", "")))
+        self.var_use_search_from = tk.BooleanVar(value=initial_mode != "none")
 
         self._build_ui()
         self._build_regex()
@@ -75,22 +79,49 @@ class RegexBuilderPopup(tk.Toplevel):
         )
         intro.pack(fill="x", padx=10, pady=(10, 6))
 
-        form = tk.LabelFrame(self, text="Bausteine")
+        search_frame = tk.LabelFrame(self, text="Suchbereich")
+        search_frame.pack(fill="x", padx=10, pady=(0, 8))
+        search_frame.columnconfigure(1, weight=1)
+
+        tk.Label(search_frame, text="Modus").grid(row=0, column=0, sticky="w", padx=(6, 4), pady=(6, 4))
+        ttk.Combobox(
+            search_frame,
+            textvariable=self.var_search_anchor_mode,
+            values=["none", "after", "line"],
+            width=12,
+            state="readonly",
+        ).grid(row=0, column=1, sticky="w", pady=(6, 4))
+        tk.Checkbutton(
+            search_frame,
+            text="als search_from uebernehmen",
+            variable=self.var_use_search_from,
+        ).grid(row=0, column=2, columnspan=2, sticky="w", padx=(8, 6), pady=(6, 4))
+
+        tk.Label(search_frame, text="Suchwort/Marker").grid(row=1, column=0, sticky="w", padx=(6, 4), pady=(0, 4))
+        tk.Entry(search_frame, textvariable=self.var_search_anchor).grid(
+            row=1, column=1, sticky="we", pady=(0, 4)
+        )
+        tk.Checkbutton(
+            search_frame,
+            text="als Regex",
+            variable=self.var_search_anchor_regex,
+        ).grid(row=1, column=2, sticky="w", padx=(8, 6), pady=(0, 4))
+        tk.Label(search_frame, text="Zeile").grid(row=1, column=3, sticky="e", padx=(8, 4), pady=(0, 4))
+        tk.Entry(search_frame, textvariable=self.var_line_index, width=10).grid(
+            row=1, column=4, sticky="w", pady=(0, 4), padx=(0, 6)
+        )
+
+        form = tk.LabelFrame(self, text="Regex-Wertgrenzen")
         form.pack(fill="x", padx=10, pady=(0, 8))
         form.columnconfigure(1, weight=1)
         form.columnconfigure(4, weight=1)
 
         self._entry_row(form, 0, "Zeile enthaelt", self.var_line_contains, self.var_line_contains_regex)
         self._entry_row(form, 1, "Zeile beginnt", self.var_line_startswith, self.var_line_startswith_regex)
-        tk.Label(form, text="Zeilennummer").grid(row=2, column=0, sticky="w", padx=(6, 4), pady=(0, 4))
-        tk.Entry(form, textvariable=self.var_line_index, width=10).grid(row=2, column=1, sticky="w", pady=(0, 4))
-        tk.Checkbutton(form, text="als search_from uebernehmen", variable=self.var_use_search_from).grid(
-            row=2, column=2, columnspan=3, sticky="w", padx=(8, 6), pady=(0, 4)
-        )
 
         self._marker_row(
             form,
-            3,
+            2,
             "Nach Marker",
             self.var_left_marker,
             self.var_left_occurrence,
@@ -98,31 +129,31 @@ class RegexBuilderPopup(tk.Toplevel):
         )
         self._marker_row(
             form,
-            4,
+            3,
             "Vor Marker",
             self.var_right_marker,
             self.var_right_occurrence,
             self.var_right_regex,
         )
 
-        tk.Label(form, text="Werttyp").grid(row=5, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
+        tk.Label(form, text="Werttyp").grid(row=4, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
         ttk.Combobox(
             form,
             textvariable=self.var_value_type,
             values=["auto", "text", "token", "decimal", "range", "value_with_unit", "asy_filename", "validation_status"],
             width=20,
             state="readonly",
-        ).grid(row=5, column=1, sticky="w", pady=(0, 6))
-        tk.Label(form, text="Treffer Nr.").grid(row=5, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_match_index, width=8).grid(row=5, column=3, sticky="w", pady=(0, 6))
+        ).grid(row=4, column=1, sticky="w", pady=(0, 6))
+        tk.Label(form, text="Treffer Nr.").grid(row=4, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
+        tk.Entry(form, textvariable=self.var_match_index, width=8).grid(row=4, column=3, sticky="w", pady=(0, 6))
 
-        tk.Label(form, text="Min. Wertlaenge").grid(row=6, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_value_min_len, width=8).grid(row=6, column=1, sticky="w", pady=(0, 6))
-        tk.Label(form, text="Max. Wertlaenge").grid(row=6, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_value_max_len, width=8).grid(row=6, column=3, sticky="w", pady=(0, 6))
+        tk.Label(form, text="Min. Wertlaenge").grid(row=5, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
+        tk.Entry(form, textvariable=self.var_value_min_len, width=8).grid(row=5, column=1, sticky="w", pady=(0, 6))
+        tk.Label(form, text="Max. Wertlaenge").grid(row=5, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
+        tk.Entry(form, textvariable=self.var_value_max_len, width=8).grid(row=5, column=3, sticky="w", pady=(0, 6))
 
-        tk.Label(form, text="Erwartet").grid(row=7, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_expected).grid(row=7, column=1, columnspan=4, sticky="we", pady=(0, 6), padx=(0, 6))
+        tk.Label(form, text="Erwartet").grid(row=6, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
+        tk.Entry(form, textvariable=self.var_expected).grid(row=6, column=1, columnspan=4, sticky="we", pady=(0, 6), padx=(0, 6))
 
         btns = tk.Frame(self)
         btns.pack(fill="x", padx=10, pady=(0, 8))
@@ -169,6 +200,9 @@ class RegexBuilderPopup(tk.Toplevel):
 
     def _spec(self) -> dict[str, Any]:
         return {
+            "search_anchor_mode": self.var_search_anchor_mode.get().strip(),
+            "search_anchor": self.var_search_anchor.get().strip(),
+            "search_anchor_is_regex": self.var_search_anchor_regex.get(),
             "line_contains": self.var_line_contains.get().strip(),
             "line_contains_is_regex": self.var_line_contains_regex.get(),
             "line_startswith": self.var_line_startswith.get().strip(),

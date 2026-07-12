@@ -44,17 +44,7 @@ def build_regex_from_builder_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
     right = _right_boundary(spec, warnings)
     regex = prefix + left + capture + right
 
-    proposed_search_from = None
-    line_index_raw = str(spec.get("line_index") or "").strip()
-    if line_index_raw:
-        try:
-            line_index = int(line_index_raw)
-            if line_index >= 0:
-                proposed_search_from = {"line": line_index}
-            else:
-                warnings.append("line_index_negative")
-        except ValueError:
-            warnings.append("line_index_invalid")
+    proposed_search_from = _proposed_search_from(spec, warnings)
 
     if not prefix and not left and not right:
         warnings.append("no_context")
@@ -145,6 +135,40 @@ def _capture_for_value(
 
     warnings.append("length_ignored_for_value_type")
     return capture, selected_type
+
+
+def _proposed_search_from(spec: Dict[str, Any], warnings: List[str]) -> dict[str, object] | None:
+    mode = str(spec.get("search_anchor_mode") or "").strip()
+    if mode == "after":
+        marker = str(spec.get("search_anchor") or "").strip()
+        if not marker:
+            warnings.append("search_anchor_missing")
+            return None
+        if bool(spec.get("search_anchor_is_regex")):
+            return {"after": marker}
+        return {"after": re.escape(marker)}
+    if mode == "line":
+        return _line_search_from(spec, warnings)
+    if mode == "none":
+        return None
+
+    return _line_search_from(spec, warnings)
+
+
+def _line_search_from(spec: Dict[str, Any], warnings: List[str]) -> dict[str, object] | None:
+    line_index_raw = str(spec.get("line_index") or "").strip()
+    if not line_index_raw:
+        return None
+    try:
+        line_index = int(line_index_raw)
+    except ValueError:
+        warnings.append("line_index_invalid")
+        return None
+    if line_index < 0:
+        warnings.append("line_index_negative")
+        return None
+    warnings.append("line_index_unstable_hint")
+    return {"line": line_index}
 
 
 def _length_quantifier(min_len: int | None, max_len: int | None) -> str:

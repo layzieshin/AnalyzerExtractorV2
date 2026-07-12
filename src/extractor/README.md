@@ -113,22 +113,16 @@ Der Extractor unterstützt dafür `search_from` als Objekt. Unterstützte Varian
 }
 ```
 
-### 4.3 Ab letztem Marker suchen (`after_last`)
-- Suche beginnt **nach der letzten Zeile**, die den Marker matcht.
-- Nützlich, wenn Marker pro Seite wiederholt wird und du sicher den letzten Block willst.
+### 4.3 Nicht unterstuetzt: `after_last`
+- `after_last` ist aktuell keine produktive `search_from`-Variante.
 
-```json
-{
-  "key": "VALIDATION_LINE",
-  "regex": "Validationskriterien.*",
-  "required": true,
-  "search_from": { "after_last": "^Validationskriterien" }
-}
-```
+Wenn die Suche nach dem letzten Marker fachlich noetig wird, muss sie als
+separates Paket in Extractor, RuleSuite, Validierung und RuleEditor eingefuehrt
+werden.
 
 > Empfehlung:
 > - Wenn etwas **nur einmal** vorkommt: kein `search_from`.
-> - Wenn es pro Seite im Header wiederholt wird: `after_last` (oder gezielt `after` in Kombination mit spezifischerem Marker).
+> - Wenn es pro Seite im Header wiederholt wird: `after` mit einem spezifischeren Marker verwenden.
 
 ---
 
@@ -263,7 +257,7 @@ In JSON musst du `\\` schreiben, um im Regex ein `\` zu bekommen.
 
 1) Nimm den erzeugten `*_normalized.txt` oder `*_block.txt` und teste deine Regex dagegen.
 2) Wenn ein Feld mehrfach vorkommt:
-   - nutze `search_from.after` oder `search_from.after_last`
+   - nutze `search_from.after` mit einem stabilen Marker
 3) Wenn ein Feld optional ist:
    - `required: false`
 4) Wenn ein Feld Pflicht ist:
@@ -303,8 +297,7 @@ Ja: `"search_from": {"line": N}`.
 Ja: `"search_from": {"after": "MarkerRegex"}`.
 
 ### „Marker kommt mehrfach vor – ich will nach dem letzten Marker suchen.“
-Ja: `"search_from": {"after_last": "MarkerRegex"}`.
+Aktuell nicht direkt. `after_last` ist nicht implementiert und waere ein separates Folgepaket.
 
 ### „Ich will mehrere Treffer sammeln.“
 Aktuell ist die Logik bewusst **Single-Hit**. Falls du später Multi brauchst, erweitern wir das explizit und kontrolliert.
-

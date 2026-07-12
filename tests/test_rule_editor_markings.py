@@ -132,6 +132,17 @@ class _SelectionMarkings(_DummyMarkings):
         }
 
 
+class _MarkerSelectionMarkings(_DummyMarkings):
+    def _get_block_selection(self) -> dict[str, object]:
+        return {
+            "text": "O.D.",
+            "line_text": "25-OH Vitamin D S5 0013200223 261126 0,722 O.D.",
+            "line_idx": 0,
+            "sel_start_in_line": 44,
+            "sel_end_in_line": 48,
+        }
+
+
 class _DummyRegex(RegexMixin):
     def __init__(self) -> None:
         self.txt_field_preview = _Text()
@@ -210,6 +221,36 @@ def test_regex_builder_popup_acceptance_updates_field_form(monkeypatch) -> None:
     assert markings.var_search_mode.get() == "line"
     assert markings.var_search_line.get() == "4"
     assert markings.var_search_after.get() == ""
+
+
+def test_regex_builder_popup_acceptance_updates_after_search_from(monkeypatch) -> None:
+    markings = _SelectionMarkings()
+
+    class _FakePopup:
+        def __init__(self, _master, *, assay_text, selection, on_accept):
+            assert assay_text == "Block"
+            assert selection["text"] == "0,722"
+            on_accept(r"\bS5\b[^\n]*?(\d+(?:[\.,]\d+)?)\s*O\.D\.", {"after": r"O\.D\."})
+
+    monkeypatch.setattr(marking_actions, "RegexBuilderPopup", _FakePopup)
+
+    markings.on_open_regex_builder()
+
+    assert markings.var_field_regex.get() == r"\bS5\b[^\n]*?(\d+(?:[\.,]\d+)?)\s*O\.D\."
+    assert markings.var_search_mode.get() == "after"
+    assert markings.var_search_after.get() == r"O\.D\."
+    assert markings.var_search_line.get() == ""
+
+
+def test_search_after_marker_from_selection_sets_escaped_literal_marker() -> None:
+    markings = _MarkerSelectionMarkings()
+
+    markings.on_marking_set_search_after_selection()
+
+    assert markings.var_search_mode.get() == "after"
+    assert markings.var_search_after.get() == r"O\.D\."
+    assert markings.var_search_line.get() == ""
+    assert "Marker aus Auswahl" in markings.hints[-1]
 
 
 def test_field_preview_updates_pdf_panel_preview_when_present() -> None:

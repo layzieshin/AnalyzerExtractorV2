@@ -245,6 +245,11 @@ class UiBuilderMixin:
             text="Suche ab: Zeile davor",
             command=self.on_marking_set_search_after_prev_line,
         ).pack(side="left")
+        tk.Button(
+            sel_btn_row_2,
+            text="Suche ab Marker aus Auswahl",
+            command=self.on_marking_set_search_after_selection,
+        ).pack(side="left", padx=(6, 0))
 
         legend_frame = tk.LabelFrame(marking_list, text="Felder und Treffer")
         legend_frame.pack(fill="both", expand=True)
@@ -291,9 +296,9 @@ class UiBuilderMixin:
         ).grid(row=2, column=1, sticky="w", padx=(4, 4), pady=(0, 6))
         sf_row = tk.Frame(param_frame)
         sf_row.grid(row=3, column=0, columnspan=3, sticky="we", padx=6, pady=(0, 6))
-        tk.Label(sf_row, text="after").pack(side="left")
+        tk.Label(sf_row, text="Marker").pack(side="left")
         tk.Entry(sf_row, textvariable=self.var_search_after, width=32).pack(side="left", fill="x", expand=True, padx=(4, 8))
-        tk.Label(sf_row, text="line").pack(side="left")
+        tk.Label(sf_row, text="Zeile").pack(side="left")
         tk.Entry(sf_row, textvariable=self.var_search_line, width=6).pack(side="left", padx=(4, 0))
         param_frame.columnconfigure(1, weight=1)
 
@@ -360,12 +365,14 @@ class UiBuilderMixin:
             width=8,
             state="readonly",
         ).grid(row=1, column=1, sticky="w", padx=(4, 8), pady=(0, 6))
-        tk.Entry(edit, textvariable=self.var_search_after, width=28).grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 6))
-        tk.Entry(edit, textvariable=self.var_search_line, width=10).grid(row=1, column=3, sticky="w", pady=(0, 6))
-        tk.Label(edit, text="Regex-Gruppe (nur Test)").grid(row=1, column=4, sticky="w", pady=(0, 6))
+        tk.Label(edit, text="Marker").grid(row=1, column=2, sticky="e", padx=(0, 4), pady=(0, 6))
+        tk.Entry(edit, textvariable=self.var_search_after, width=28).grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(0, 6))
+        tk.Label(edit, text="Zeile").grid(row=1, column=4, sticky="e", padx=(0, 4), pady=(0, 6))
+        tk.Entry(edit, textvariable=self.var_search_line, width=10).grid(row=1, column=5, sticky="w", pady=(0, 6))
+        tk.Label(edit, text="Regex-Gruppe (nur Test)").grid(row=1, column=6, sticky="w", padx=(8, 0), pady=(0, 6))
         ttk.Combobox(edit, textvariable=self.var_regex_group, values=["0", "1", "2", "3"], width=4, state="readonly").grid(
             row=1,
-            column=5,
+            column=7,
             sticky="w",
             padx=(4, 8),
             pady=(0, 6),
@@ -377,9 +384,9 @@ class UiBuilderMixin:
             justify="left",
             wraplength=900,
             fg="#8a6d00",
-        ).grid(row=2, column=0, columnspan=5, sticky="we", padx=(6, 8), pady=(0, 6))
+        ).grid(row=2, column=0, columnspan=7, sticky="we", padx=(6, 8), pady=(0, 6))
         tk.Button(edit, text="Im PDF-Tab zeigen/hinterlegen", command=self.on_goto_field_marking).grid(
-            row=2, column=5, sticky="e", padx=(0, 8), pady=(0, 6)
+            row=2, column=7, sticky="e", padx=(0, 8), pady=(0, 6)
         )
         edit.columnconfigure(3, weight=1)
 
