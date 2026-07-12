@@ -148,6 +148,17 @@ class FieldsMixin:
                 raise ValueError("search_from.line muss integer sein")
         return None
 
+    def _reload_column_mapping_from_draft(self) -> None:
+        if not self.current_draft_path:
+            return
+        data = load_draft(self.current_draft_path)
+        excel_rules = data.get("excel_rules")
+        if not isinstance(excel_rules, dict):
+            excel_rules = {}
+        col_map = excel_rules.get("column_mapping")
+        self.column_mapping_data = dict(col_map) if isinstance(col_map, dict) else {}
+        self._refresh_cols_tree()
+
     def on_add_field(self) -> None:
         if not self.current_draft_path:
             self._set_hint("Bitte zuerst Draft laden. Tipp: Oben 'Draft aus aktivem Assay' oder 'Draft laden in Editor' nutzen.")
@@ -162,6 +173,7 @@ class FieldsMixin:
             sf = self._build_search_from()
             add_field(self.current_draft_path, key, regex, required=self.var_field_required.get(), search_from=sf)
             self.fields_data = load_draft(self.current_draft_path).get("extract_rules", {}).get("fields", [])
+            self._reload_column_mapping_from_draft()
             self._refresh_fields_tree(selected_key=key)
             self._set_hint(f"Feld hinzugefügt: {key}")
             self._log(f"Feld hinzugefügt: {key}")
@@ -190,6 +202,7 @@ class FieldsMixin:
                 search_from=sf if self.var_search_mode.get() != "none" else {},
             )
             self.fields_data = load_draft(self.current_draft_path).get("extract_rules", {}).get("fields", [])
+            self._reload_column_mapping_from_draft()
             self._refresh_fields_tree(selected_key=key)
             self._set_hint(f"Feld aktualisiert: {key}")
             self._log(f"Feld aktualisiert: {key}")
@@ -214,6 +227,7 @@ class FieldsMixin:
             self._push_undo_snapshot()
             duplicate_field(self.current_draft_path, source_key, new_key)
             self.fields_data = load_draft(self.current_draft_path).get("extract_rules", {}).get("fields", [])
+            self._reload_column_mapping_from_draft()
             self._refresh_fields_tree(selected_key=new_key)
             self._set_hint(f"Feld dupliziert: {source_key} -> {new_key}")
             self._log(f"Feld dupliziert: {source_key} -> {new_key}")
@@ -253,11 +267,9 @@ class FieldsMixin:
         try:
             self._push_undo_snapshot()
             remove_field(self.current_draft_path, key)
-            data = load_draft(self.current_draft_path)
-            self.fields_data = data.get("extract_rules", {}).get("fields", [])
-            self.column_mapping_data = data.get("excel_rules", {}).get("column_mapping", {})
+            self.fields_data = load_draft(self.current_draft_path).get("extract_rules", {}).get("fields", [])
+            self._reload_column_mapping_from_draft()
             self._refresh_fields_tree()
-            self._refresh_cols_tree()
             self._reset_field_form()
             self._set_hint(f"Feld entfernt: {key}")
             self._log(f"Feld entfernt: {key}")
@@ -282,11 +294,9 @@ class FieldsMixin:
         try:
             self._push_undo_snapshot()
             rename_field(self.current_draft_path, old_key, new_key)
-            data = load_draft(self.current_draft_path)
-            self.fields_data = data.get("extract_rules", {}).get("fields", [])
-            self.column_mapping_data = data.get("excel_rules", {}).get("column_mapping", {})
+            self.fields_data = load_draft(self.current_draft_path).get("extract_rules", {}).get("fields", [])
+            self._reload_column_mapping_from_draft()
             self._refresh_fields_tree(selected_key=new_key)
-            self._refresh_cols_tree()
             self._set_hint(f"Feld umbenannt: {old_key} -> {new_key}")
             self._log(f"Feld umbenannt: {old_key} -> {new_key}")
             self._dirty = False

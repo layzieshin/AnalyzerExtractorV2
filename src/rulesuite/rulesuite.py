@@ -134,6 +134,7 @@ class RuleSuite:
         if search_from is not None:
             row["search_from"] = search_from
         fields.append(row)
+        _ensure_column_mapping_entry(data, key)
         return self.save_draft(draft_path, data)
 
     def remove_field(self, draft_path: str, field_key: str) -> Path:
@@ -144,9 +145,8 @@ class RuleSuite:
             raise RuleSuiteError(f"field_not_found: {field_key}")
         data.setdefault("extract_rules", {})["fields"] = out
 
-        col_map = data.setdefault("excel_rules", {}).setdefault("column_mapping", {})
-        if isinstance(col_map, dict):
-            col_map.pop(field_key, None)
+        col_map = _column_mapping_dict(data)
+        col_map.pop(field_key, None)
 
         dedupe = data.setdefault("extract_rules", {}).get("dedupe_fields")
         if isinstance(dedupe, list):
@@ -174,9 +174,10 @@ class RuleSuite:
         if not found:
             raise RuleSuiteError(f"field_not_found: {old_key}")
 
-        col_map = data.setdefault("excel_rules", {}).setdefault("column_mapping", {})
-        if isinstance(col_map, dict) and old_key in col_map:
+        col_map = _column_mapping_dict(data)
+        if old_key in col_map:
             col_map[new_key] = col_map.pop(old_key)
+        _ensure_column_mapping_entry(data, new_key)
 
         dedupe = data.setdefault("extract_rules", {}).get("dedupe_fields")
         if isinstance(dedupe, list):
@@ -201,6 +202,7 @@ class RuleSuite:
         cloned = deepcopy(source)
         cloned["key"] = new_key
         fields.append(cloned)
+        _ensure_column_mapping_entry(data, new_key)
         return self.save_draft(draft_path, data)
 
     def move_field(self, draft_path: str, field_key: str, direction: str) -> Path:
@@ -246,9 +248,19 @@ class RuleSuite:
                     f["search_from"] = search_from
                 else:
                     f.pop("search_from", None)
+            _ensure_column_mapping_entry(data, field_key)
             return self.save_draft(draft_path, data)
 
         raise RuleSuiteError(f"field_not_found: {field_key}")
+
+    def sync_column_mapping_from_fields(self, draft_path: str) -> Path:
+        data = self.load_draft(draft_path)
+        fields = _ensure_fields(data)
+        for field in fields:
+            key = str(field.get("key", "")).strip()
+            if key:
+                _ensure_column_mapping_entry(data, key)
+        return self.save_draft(draft_path, data)
 
     def set_lot_rule(self, draft_path: str, regex: str) -> Path:
         data = self.load_draft(draft_path)
@@ -497,3 +509,24 @@ def _ensure_fields(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not isinstance(fields, list):
         raise RuleSuiteError("extract_rules.fields must be list")
     return fields
+
+
+def _column_mapping_dict(data: Dict[str, Any]) -> Dict[str, str]:
+    excel_rules = data.setdefault("excel_rules", {})
+    if not isinstance(excel_rules, dict):
+        excel_rules = {}
+        data["excel_rules"] = excel_rules
+    col_map = excel_rules.get("column_mapping")
+    if not isinstance(col_map, dict):
+        col_map = {}
+        excel_rules["column_mapping"] = col_map
+    return col_map
+
+
+def _ensure_column_mapping_entry(data: Dict[str, Any], field_key: str) -> None:
+    key = field_key.strip()
+    if not key:
+        return
+    col_map = _column_mapping_dict(data)
+    if key not in col_map:
+        col_map[key] = key

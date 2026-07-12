@@ -30,10 +30,12 @@ from src.rulesuite.api import (
     remove_field,
     rename_field,
     REQUIRED_HEADER_FIELD_KEYS,
+    save_draft,
     set_dedupe_fields,
     set_excel_rules,
     set_field_regex,
     set_lot_rule,
+    sync_column_mapping_from_fields,
     test_regex,
     update_field,
     validate_draft,
@@ -191,6 +193,116 @@ def test_field_ops_sync_column_mapping_and_dedupe(tmp_path: Path) -> None:
     d5 = load_draft(draft)
     keys2 = [f["key"] for f in d5["extract_rules"]["fields"]]
     assert keys2.index("test_copy") < keys2.index("date")
+
+
+def test_add_field_adds_default_column_mapping(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9000)", "Test Assay")
+
+    add_field(draft, "C1_MINIMUM", r"C1:(\d+)", required=False)
+    data = load_draft(draft)
+
+    assert data["excel_rules"]["column_mapping"]["C1_MINIMUM"] == "C1_MINIMUM"
+
+
+def test_add_field_does_not_overwrite_existing_column_mapping(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9000)", "Test Assay")
+    add_field(draft, "test", r"T:(\w+)", required=False)
+    set_excel_rules(draft, "{assay_name}.xlsx", "{lot_id}", {"test": "CUSTOM"})
+
+    add_field(draft, "other", r"O:(\w+)", required=False)
+    data = load_draft(draft)
+
+    assert data["excel_rules"]["column_mapping"]["test"] == "CUSTOM"
+    assert data["excel_rules"]["column_mapping"]["other"] == "other"
+
+
+def test_update_field_adds_missing_column_mapping(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    data = load_draft(draft)
+    data["excel_rules"]["column_mapping"] = {"test": "TEST"}
+    save_draft(draft, data)
+
+    update_field(draft, "date", regex=r"Date:(\d+)")
+    updated = load_draft(draft)
+
+    assert updated["excel_rules"]["column_mapping"]["test"] == "TEST"
+    assert updated["excel_rules"]["column_mapping"]["date"] == "date"
+
+
+def test_update_field_not_found_leaves_column_mapping(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9000)", "Test Assay")
+
+    with pytest.raises(RuleSuiteError, match="field_not_found"):
+        update_field(draft, "missing", regex=r"x")
+
+    data = load_draft(draft)
+    assert data["excel_rules"]["column_mapping"] == {}
+
+
+def test_duplicate_field_uses_new_key_column_name(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    set_excel_rules(
+        draft,
+        "{assay_name}.xlsx",
+        "{lot_id}",
+        {"test": "TEST_COL", "date": "DATE_COL"},
+    )
+
+    duplicate_field(draft, "test", "test_copy")
+    data = load_draft(draft)
+
+    assert data["excel_rules"]["column_mapping"]["test"] == "TEST_COL"
+    assert data["excel_rules"]["column_mapping"]["test_copy"] == "test_copy"
+
+
+def test_rename_field_without_old_mapping_adds_new_key_default(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    data = load_draft(draft)
+    data["excel_rules"]["column_mapping"] = {"test": "TEST"}
+    save_draft(draft, data)
+
+    rename_field(draft, "date", "datum")
+    updated = load_draft(draft)
+
+    assert updated["excel_rules"]["column_mapping"]["test"] == "TEST"
+    assert updated["excel_rules"]["column_mapping"]["datum"] == "datum"
+    assert "date" not in updated["excel_rules"]["column_mapping"]
+
+
+def test_sync_column_mapping_from_fields_adds_missing_without_overwrite(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    data = load_draft(draft)
+    data["excel_rules"]["column_mapping"] = {"test": "CustomTest", "orphan": "OrphanCol"}
+    save_draft(draft, data)
+
+    sync_column_mapping_from_fields(draft)
+    updated = load_draft(draft)
+    col = updated["excel_rules"]["column_mapping"]
+
+    assert col["test"] == "CustomTest"
+    assert col["date"] == "date"
+    assert col["orphan"] == "OrphanCol"
+
+
+def test_column_mapping_normalized_when_missing_or_invalid(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9000)", "Test Assay")
+    data = load_draft(draft)
+    data["excel_rules"]["column_mapping"] = "not-a-dict"
+    save_draft(draft, data)
+
+    add_field(draft, "alpha", r"A:(\w+)", required=False)
+    updated = load_draft(draft)
+
+    assert isinstance(updated["excel_rules"]["column_mapping"], dict)
+    assert updated["excel_rules"]["column_mapping"]["alpha"] == "alpha"
 
 
 def test_regex_and_validate_draft(tmp_path: Path) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import tkinter as tk
 
-from src.rulesuite.api import load_draft, save_draft, set_dedupe_fields, set_excel_rules, set_lot_rule
+from src.rulesuite.api import load_draft, save_draft, set_dedupe_fields, set_excel_rules, set_lot_rule, sync_column_mapping_from_fields
 
 
 class MetaMixin:
@@ -43,6 +43,22 @@ class MetaMixin:
         self._refresh_cols_tree()
         self._set_hint(f"Spaltenzuordnung entfernt: {key}")
         self._dirty = True
+
+    def on_sync_column_mapping_from_fields(self) -> None:
+        if not self.current_draft_path:
+            self._set_hint("Bitte zuerst Draft laden.")
+            return
+        try:
+            self._push_undo_snapshot()
+            sync_column_mapping_from_fields(self.current_draft_path)
+            self._reload_column_mapping_from_draft()
+            self._set_hint("Fehlende Spaltenzuordnungen aus Feldern ergänzt.")
+            self._log("Fehlende Spaltenzuordnungen aus Feldern ergänzt.")
+            self._dirty = False
+        except Exception as e:
+            from tkinter import messagebox
+
+            messagebox.showerror("Fehler", str(e))
 
     def _normalize_column_mapping(self) -> dict[str, str]:
         out: dict[str, str] = {}

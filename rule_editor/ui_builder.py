@@ -476,6 +476,7 @@ class UiBuilderMixin:
         tk.Entry(col_edit, textvariable=self.var_col_name, width=34).pack(side="left", padx=(6, 6))
         tk.Button(col_edit, text="Uebernehmen", command=self.on_set_col).pack(side="left")
         tk.Button(col_edit, text="Entfernen", command=self.on_remove_col).pack(side="left", padx=(6, 0))
+        tk.Button(col_edit, text="Mappings ergänzen", command=self.on_sync_column_mapping_from_fields).pack(side="left", padx=(6, 0))
 
     def _build_validate_tab(self, parent: tk.Frame) -> None:
         container = tk.Frame(parent)

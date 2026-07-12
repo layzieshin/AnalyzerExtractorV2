@@ -47,6 +47,7 @@ __all__ = [
     "set_excel_rules",
     "set_field_regex",
     "set_lot_rule",
+    "sync_column_mapping_from_fields",
     "suggest_builder_spec_from_selection",
     "suggest_regex_from_selection",
     "test_regex",
@@ -138,6 +139,10 @@ def set_excel_rules(
     column_mapping: Dict[str, str],
 ) -> str:
     return str(RuleSuite().set_excel_rules(draft_path, filename_template, sheet_template, column_mapping))
+
+
+def sync_column_mapping_from_fields(draft_path: str) -> str:
+    return str(RuleSuite().sync_column_mapping_from_fields(draft_path))
 
 
 def test_regex(
