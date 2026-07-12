@@ -6,13 +6,29 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List
 
+from src.runtime.api import release_exclusive, try_acquire_exclusive
+
 from .model import JobResult
 
 
 class JobController:
-    def submit(self, pdf_path: str, project_root: str):
+    def submit(
+        self,
+        pdf_path: str,
+        project_root: str,
+        output_mode: str = "both",
+        sqlite_path: str | None = None,
+        lock_ttl_s: float | None = None,
+        sqlite_busy_timeout_ms: int = 5000,
+        sqlite_retry_count: int = 3,
+        sqlite_retry_sleep_s: float = 0.2,
+    ):
         root = Path(project_root)
         pdf = Path(pdf_path)
+        try:
+            mode = self._normalize_output_mode(output_mode)
+        except Exception as e:
+            return self._result("FAILED", "", str(pdf), {"error": str(e)})
 
         if not pdf.exists():
             return self._result("FAILED", "", str(pdf), {"error": "pdf_not_found"})
@@ -39,7 +55,8 @@ class JobController:
 
         # Acquire lock
         try:
-            self._acquire_lock(lock_path)
+            effective_lock_ttl = lock_ttl_s if lock_ttl_s is not None else self._lock_ttl_from_env()
+            self._acquire_lock(lock_path, effective_lock_ttl)
         except FileExistsError:
             return self._result("SKIPPED", job_id, str(pdf), {"reason": "locked"})
 
@@ -52,10 +69,10 @@ class JobController:
             from src.assaychooser.api import detect_assays
             from src.normalizer.api import normalize_lines
             from src.ruleresolver.api import resolve_ruleset
-            from src.contentsplitter.api import split_by_assay_name_and_key
-            from src.contentsplitter.model import AssayDescriptor
+            from src.contentsplitter.api import AssayDescriptor, split_by_assay_name_and_key
             from src.extractor.api import extract_record
             from src.writer.api import write_record
+            from src.dbwriter.api import write_record_sqlite
 
             doc = parse(str(pdf))
             state["status"] = "PARSED"
@@ -69,6 +86,12 @@ class JobController:
             state["status"] = "NORMALIZED"
             state["steps"].append({"step": "normalizer", "lines": len(norm_lines)})
             self._save_state(state_path, state)
+
+            if self._reject_invalid_runs() and "validationskriterien nicht erfüllt" in norm_text.lower():
+                state["status"] = "FAILED"
+                state["error"] = "validation_failed"
+                self._save_state(state_path, state)
+                return self._result("FAILED", job_id, str(pdf), {"error": "validation_failed"})
 
             # DEBUG DUMP: normalized text (full)
             normalized_dump = jobs_dir / f"{job_id}_normalized.txt"
@@ -129,13 +152,70 @@ class JobController:
             for k in assay_keys:
                 ruleset = assay_rulesets[k]
                 rec = extract_record(blocks[k], ruleset)
-                wr = write_record(rec, ruleset, str(output_dir))
-                writes.append({
+                write_item: Dict[str, Any] = {
                     "assay_key": k,
-                    "excel_path": wr.excel_path,
-                    "sheet": wr.sheet_name,
-                    "status": wr.status
-                })
+                    "assay_name": str(ruleset.data.get("assay_name", "")).strip(),
+                    "ruleset_file": ruleset.ruleset_file,
+                    "lot_id": rec.lot_id,
+                    "dedupe_key": rec.dedupe_key,
+                    "data": rec.data,
+                    "missing_required": self._missing_required_fields(ruleset, rec.data),
+                    "outputs": [],
+                }
+
+                if mode in ("both", "excel"):
+                    try:
+                        wr = write_record(rec, ruleset, str(output_dir))
+                        write_item["outputs"].append(
+                            {
+                                "sink": "excel",
+                                "excel_path": wr.excel_path,
+                                "sheet": wr.sheet_name,
+                                "status": wr.status,
+                            }
+                        )
+                    except Exception as e:
+                        write_item["outputs"].append(
+                            {
+                                "sink": "excel",
+                                "status": "failed",
+                                "error": str(e),
+                            }
+                        )
+                        raise RuntimeError(f"excel_write_failed:{k}:{e}") from e
+
+                if mode in ("both", "sqlite"):
+                    sqlite_target = sqlite_path or str(output_dir / "results.sqlite3")
+                    try:
+                        db_wr = write_record_sqlite(
+                            rec,
+                            ruleset,
+                            sqlite_target,
+                            job_id=job_id,
+                            pdf_path=str(pdf),
+                            busy_timeout_ms=sqlite_busy_timeout_ms,
+                            retry_count=sqlite_retry_count,
+                            retry_sleep_s=sqlite_retry_sleep_s,
+                        )
+                        write_item["outputs"].append(
+                            {
+                                "sink": "sqlite",
+                                "sqlite_path": db_wr.sqlite_path,
+                                "table": db_wr.table_name,
+                                "status": db_wr.status,
+                            }
+                        )
+                    except Exception as e:
+                        write_item["outputs"].append(
+                            {
+                                "sink": "sqlite",
+                                "status": "failed",
+                                "error": str(e),
+                            }
+                        )
+                        raise RuntimeError(f"sqlite_write_failed:{k}:{e}") from e
+
+                writes.append(write_item)
 
             state["status"] = "DONE"
             state["steps"].append({"step": "writer", "writes": writes})
@@ -145,8 +225,12 @@ class JobController:
         except Exception as e:
             state["status"] = "FAILED"
             state["error"] = str(e)
+            state["partial_writes"] = writes if "writes" in locals() else []
             self._save_state(state_path, state)
-            return self._result("FAILED", job_id, str(pdf), {"error": str(e)})
+            details: Dict[str, Any] = {"error": str(e)}
+            if "writes" in locals() and writes:
+                details["partial_writes"] = writes
+            return self._result("FAILED", job_id, str(pdf), details)
         finally:
             self._release_lock(lock_path)
 
@@ -157,18 +241,49 @@ class JobController:
                 h.update(chunk)
         return h.hexdigest()[:16]
 
-    def _acquire_lock(self, lock_path: Path) -> None:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
+    def _acquire_lock(self, lock_path: Path, stale_ttl_s: float) -> None:
+        if not try_acquire_exclusive(lock_path, stale_ttl_s):
+            raise FileExistsError(str(lock_path))
 
     def _release_lock(self, lock_path: Path) -> None:
-        try:
-            lock_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        release_exclusive(lock_path)
 
     def _save_state(self, path: Path, state: Dict[str, Any]) -> None:
         path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _normalize_output_mode(self, output_mode: str) -> str:
+        mode = str(output_mode).strip().lower()
+        if mode not in {"both", "excel", "sqlite"}:
+            raise ValueError(f"invalid output_mode: {output_mode}")
+        return mode
+
+    def _lock_ttl_from_env(self) -> float:
+        raw = os.getenv("ARE_PIPELINE_LOCK_TTL_S", "").strip()
+        try:
+            return float(raw) if raw else 900.0
+        except ValueError:
+            return 900.0
+
+    def _reject_invalid_runs(self) -> bool:
+        raw = os.getenv("ARE_REJECT_INVALID_RUNS", "1").strip().lower()
+        return raw not in {"0", "false", "no"}
+
+    @staticmethod
+    def _missing_required_fields(ruleset: Any, data: Dict[str, Any]) -> List[str]:
+        fields = ruleset.data.get("extract_rules", {}).get("fields", [])
+        if not isinstance(fields, list):
+            return []
+        missing: List[str] = []
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            key = str(field.get("key", "")).strip()
+            if not key or not bool(field.get("required", False)):
+                continue
+            val = data.get(key)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                missing.append(key)
+        return missing
 
     def _result(self, status: str, job_id: str, pdf_path: str, details: Dict[str, object]):
         from .api import JobResult

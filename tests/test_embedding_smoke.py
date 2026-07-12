@@ -29,7 +29,15 @@ from src.runtime.api import (
     resolve_app_root,
     try_acquire_exclusive,
 )
-from src.testui.api import classify_job_outcome, format_rules_report, format_write_outputs
+from src.testui.api import (
+    classify_job_outcome,
+    format_assay_data_detail,
+    format_job_result_summary,
+    format_rules_report,
+    format_write_outputs,
+    humanize_job_error,
+    load_job_state,
+)
 from src.watchdog.api import run_watchdog_forever, scan_watch_once
 
 
@@ -51,6 +59,10 @@ def test_public_embedding_imports_are_available() -> None:
     assert classify_job_outcome is not None
     assert format_rules_report is not None
     assert format_write_outputs is not None
+    assert humanize_job_error is not None
+    assert format_job_result_summary is not None
+    assert format_assay_data_detail is not None
+    assert load_job_state is not None
     assert HEADER_FIELD_KEYS
     assert REQUIRED_HEADER_FIELD_KEYS
     assert len(REQUIRED_HEADER_FIELD_KEYS) == 8

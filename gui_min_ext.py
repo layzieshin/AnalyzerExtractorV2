@@ -1,160 +1,350 @@
 from __future__ import annotations
-import sys
 
 import json
 import os
-import re
 import shutil
 import threading
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
-from src.jobcontroller.api import JobController
+from src.jobcontroller.api import submit
+from src.ruleresolver.api import validate_rules_integrity
+from src.rulesuite.api import activate_draft, create_draft, list_fields, preview_extract, set_field_regex
+from src.runtime.api import load_runtime_config, resolve_app_root
+from src.testui.api import (
+    classify_job_outcome,
+    format_assay_data_detail,
+    format_assay_overview_rows,
+    format_job_result_summary,
+    format_partial_writes_note,
+    format_rules_report,
+    format_write_outputs,
+    format_write_status_lines,
+    humanize_job_error,
+    load_job_state,
+)
 
 
 class MinimalBatchGUI(tk.Tk):
-    """
-    Minimalistische GUI + Regex-Tester:
-
-    - PDFs auswählen
-    - Batch-Import (wie bisher)
-    - Buttons zum Leeren von /jobs und /output/final
-    - Regex testen:
-        - läuft die vollständige Extraktionskette (JobController.submit)
-        - lädt anschließend jobs/<job_id>.json und zeigt extrahierte Daten an
-        - Regex kann gegen erzeugte *_normalized.txt oder *_block.txt Dateien getestet werden
-    """
+    """Test UI for real API flows (without watchdog/queue)."""
 
     def __init__(self) -> None:
         super().__init__()
+        self.title("AnalyzerExtractorV2 - Test UI (Direct Mode)")
+        self.geometry("1200x820")
 
-        self.title("AnalyzerExtractorV2 – Minimal GUI + Regex Tester")
-        self.geometry("1100x720")
-
-        if getattr(sys, "frozen", False):
-            # läuft als PyInstaller-EXE
-            base_dir = Path(sys.executable).resolve().parent
-
-            # rules aus dem Bundle beim ersten Start kopieren
-            bundled_rules = Path(sys._MEIPASS) / "rules"
-            target_rules = base_dir / "rules"
-
-            if bundled_rules.exists() and not target_rules.exists():
-                shutil.copytree(bundled_rules, target_rules)
-        else:
-            # normales Python-Skript (PyCharm)
-            base_dir = Path(__file__).resolve().parent
-
+        base_dir = resolve_app_root(__file__)
         self.project_root = str(base_dir)
         self.selected_files: list[str] = []
         self._is_running = False
-
-        # Regex Tester state
         self.last_job_id: str | None = None
-        self.last_job_dir: Path | None = None
-        self.regex_target_files: list[Path] = []
+        self._result_jobs: list[dict] = []
+        self._result_writes: dict[str, list[dict]] = {}
 
+        cfg = load_runtime_config(self.project_root)
+        self.var_project_root = tk.StringVar(value=self.project_root)
+        self.var_output_mode = tk.StringVar(value=cfg.output_mode)
+        self.var_sqlite_path = tk.StringVar(value=cfg.sqlite_path or "")
+        self.var_lock_ttl = tk.StringVar(value=str(cfg.pipeline_lock_ttl_s))
+        self.var_sqlite_busy_timeout = tk.StringVar(value=str(cfg.sqlite_busy_timeout_ms))
+        self.var_sqlite_retry_count = tk.StringVar(value=str(cfg.sqlite_retry_count))
+        self.var_sqlite_retry_sleep = tk.StringVar(value=str(cfg.sqlite_retry_sleep_s))
+        self.var_reject_invalid = tk.BooleanVar(value=True)
+
+        self.var_assay_key = tk.StringVar(value="")
+        self.var_draft_path = tk.StringVar(value="")
+        self.var_field_key = tk.StringVar(value="")
+        self.var_field_regex = tk.StringVar(value="")
+        self.var_preview_pdf = tk.StringVar(value="")
+
+        self._action_buttons: list[tk.Widget] = []
         self._build_ui()
 
-    # =========================
-    # UI
-    # =========================
-
     def _build_ui(self) -> None:
-        # Top bar
         top = tk.Frame(self)
-        top.pack(fill="x", padx=10, pady=10)
+        top.pack(fill="x", padx=10, pady=8)
 
-        btn_pick = tk.Button(top, text="PDFs auswählen…", command=self.on_pick_pdfs)
-        btn_pick.pack(side="left")
+        tk.Label(top, text="project_root:").pack(side="left")
+        ent_root = tk.Entry(top, textvariable=self.var_project_root)
+        ent_root.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        self._register_action(ent_root)
 
-        btn_clear = tk.Button(top, text="Liste leeren", command=self.on_clear_list)
-        btn_clear.pack(side="left", padx=(8, 0))
+        btn_root = tk.Button(top, text="Ordner waehlen...", command=self.on_pick_root)
+        btn_root.pack(side="left")
+        self._register_action(btn_root)
 
-        self.btn_run = tk.Button(top, text="Import starten", command=self.on_run)
-        self.btn_run.pack(side="left", padx=(8, 0))
-
-        btn_regex_chain = tk.Button(top, text="Regex testen (volle Kette)", command=self.on_regex_full_chain)
-        btn_regex_chain.pack(side="left", padx=(8, 0))
-
-        btn_clear_jobs = tk.Button(top, text="/jobs leeren", command=self.on_clear_jobs)
-        btn_clear_jobs.pack(side="left", padx=(18, 0))
-
-        btn_clear_final = tk.Button(top, text="/output/final leeren", command=self.on_clear_output_final)
-        btn_clear_final.pack(side="left", padx=(8, 0))
-
-        self.lbl_status = tk.Label(top, text="Bereit.")
+        self.lbl_status = tk.Label(top, text="Bereit (Direktmodus ohne Watchdog).")
         self.lbl_status.pack(side="right")
 
-        # Main area
-        middle = tk.Frame(self)
-        middle.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        cfg_frame = tk.LabelFrame(self, text="Submit Konfiguration (echte API)")
+        cfg_frame.pack(fill="x", padx=10, pady=(0, 8))
+        row = tk.Frame(cfg_frame)
+        row.pack(fill="x", padx=8, pady=6)
 
-        # Left: file list
-        left = tk.Frame(middle)
-        left.pack(side="left", fill="both", expand=True)
+        tk.Label(row, text="output_mode").pack(side="left")
+        dd_mode = tk.OptionMenu(row, self.var_output_mode, "both", "excel", "sqlite")
+        dd_mode.pack(side="left", padx=(4, 8))
+        self._register_action(dd_mode)
 
-        tk.Label(left, text="Ausgewählte PDFs:").pack(anchor="w")
+        tk.Label(row, text="sqlite_path").pack(side="left")
+        ent_sql = tk.Entry(row, textvariable=self.var_sqlite_path, width=36)
+        ent_sql.pack(side="left", padx=(4, 8))
+        self._register_action(ent_sql)
 
-        self.listbox = tk.Listbox(left, height=12)
-        self.listbox.pack(fill="both", expand=True)
+        tk.Label(row, text="lock_ttl_s").pack(side="left")
+        ent_lock = tk.Entry(row, textvariable=self.var_lock_ttl, width=8)
+        ent_lock.pack(side="left", padx=(4, 8))
+        self._register_action(ent_lock)
 
-        # Right: output + regex tester
-        right = tk.Frame(middle)
-        right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        tk.Label(row, text="sqlite_busy_timeout_ms").pack(side="left")
+        ent_busy = tk.Entry(row, textvariable=self.var_sqlite_busy_timeout, width=8)
+        ent_busy.pack(side="left", padx=(4, 8))
+        self._register_action(ent_busy)
 
-        tk.Label(right, text="Ausgabe / Log:").pack(anchor="w")
+        tk.Label(row, text="retry_count").pack(side="left")
+        ent_retry_count = tk.Entry(row, textvariable=self.var_sqlite_retry_count, width=5)
+        ent_retry_count.pack(side="left", padx=(4, 8))
+        self._register_action(ent_retry_count)
 
-        self.txt_log = tk.Text(right, height=18, wrap="word")
-        self.txt_log.pack(fill="both", expand=True)
+        tk.Label(row, text="retry_sleep_s").pack(side="left")
+        ent_retry_sleep = tk.Entry(row, textvariable=self.var_sqlite_retry_sleep, width=6)
+        ent_retry_sleep.pack(side="left", padx=(4, 8))
+        self._register_action(ent_retry_sleep)
 
-        # Regex tester panel
-        regex_panel = tk.LabelFrame(self, text="Regex Tester")
-        regex_panel.pack(fill="x", padx=10, pady=(0, 10))
+        cb_invalid = tk.Checkbutton(row, text="reject_invalid_runs", variable=self.var_reject_invalid)
+        cb_invalid.pack(side="left")
+        self._register_action(cb_invalid)
 
-        row1 = tk.Frame(regex_panel)
+        note = tk.Label(
+            self,
+            text="Hinweis: Diese Test-UI nutzt nur Direktaufrufe (submit/rulesuite/validator). "
+            "Watchdog, Worker und jobs/queue sind absichtlich ausgeklammert.",
+            anchor="w",
+        )
+        note.pack(fill="x", padx=10, pady=(0, 6))
+        known_issues = tk.Label(
+            self,
+            text="Testbetrieb: SKIPPED/already_done prueft nicht, ob Output-Dateien noch vorhanden sind. "
+            "Admin-Aktionen sind Diagnosewerkzeuge; Details siehe docs/KNOWN_ISSUES.md.",
+            anchor="w",
+            fg="#8a6d00",
+        )
+        known_issues.pack(fill="x", padx=10, pady=(0, 6))
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        tab_single = tk.Frame(nb)
+        tab_batch = tk.Frame(nb)
+        tab_preview = tk.Frame(nb)
+        tab_rules = tk.Frame(nb)
+        nb.add(tab_single, text="Single PDF")
+        nb.add(tab_batch, text="Batch")
+        nb.add(tab_preview, text="Rule Preview")
+        nb.add(tab_rules, text="Rules Check")
+
+        self._build_single_tab(tab_single)
+        self._build_batch_tab(tab_batch)
+        self._build_preview_tab(tab_preview)
+        self._build_rules_tab(tab_rules)
+
+        result_frame = tk.LabelFrame(self, text="Ergebnis")
+        result_frame.pack(fill="both", expand=False, padx=10, pady=(0, 6))
+        self.lbl_result_summary = tk.Label(result_frame, text="Noch kein Lauf.", anchor="w")
+        self.lbl_result_summary.pack(fill="x", padx=6, pady=(6, 2))
+        self.lbl_result_status = tk.Label(result_frame, text="", anchor="w", fg="#444")
+        self.lbl_result_status.pack(fill="x", padx=6, pady=(0, 4))
+
+        trees = tk.Frame(result_frame)
+        trees.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+        left = tk.Frame(trees)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        right = tk.Frame(trees)
+        right.pack(side="left", fill="both", expand=True)
+
+        tk.Label(left, text="Laeufe").pack(anchor="w")
+        self.tree_result_jobs = ttk.Treeview(
+            left, columns=("pdf", "status", "outcome"), show="headings", height=4
+        )
+        for col, title, width in (
+            ("pdf", "PDF", 280),
+            ("status", "Status", 90),
+            ("outcome", "Outcome", 70),
+        ):
+            self.tree_result_jobs.heading(col, text=title)
+            self.tree_result_jobs.column(col, width=width, anchor="w")
+        self.tree_result_jobs.pack(fill="both", expand=True)
+        self.tree_result_jobs.bind("<<TreeviewSelect>>", self.on_result_job_selected)
+
+        tk.Label(right, text="Assays").pack(anchor="w")
+        self.tree_result_assays = ttk.Treeview(
+            right,
+            columns=("assay_key", "lot_id", "ruleset", "missing", "write_status"),
+            show="headings",
+            height=4,
+        )
+        for col, title, width in (
+            ("assay_key", "Assay", 110),
+            ("lot_id", "Lot", 80),
+            ("ruleset", "Ruleset", 140),
+            ("missing", "Missing", 90),
+            ("write_status", "Schreibstatus", 220),
+        ):
+            self.tree_result_assays.heading(col, text=title)
+            self.tree_result_assays.column(col, width=width, anchor="w")
+        self.tree_result_assays.pack(fill="both", expand=True)
+        self.tree_result_assays.bind("<<TreeviewSelect>>", self.on_result_assay_selected)
+
+        detail_frame = tk.LabelFrame(result_frame, text="Feldwerte (Auswahl)")
+        detail_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.txt_result_detail = tk.Text(detail_frame, height=8, wrap="word")
+        self.txt_result_detail.pack(fill="both", expand=True, padx=4, pady=4)
+
+        log_frame = tk.LabelFrame(self, text="Ausgabe / Testprotokoll")
+        log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.txt_log = tk.Text(log_frame, height=10, wrap="word")
+        self.txt_log.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _build_single_tab(self, parent: tk.Frame) -> None:
+        row = tk.Frame(parent)
+        row.pack(fill="x", padx=8, pady=8)
+
+        btn_pick = tk.Button(row, text="PDFs auswaehlen...", command=self.on_pick_pdfs)
+        btn_pick.pack(side="left")
+        self._register_action(btn_pick)
+
+        btn_clear = tk.Button(row, text="Liste leeren", command=self.on_clear_list)
+        btn_clear.pack(side="left", padx=(6, 0))
+        self._register_action(btn_clear)
+
+        btn_run = tk.Button(row, text="Single E2E starten", command=self.on_run_single)
+        btn_run.pack(side="left", padx=(12, 0))
+        self._register_action(btn_run)
+
+        btn_rerun = tk.Button(row, text="Force rerun (selektierte PDF)", command=self.on_force_rerun_selected)
+        btn_rerun.pack(side="left", padx=(6, 0))
+        self._register_action(btn_rerun)
+
+        self.listbox = tk.Listbox(parent, height=10)
+        self.listbox.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _build_batch_tab(self, parent: tk.Frame) -> None:
+        run_frame = tk.LabelFrame(parent, text="Fachlicher Batch-Lauf")
+        run_frame.pack(fill="x", padx=8, pady=(8, 4))
+        row = tk.Frame(run_frame)
+        row.pack(fill="x", padx=8, pady=8)
+
+        btn_run_batch = tk.Button(row, text="Batch E2E starten", command=self.on_run_batch)
+        btn_run_batch.pack(side="left")
+        self._register_action(btn_run_batch)
+
+        tk.Label(run_frame, text="Batch nutzt die gleiche PDF-Liste wie Single-PDF.").pack(
+            anchor="w", padx=8, pady=(0, 8)
+        )
+
+        admin_frame = tk.LabelFrame(parent, text="Diagnose / Admin")
+        admin_frame.pack(fill="x", padx=8, pady=(8, 4))
+        admin_note = tk.Label(
+            admin_frame,
+            text="Diese Aktionen veraendern Laufzeitartefakte. Force rerun entfernt Job/Lock-Artefakte, aber nicht Excel/SQLite.",
+            anchor="w",
+            fg="#8a6d00",
+        )
+        admin_note.pack(fill="x", padx=8, pady=(8, 4))
+        admin_row = tk.Frame(admin_frame)
+        admin_row.pack(fill="x", padx=8, pady=(0, 8))
+
+        btn_clear_jobs = tk.Button(admin_row, text="/jobs leeren", command=self.on_clear_jobs)
+        btn_clear_jobs.pack(side="left")
+        self._register_action(btn_clear_jobs)
+
+        btn_clear_out = tk.Button(admin_row, text="/output/final leeren", command=self.on_clear_output_final)
+        btn_clear_out.pack(side="left", padx=(8, 0))
+        self._register_action(btn_clear_out)
+
+    def _build_preview_tab(self, parent: tk.Frame) -> None:
+        row1 = tk.Frame(parent)
         row1.pack(fill="x", padx=8, pady=(8, 4))
 
-        tk.Label(row1, text="Regex:").pack(side="left")
-        self.ent_regex = tk.Entry(row1)
-        self.ent_regex.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        tk.Label(row1, text="assay_key").pack(side="left")
+        ent_assay = tk.Entry(row1, textvariable=self.var_assay_key, width=14)
+        ent_assay.pack(side="left", padx=(4, 8))
+        self._register_action(ent_assay)
 
-        self.var_regex_flags = tk.StringVar(value="MULTILINE")
-        flags_menu = tk.OptionMenu(row1, self.var_regex_flags, "NONE", "MULTILINE", "DOTALL", "MULTILINE|DOTALL")
-        flags_menu.pack(side="left")
+        btn_fields = tk.Button(row1, text="Felder laden", command=self.on_list_fields)
+        btn_fields.pack(side="left")
+        self._register_action(btn_fields)
 
-        btn_run_regex = tk.Button(row1, text="Regex auf Zieltext testen", command=self.on_run_regex)
-        btn_run_regex.pack(side="left", padx=(8, 0))
+        btn_create = tk.Button(row1, text="Draft erstellen", command=self.on_create_draft)
+        btn_create.pack(side="left", padx=(6, 0))
+        self._register_action(btn_create)
 
-        row2 = tk.Frame(regex_panel)
-        row2.pack(fill="x", padx=8, pady=(0, 8))
+        row2 = tk.Frame(parent)
+        row2.pack(fill="x", padx=8, pady=(4, 4))
+        tk.Label(row2, text="draft_path").pack(side="left")
+        ent_draft = tk.Entry(row2, textvariable=self.var_draft_path)
+        ent_draft.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        self._register_action(ent_draft)
 
-        tk.Label(row2, text="Zieltext-Datei (aus /jobs):").pack(side="left")
+        btn_pick_draft = tk.Button(row2, text="Draft waehlen...", command=self.on_pick_draft)
+        btn_pick_draft.pack(side="left")
+        self._register_action(btn_pick_draft)
 
-        self.var_target_file = tk.StringVar(value="")
-        self.dd_target = tk.OptionMenu(row2, self.var_target_file, "")
-        self.dd_target.config(width=60)
-        self.dd_target.pack(side="left", padx=(6, 6), fill="x", expand=True)
+        row3 = tk.Frame(parent)
+        row3.pack(fill="x", padx=8, pady=(4, 4))
+        tk.Label(row3, text="field_key").pack(side="left")
+        ent_field = tk.Entry(row3, textvariable=self.var_field_key, width=16)
+        ent_field.pack(side="left", padx=(4, 8))
+        self._register_action(ent_field)
 
-        btn_refresh_targets = tk.Button(row2, text="Ziel-Dateien neu laden", command=self.refresh_regex_targets)
-        btn_refresh_targets.pack(side="left")
+        tk.Label(row3, text="regex").pack(side="left")
+        ent_regex = tk.Entry(row3, textvariable=self.var_field_regex)
+        ent_regex.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        self._register_action(ent_regex)
 
-        # Footer: project_root
-        footer = tk.Frame(self)
-        footer.pack(fill="x", padx=10, pady=(0, 10))
+        btn_set = tk.Button(row3, text="Regex setzen", command=self.on_set_field_regex)
+        btn_set.pack(side="left")
+        self._register_action(btn_set)
 
-        tk.Label(footer, text="project_root:").pack(side="left")
-        self.ent_root = tk.Entry(footer)
-        self.ent_root.pack(side="left", fill="x", expand=True, padx=(6, 6))
-        self.ent_root.insert(0, self.project_root)
+        row4 = tk.Frame(parent)
+        row4.pack(fill="x", padx=8, pady=(4, 8))
+        tk.Label(row4, text="preview_pdf").pack(side="left")
+        ent_preview_pdf = tk.Entry(row4, textvariable=self.var_preview_pdf)
+        ent_preview_pdf.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        self._register_action(ent_preview_pdf)
 
-        btn_set_root = tk.Button(footer, text="Ordner wählen…", command=self.on_pick_root)
-        btn_set_root.pack(side="left")
+        btn_pick_pdf = tk.Button(row4, text="PDF waehlen...", command=self.on_pick_preview_pdf)
+        btn_pick_pdf.pack(side="left")
+        self._register_action(btn_pick_pdf)
 
-    # =========================
-    # Helpers / Logging
-    # =========================
+        btn_preview = tk.Button(row4, text="Preview (ohne Write)", command=self.on_preview_extract)
+        btn_preview.pack(side="left", padx=(6, 0))
+        self._register_action(btn_preview)
+
+        btn_activate = tk.Button(row4, text="Draft aktivieren", command=self.on_activate_draft)
+        btn_activate.pack(side="left", padx=(6, 0))
+        self._register_action(btn_activate)
+
+    def _build_rules_tab(self, parent: tk.Frame) -> None:
+        row = tk.Frame(parent)
+        row.pack(fill="x", padx=8, pady=8)
+        btn_rules = tk.Button(row, text="Rules Integritaet pruefen", command=self.on_rules_check)
+        btn_rules.pack(side="left")
+        self._register_action(btn_rules)
+
+    def _register_action(self, widget: tk.Widget) -> None:
+        self._action_buttons.append(widget)
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self._is_running = running
+        state = "disabled" if running else "normal"
+        for w in self._action_buttons:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+        self._set_status(status)
 
     def _log(self, msg: str) -> None:
         def _append() -> None:
@@ -166,96 +356,481 @@ class MinimalBatchGUI(tk.Tk):
     def _set_status(self, msg: str) -> None:
         self.after(0, lambda: self.lbl_status.config(text=msg))
 
-    def _enable_run_button(self) -> None:
-        self.after(0, lambda: self.btn_run.config(state="normal"))
-
-    def _disable_run_button(self) -> None:
-        self.after(0, lambda: self.btn_run.config(state="disabled"))
-
-    # =========================
-    # Project root + PDF list
-    # =========================
+    def _root_path(self) -> Path:
+        return Path(self.var_project_root.get().strip())
 
     def on_pick_root(self) -> None:
         if self._is_running:
             return
-
-        d = filedialog.askdirectory(title="Projekt-Root auswählen (Repo-Ordner)")
-        if not d:
-            return
-
-        self.project_root = d
-        self.ent_root.delete(0, tk.END)
-        self.ent_root.insert(0, self.project_root)
-        self._log(f"project_root gesetzt: {self.project_root}")
+        d = filedialog.askdirectory(title="Projekt-Root waehlen")
+        if d:
+            self.var_project_root.set(d)
+            self._log(f"project_root gesetzt: {d}")
 
     def on_pick_pdfs(self) -> None:
         if self._is_running:
             return
-
-        files = filedialog.askopenfilenames(
-            title="PDFs auswählen",
-            filetypes=[("PDF Dateien", "*.pdf")],
-        )
+        files = filedialog.askopenfilenames(title="PDFs waehlen", filetypes=[("PDF Dateien", "*.pdf")])
         if not files:
             return
-
         for f in files:
             if f not in self.selected_files:
                 self.selected_files.append(f)
-
         self._refresh_listbox()
-        self._log(f"{len(files)} Datei(en) hinzugefügt. Gesamt: {len(self.selected_files)}")
+        self._log(f"PDFs hinzugefuegt: {len(files)} | Gesamt: {len(self.selected_files)}")
 
     def on_clear_list(self) -> None:
         if self._is_running:
             return
-
         self.selected_files = []
         self._refresh_listbox()
-        self._log("Liste geleert.")
+        self._log("PDF-Liste geleert.")
 
     def _refresh_listbox(self) -> None:
         self.listbox.delete(0, tk.END)
-        for f in self.selected_files:
-            self.listbox.insert(tk.END, f)
+        for p in self.selected_files:
+            self.listbox.insert(tk.END, p)
 
-    # =========================
-    # Clear folders
-    # =========================
+    def _selected_pdf(self) -> str | None:
+        if not self.selected_files:
+            return None
+        sel = self.listbox.curselection()
+        if sel:
+            return self.selected_files[int(sel[0])]
+        return self.selected_files[0]
+
+    def _read_submit_config(self) -> dict:
+        return {
+            "output_mode": self.var_output_mode.get().strip() or "both",
+            "sqlite_path": self.var_sqlite_path.get().strip() or None,
+            "lock_ttl_s": float(self.var_lock_ttl.get().strip() or "900"),
+            "sqlite_busy_timeout_ms": int(self.var_sqlite_busy_timeout.get().strip() or "5000"),
+            "sqlite_retry_count": int(self.var_sqlite_retry_count.get().strip() or "3"),
+            "sqlite_retry_sleep_s": float(self.var_sqlite_retry_sleep.get().strip() or "0.2"),
+        }
+
+    def _with_env(self) -> None:
+        os.environ["ARE_REJECT_INVALID_RUNS"] = "1" if self.var_reject_invalid.get() else "0"
+
+    def on_run_single(self) -> None:
+        if self._is_running:
+            return
+        root = self._root_path()
+        pdf = self._selected_pdf()
+        if not root.exists():
+            messagebox.showerror("Fehler", f"project_root existiert nicht:\n{root}")
+            return
+        if not pdf:
+            messagebox.showinfo("Info", "Bitte zuerst PDF(s) waehlen.")
+            return
+        self._set_running(True, "Single-Test laeuft...")
+        threading.Thread(target=self._run_single_thread, args=(str(root), pdf), daemon=True).start()
+
+    def _run_single_thread(self, root: str, pdf: str) -> None:
+        try:
+            self._with_env()
+            cfg = self._read_submit_config()
+            self._log(f"=== Single E2E: {pdf} ===")
+            res = submit(pdf, root, **cfg)
+            self.last_job_id = res.job_id
+            self._result_jobs = []
+            self._result_writes = {}
+            self._present_job_result(res, root, clear_jobs=True)
+            self._log("=== Ende Single E2E ===\n")
+        except Exception as e:
+            self._log(f"[ERROR] {e}")
+            self._set_status(f"Fehler: {e}")
+        finally:
+            self._set_running(False, "Bereit.")
+
+    def _present_job_result(self, res, root: str, *, clear_jobs: bool = False) -> None:
+        outcome = classify_job_outcome(res.status, res.details)
+        summary = format_job_result_summary(
+            pdf_path=res.pdf_path,
+            job_id=res.job_id,
+            status=res.status,
+            details=res.details,
+            outcome=outcome,
+        )
+        human = humanize_job_error(
+            str(res.details.get("error") or ""),
+            str(res.details.get("reason") or "") or None,
+        )
+        partial_note = format_partial_writes_note(res.details)
+
+        self._log(f"result={outcome} status={res.status} job_id={res.job_id}")
+        if res.details.get("reason"):
+            self._log(f"reason={res.details.get('reason')}")
+            if res.details.get("reason") == "already_done":
+                self._log("Hinweis: already_done prueft nicht, ob Excel/SQLite noch existiert.")
+        if human:
+            self._log(f"info={human}")
+        if res.details.get("error"):
+            self._log(f"error={res.details.get('error')}")
+        if partial_note:
+            self._log(partial_note)
+        for line in format_write_outputs(res.details):
+            self._log(line)
+        if res.job_id:
+            self._print_job_state(root, res.job_id)
+
+        writes = res.details.get("writes") or res.details.get("partial_writes") or []
+        storage_key = res.job_id or f"run:{len(self._result_jobs)}"
+        if isinstance(writes, list):
+            self._result_writes[storage_key] = [w for w in writes if isinstance(w, dict)]
+        else:
+            self._result_writes[storage_key] = []
+
+        job_row = {
+            "job_id": res.job_id,
+            "storage_key": storage_key,
+            "pdf_path": res.pdf_path,
+            "status": res.status,
+            "outcome": outcome,
+            "summary": summary,
+            "human": human,
+            "partial_note": partial_note,
+            "details": dict(res.details),
+        }
+        if clear_jobs:
+            self._result_jobs = [job_row]
+        else:
+            self._result_jobs.append(job_row)
+
+        def _update_ui() -> None:
+            self.lbl_result_summary.config(text=summary)
+            status_parts = [p for p in (human, partial_note) if p]
+            self.lbl_result_status.config(text=" | ".join(status_parts))
+            self._refresh_result_jobs_tree(select_job_id=res.job_id or storage_key)
+            self._populate_assay_tree(storage_key)
+            self._set_status(summary)
+
+        self.after(0, _update_ui)
+
+    def _refresh_result_jobs_tree(self, select_job_id: str | None = None) -> None:
+        for row in self.tree_result_jobs.get_children():
+            self.tree_result_jobs.delete(row)
+        selected = None
+        for idx, row in enumerate(self._result_jobs):
+            pdf_name = Path(str(row.get("pdf_path", ""))).name
+            storage_key = str(row.get("storage_key") or row.get("job_id") or f"run:{idx}")
+            item = self.tree_result_jobs.insert(
+                "",
+                tk.END,
+                iid=storage_key,
+                values=(pdf_name, row.get("status", ""), row.get("outcome", "")),
+            )
+            if select_job_id and storage_key == select_job_id:
+                selected = item
+            elif select_job_id and row.get("job_id") == select_job_id:
+                selected = item
+        if selected:
+            self.tree_result_jobs.selection_set(selected)
+            self.tree_result_jobs.focus(selected)
+
+    def _populate_assay_tree(self, storage_key: str) -> None:
+        for row in self.tree_result_assays.get_children():
+            self.tree_result_assays.delete(row)
+        self._clear_result_detail()
+        writes = self._result_writes.get(storage_key, [])
+        for idx, overview in enumerate(format_assay_overview_rows(writes)):
+            self.tree_result_assays.insert(
+                "",
+                tk.END,
+                iid=f"{storage_key}:{idx}",
+                values=(
+                    overview.get("assay_key", ""),
+                    overview.get("lot_id", ""),
+                    overview.get("ruleset_file", ""),
+                    overview.get("missing_required", ""),
+                    overview.get("write_status", ""),
+                ),
+            )
+
+    def _clear_result_detail(self) -> None:
+        self.txt_result_detail.configure(state="normal")
+        self.txt_result_detail.delete("1.0", tk.END)
+        self.txt_result_detail.configure(state="disabled")
+
+    def on_result_job_selected(self, _event: object = None) -> None:
+        sel = self.tree_result_jobs.selection()
+        if not sel:
+            return
+        storage_key = str(sel[0])
+        row = next(
+            (r for r in self._result_jobs if str(r.get("storage_key") or r.get("job_id")) == storage_key),
+            None,
+        )
+        if row:
+            self.lbl_result_summary.config(text=str(row.get("summary", "")))
+            status_parts = [p for p in (row.get("human"), row.get("partial_note")) if p]
+            self.lbl_result_status.config(text=" | ".join(status_parts))
+        self._populate_assay_tree(storage_key)
+
+    def on_result_assay_selected(self, _event: object = None) -> None:
+        sel = self.tree_result_assays.selection()
+        if not sel:
+            return
+        iid = str(sel[0])
+        if ":" not in iid:
+            return
+        storage_key, idx_raw = iid.split(":", 1)
+        try:
+            idx = int(idx_raw)
+        except ValueError:
+            return
+        writes = self._result_writes.get(storage_key, [])
+        if idx < 0 or idx >= len(writes):
+            return
+        write_item = writes[idx]
+        detail = format_assay_data_detail(write_item)
+        write_lines = format_write_status_lines(write_item.get("outputs"))
+        text = detail
+        if write_lines:
+            text += "\n\n--- Schreibziele ---\n" + "\n".join(write_lines)
+        self.txt_result_detail.configure(state="normal")
+        self.txt_result_detail.delete("1.0", tk.END)
+        self.txt_result_detail.insert(tk.END, text)
+        self.txt_result_detail.configure(state="disabled")
+
+    def on_run_batch(self) -> None:
+        if self._is_running:
+            return
+        root = self._root_path()
+        if not root.exists():
+            messagebox.showerror("Fehler", f"project_root existiert nicht:\n{root}")
+            return
+        if not self.selected_files:
+            messagebox.showinfo("Info", "Bitte zuerst PDF(s) waehlen.")
+            return
+        self._set_running(True, "Batch-Test laeuft...")
+        threading.Thread(target=self._run_batch_thread, args=(str(root),), daemon=True).start()
+
+    def _run_batch_thread(self, root: str) -> None:
+        total = len(self.selected_files)
+        passed = 0
+        warned = 0
+        failed = 0
+        cfg = self._read_submit_config()
+        try:
+            self._with_env()
+            self._log(f"=== Batch E2E gestartet | total={total} ===")
+            self._result_jobs = []
+            self._result_writes = {}
+            for i, pdf in enumerate(self.selected_files, start=1):
+                self._set_status(f"Batch {i}/{total}")
+                res = submit(pdf, root, **cfg)
+                outcome = classify_job_outcome(res.status, res.details)
+                if outcome == "PASS":
+                    passed += 1
+                elif outcome == "WARN":
+                    warned += 1
+                else:
+                    failed += 1
+                self._present_job_result(res, root, clear_jobs=False)
+                self._log(f"[{i}/{total}] {Path(pdf).name}: {outcome} ({res.status}) job_id={res.job_id}")
+            self._log(f"=== Batch Ende | PASS={passed} WARN={warned} FAIL={failed} ===\n")
+        except Exception as e:
+            self._log(f"[ERROR] Batch exception: {e}")
+        finally:
+            self._set_running(False, "Bereit.")
 
     def on_clear_jobs(self) -> None:
         if self._is_running:
             return
-
-        root = self.ent_root.get().strip()
-        jobs_dir = Path(root) / "jobs"
+        jobs_dir = self._root_path() / "jobs"
         if not jobs_dir.exists():
             messagebox.showinfo("Info", f"Ordner existiert nicht:\n{jobs_dir}")
             return
-
-        if not messagebox.askyesno("Bestätigung", f"Wirklich ALLES in /jobs löschen?\n\n{jobs_dir}"):
+        if not messagebox.askyesno("Bestaetigung", f"Wirklich alles in /jobs loeschen?\n{jobs_dir}"):
             return
-
         deleted = self._clear_directory_contents(jobs_dir)
-        self._log(f"/jobs geleert. Gelöscht: {deleted} Einträge.")
-        self.refresh_regex_targets()
+        self._log(f"/jobs geleert ({deleted} Eintraege).")
 
     def on_clear_output_final(self) -> None:
         if self._is_running:
             return
+        out_dir = self._root_path() / "output" / "final"
+        if not out_dir.exists():
+            messagebox.showinfo("Info", f"Ordner existiert nicht:\n{out_dir}")
+            return
+        if not messagebox.askyesno("Bestaetigung", f"Wirklich alles in /output/final loeschen?\n{out_dir}"):
+            return
+        deleted = self._clear_directory_contents(out_dir)
+        self._log(f"/output/final geleert ({deleted} Eintraege).")
 
-        root = self.ent_root.get().strip()
-        final_dir = Path(root) / "output" / "final"
-        if not final_dir.exists():
-            messagebox.showinfo("Info", f"Ordner existiert nicht:\n{final_dir}")
+    def on_force_rerun_selected(self) -> None:
+        if self._is_running:
+            return
+        root = self._root_path()
+        pdf = self._selected_pdf()
+        if not pdf:
+            messagebox.showinfo("Info", "Bitte eine PDF auswaehlen.")
+            return
+        if not messagebox.askyesno(
+            "Force rerun",
+            "Job-Artefakte fuer diese PDF entfernen?\n\n"
+            f"{pdf}\n\n"
+            "Hinweis: Excel- und SQLite-Ausgaben werden dadurch nicht geloescht.",
+        ):
+            return
+        try:
+            job_id = self._compute_job_id(Path(pdf))
+            jobs_dir = root / "jobs"
+            locks_dir = root / "locks"
+            removed = 0
+            for p in jobs_dir.glob(f"{job_id}*"):
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+                    removed += 1
+            lock = locks_dir / f"{job_id}.lock"
+            if lock.exists():
+                lock.unlink(missing_ok=True)
+                removed += 1
+            self._log(f"Force rerun vorbereitet: job_id={job_id}, geloeschte Artefakte={removed}")
+        except Exception as e:
+            messagebox.showerror("Fehler", str(e))
+
+    def on_pick_draft(self) -> None:
+        if self._is_running:
+            return
+        p = filedialog.askopenfilename(title="Draft waehlen", filetypes=[("JSON", "*.json")])
+        if p:
+            self.var_draft_path.set(p)
+
+    def on_pick_preview_pdf(self) -> None:
+        if self._is_running:
+            return
+        p = filedialog.askopenfilename(title="Preview PDF waehlen", filetypes=[("PDF", "*.pdf")])
+        if p:
+            self.var_preview_pdf.set(p)
+
+    def on_list_fields(self) -> None:
+        if self._is_running:
+            return
+        root = str(self._root_path())
+        assay = self.var_assay_key.get().strip()
+        if not assay:
+            messagebox.showinfo("Info", "Bitte assay_key angeben.")
+            return
+        try:
+            fields = list_fields(root, assay)
+            self._log(f"RuleSuite fields ({assay}): {fields}")
+        except Exception as e:
+            self._log(f"[ERROR] list_fields: {e}")
+
+    def on_create_draft(self) -> None:
+        if self._is_running:
+            return
+        root = str(self._root_path())
+        assay = self.var_assay_key.get().strip()
+        if not assay:
+            messagebox.showinfo("Info", "Bitte assay_key angeben.")
+            return
+        try:
+            path = create_draft(root, assay)
+            self.var_draft_path.set(path)
+            self._log(f"Draft erstellt: {path}")
+        except Exception as e:
+            self._log(f"[ERROR] create_draft: {e}")
+
+    def on_set_field_regex(self) -> None:
+        if self._is_running:
+            return
+        draft = self.var_draft_path.get().strip()
+        field_key = self.var_field_key.get().strip()
+        regex = self.var_field_regex.get().strip()
+        if not draft or not field_key or not regex:
+            messagebox.showinfo("Info", "draft_path, field_key und regex sind erforderlich.")
+            return
+        try:
+            out = set_field_regex(draft, field_key, regex)
+            self._log(f"Regex gesetzt: {out} | {field_key}")
+        except Exception as e:
+            self._log(f"[ERROR] set_field_regex: {e}")
+
+    def on_preview_extract(self) -> None:
+        if self._is_running:
+            return
+        root = str(self._root_path())
+        assay = self.var_assay_key.get().strip()
+        pdf = self.var_preview_pdf.get().strip()
+        draft = self.var_draft_path.get().strip() or None
+        if not assay or not pdf:
+            messagebox.showinfo("Info", "assay_key und preview_pdf sind erforderlich.")
+            return
+        self._set_running(True, "Rule Preview laeuft...")
+        threading.Thread(target=self._preview_thread, args=(root, pdf, assay, draft), daemon=True).start()
+
+    def _preview_thread(self, root: str, pdf: str, assay: str, draft: str | None) -> None:
+        try:
+            out = preview_extract(root, pdf, assay, draft_path=draft)
+            self._log("=== Rule Preview ===")
+            self._log(json.dumps(out, ensure_ascii=False, indent=2))
+            self._log("=== Ende Rule Preview ===\n")
+        except Exception as e:
+            self._log(f"[ERROR] preview_extract: {e}")
+        finally:
+            self._set_running(False, "Bereit.")
+
+    def on_activate_draft(self) -> None:
+        if self._is_running:
+            return
+        root = str(self._root_path())
+        assay = self.var_assay_key.get().strip()
+        draft = self.var_draft_path.get().strip()
+        if not assay or not draft:
+            messagebox.showinfo("Info", "assay_key und draft_path sind erforderlich.")
+            return
+        if not messagebox.askyesno("Bestaetigung", f"Draft wirklich aktivieren?\n{draft}"):
+            return
+        try:
+            path = activate_draft(root, assay, draft)
+            self._log(f"Draft aktiviert -> {path}")
+        except Exception as e:
+            self._log(f"[ERROR] activate_draft: {e}")
+
+    def on_rules_check(self) -> None:
+        if self._is_running:
+            return
+        root = self._root_path()
+        try:
+            report = validate_rules_integrity(str(root / "rules"), str(root / "rules" / "index.json"))
+            self._log("=== Rules Integritaet ===")
+            for ln in format_rules_report(report):
+                self._log(ln)
+            self._log(json.dumps(report, ensure_ascii=False, indent=2))
+            has_issues = any(bool(v) for v in report.values())
+            self._log("RESULT: " + ("FAIL" if has_issues else "PASS"))
+            self._log("=== Ende Rules Integritaet ===\n")
+        except Exception as e:
+            self._log(f"[ERROR] rules_check: {e}")
+
+    def _print_job_state(self, root: str, job_id: str) -> None:
+        if not job_id:
+            return
+        state_path = Path(root) / "jobs" / f"{job_id}.json"
+        if not state_path.exists():
+            self._log(f"state_not_found: {state_path}")
+            return
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._log(f"state_read_error: {e}")
             return
 
-        if not messagebox.askyesno("Bestätigung", f"Wirklich ALLES in /output/final löschen?\n\n{final_dir}"):
-            return
-
-        deleted = self._clear_directory_contents(final_dir)
-        self._log(f"/output/final geleert. Gelöscht: {deleted} Einträge.")
+        self._log(f"state_status={state.get('status')}")
+        if state.get("error"):
+            self._log(f"state_error={state.get('error')}")
+        for step in state.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            step_name = step.get("step", "unknown")
+            self._log(f"[{step_name}]")
+            for k, v in step.items():
+                if k == "step":
+                    continue
+                self._log(f"  {k}: {v}")
 
     def _clear_directory_contents(self, dir_path: Path) -> int:
         count = 0
@@ -267,387 +842,33 @@ class MinimalBatchGUI(tk.Tk):
                     item.unlink()
                 count += 1
             except Exception as e:
-                self._log(f"  [WARN] Konnte nicht löschen: {item} -> {e}")
+                self._log(f"[WARN] delete failed: {item} -> {e}")
         return count
 
-    # =========================
-    # Import (Batch)
-    # =========================
+    def _compute_job_id(self, path: Path) -> str:
+        import hashlib
 
-    def on_run(self) -> None:
-        if self._is_running:
-            return
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()[:16]
 
-        root = self.ent_root.get().strip()
-        if not root:
-            messagebox.showerror("Fehler", "project_root ist leer.")
-            return
-        if not Path(root).exists():
-            messagebox.showerror("Fehler", f"project_root existiert nicht:\n{root}")
-            return
-        if not self.selected_files:
-            messagebox.showinfo("Info", "Bitte zuerst PDFs auswählen.")
-            return
 
-        self.project_root = root
-
-        self._is_running = True
-        self._disable_run_button()
-        self._set_status("Läuft…")
-
-        t = threading.Thread(target=self._run_batch, daemon=True)
-        t.start()
-
-    def _run_batch(self) -> None:
-        jc = JobController()
-
-        total = len(self.selected_files)
-        done = 0
-
-        self._log("=== Batch-Import gestartet ===")
-        self._log(f"project_root: {self.project_root}")
-        self._log(f"Anzahl PDFs: {total}\n")
-
-        for pdf in self.selected_files:
-            done += 1
-            self._set_status(f"{done}/{total} …")
-
-            self._log(f"[{done}/{total}] Import: {pdf}")
-            try:
-                result = jc.submit(pdf, self.project_root)
-                self._log(f"  -> status={result.status}, job_id={result.job_id}")
-                if result.details:
-                    if "reason" in result.details:
-                        self._log(f"     reason={result.details.get('reason')}")
-                    if "error" in result.details:
-                        self._log(f"     error={result.details.get('error')}")
-                    if "writes" in result.details:
-                        writes = result.details.get("writes") or []
-                        for w in writes:
-                            self._log(
-                                f"     write: {w.get('excel_path')} | sheet={w.get('sheet')} | {w.get('status')}"
-                            )
-            except Exception as e:
-                self._log(f"  -> EXCEPTION: {e}")
-
-            self._log("")
-
-        self._log("=== Batch-Import beendet ===")
-
-        self._is_running = False
-        self._set_status("Fertig.")
-        self._enable_run_button()
-
-    # =========================
-    # Regex Tester: Full chain + display extracted data
-    # =========================
-
-    def on_regex_full_chain(self) -> None:
-        """
-        Läuft die komplette Kette auf *einer* PDF (aus der Liste) und zeigt danach:
-        - extrahierte Daten aus jobs/<job_id>.json (wenn vorhanden)
-        - sonst Fallback: kompletter State
-        Zusätzlich werden Regex-Zieltexte (normalized/block) in den Dropdown geladen.
-        """
-        if self._is_running:
-            return
-
-        root = self.ent_root.get().strip()
-        if not root or not Path(root).exists():
-            messagebox.showerror("Fehler", "project_root ist ungültig.")
-            return
-
-        if not self.selected_files:
-            messagebox.showinfo("Info", "Bitte zuerst mindestens eine PDF auswählen.")
-            return
-
-        # Wir nehmen die aktuell selektierte PDF, sonst die erste.
-        pdf = None
-        sel = self.listbox.curselection()
-        if sel:
-            pdf = self.selected_files[int(sel[0])]
-        else:
-            pdf = self.selected_files[0]
-
-        self.project_root = root
-
-        self._is_running = True
-        self._disable_run_button()
-        self._set_status("Regex-Chain läuft…")
-
-        t = threading.Thread(target=self._run_full_chain_for_regex, args=(pdf,), daemon=True)
-        t.start()
-
-    def _run_full_chain_for_regex(self, pdf: str) -> None:
-        jc = JobController()
-
-        self._log("=== Regex-Test: volle Kette ===")
-        self._log(f"PDF: {pdf}")
-        self._log(f"project_root: {self.project_root}\n")
-
-        try:
-            result = jc.submit(pdf, self.project_root)
-            self.last_job_id = result.job_id
-            self.last_job_dir = Path(self.project_root) / "jobs"
-
-            self._log(f"JobController.submit -> status={result.status}, job_id={result.job_id}")
-
-            # Job state laden (falls vorhanden)
-            state_path = (Path(self.project_root) / "jobs" / f"{result.job_id}.json")
-            if state_path.exists():
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-                self._log("\n--- Extrahierte Daten (aus Job-State) ---")
-                self._print_extracted_from_state(state)
-            else:
-                self._log("\n[WARN] Job-State nicht gefunden:")
-                self._log(f"  {state_path}")
-
-            self._log("\n--- Regex Ziel-Dateien (jobs) ---")
-            self.refresh_regex_targets(job_id=result.job_id)
-            self._log("Ziel-Dateien geladen. Wähle im Dropdown und nutze 'Regex auf Zieltext testen'.\n")
-
-        except Exception as e:
-            self._log(f"[ERROR] Full chain failed: {e}")
-
-        self._log("=== Ende Regex-Test (volle Kette) ===\n")
-
-        self._is_running = False
-        self._set_status("Fertig.")
-        self._enable_run_button()
-
-    def _print_extracted_from_state(self, state: dict) -> None:
-        """
-        Versucht, aus dem Job-State die 'Extractor'-Ergebnisse zu finden.
-        Falls Struktur anders ist, wird am Ende ein Fallback (pretty JSON) ausgegeben.
-        """
-        steps = state.get("steps", [])
-        if not isinstance(steps, list):
-            self._log("[WARN] state.steps ist nicht eine Liste. Fallback JSON folgt.")
-            self._log(json.dumps(state, ensure_ascii=False, indent=2))
-            return
-
-        # Suche nach bekannten Step-Namen
-        extractor_payloads = []
-        for s in steps:
-            if not isinstance(s, dict):
-                continue
-            step_name = str(s.get("step", "")).lower()
-            if step_name in ("extractor", "extract", "extraction"):
-                extractor_payloads.append(s)
-
-        if extractor_payloads:
-            for idx, payload in enumerate(extractor_payloads, start=1):
-                self._log(f"\n[Extractor Step #{idx}]")
-                # Typische Varianten: records / record / data
-                if "records" in payload:
-                    self._print_records(payload.get("records"))
-                elif "record" in payload:
-                    self._print_records(payload.get("record"))
-                elif "data" in payload:
-                    self._print_records(payload.get("data"))
-                else:
-                    # unbekannt -> dump payload
-                    self._log(json.dumps(payload, ensure_ascii=False, indent=2))
-            return
-
-        # Kein extractor step gefunden -> Fallback: versuche dennoch record.data aus anderen steps zu finden
-        # (wir bleiben defensiv, weil Struktur projektabhängig ist)
-        for s in steps:
-            if isinstance(s, dict) and "writes" in s:
-                self._log("\n[Writer Step]")
-                self._log(json.dumps(s, ensure_ascii=False, indent=2))
-
-        self._log("\n[Fallback] Konnte keinen 'extractor' Step finden – kompletter State:")
-        self._log(json.dumps(state, ensure_ascii=False, indent=2))
-
-    def _print_records(self, rec_obj) -> None:
-        """
-        Druckt record/data Strukturen möglichst lesbar.
-        Unterstützt:
-        - dict (ein record)
-        - list[dict] (mehrere)
-        - andere -> json dump
-        """
-        if isinstance(rec_obj, list):
-            for i, r in enumerate(rec_obj, start=1):
-                self._log(f"  Record #{i}:")
-                self._print_one_record(r, indent="    ")
-        elif isinstance(rec_obj, dict):
-            self._print_one_record(rec_obj, indent="  ")
-        else:
-            self._log(json.dumps(rec_obj, ensure_ascii=False, indent=2))
-
-    def _print_one_record(self, r: dict, indent: str) -> None:
-        if not isinstance(r, dict):
-            self._log(indent + str(r))
-            return
-
-        # Häufig: {"assay_key":..., "lot_id":..., "data": {...}}
-        # Wir versuchen, 'data' hübsch zu drucken, wenn vorhanden.
-        assay_key = r.get("assay_key")
-        lot_id = r.get("lot_id")
-        if assay_key is not None:
-            self._log(f"{indent}assay_key: {assay_key}")
-        if lot_id is not None:
-            self._log(f"{indent}lot_id: {lot_id}")
-
-        data = r.get("data")
-        if isinstance(data, dict):
-            for k in sorted(data.keys()):
-                self._log(f"{indent}{k}: {data.get(k)}")
-        else:
-            # Falls record selbst schon flach ist
-            for k in sorted(r.keys()):
-                if k in ("assay_key", "lot_id", "data"):
-                    continue
-                self._log(f"{indent}{k}: {r.get(k)}")
-
-    # =========================
-    # Regex tester against job artifacts
-    # =========================
-
-    def refresh_regex_targets(self, job_id: str | None = None) -> None:
-        """
-        Lädt mögliche Zieltexte aus /jobs:
-        - <job_id>_normalized.txt
-        - <job_id>_*_block.txt
-        Wenn job_id None: verwendet last_job_id.
-        """
-        root = self.ent_root.get().strip()
-        jobs_dir = Path(root) / "jobs"
-        if not jobs_dir.exists():
-            self._log("[WARN] /jobs existiert nicht, keine Zieltexte.")
-            return
-
-        if job_id is None:
-            job_id = self.last_job_id
-
-        targets: list[Path] = []
-
-        if job_id:
-            # exakt für diesen Job
-            targets.extend(sorted(jobs_dir.glob(f"{job_id}_normalized.txt")))
-            targets.extend(sorted(jobs_dir.glob(f"{job_id}_*_block.txt")))
-        else:
-            # fallback: alles anbieten (kann groß sein)
-            targets.extend(sorted(jobs_dir.glob("*_normalized.txt")))
-            targets.extend(sorted(jobs_dir.glob("*_block.txt")))
-
-        self.regex_target_files = targets
-
-        # Dropdown neu aufbauen
-        def _rebuild_dropdown() -> None:
-            menu = self.dd_target["menu"]
-            menu.delete(0, "end")
-
-            if not self.regex_target_files:
-                self.var_target_file.set("")
-                menu.add_command(label="", command=lambda: self.var_target_file.set(""))
-                return
-
-            # hübsche labels (nur filename)
-            first_label = self.regex_target_files[0].name
-            self.var_target_file.set(first_label)
-
-            for p in self.regex_target_files:
-                lbl = p.name
-                menu.add_command(label=lbl, command=lambda v=lbl: self.var_target_file.set(v))
-
-        self.after(0, _rebuild_dropdown)
-
-    def on_run_regex(self) -> None:
-        """
-        Testet den Regex gegen die aktuell ausgewählte Zieltext-Datei aus /jobs.
-        Gibt Match + Gruppen im Log aus.
-        """
-        regex = self.ent_regex.get().strip()
-        if not regex:
-            messagebox.showinfo("Info", "Bitte Regex eingeben.")
-            return
-
-        target_name = self.var_target_file.get().strip()
-        if not target_name:
-            messagebox.showinfo("Info", "Bitte eine Zieltext-Datei auswählen (Dropdown).")
-            return
-
-        root = self.ent_root.get().strip()
-        jobs_dir = Path(root) / "jobs"
-        target_path = jobs_dir / target_name
-        if not target_path.exists():
-            messagebox.showerror("Fehler", f"Zieltext-Datei nicht gefunden:\n{target_path}")
-            return
-
-        try:
-            text = target_path.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            messagebox.showerror("Fehler", f"Konnte Datei nicht lesen:\n{e}")
-            return
-
-        flags = 0
-        flag_choice = self.var_regex_flags.get()
-        if flag_choice == "MULTILINE":
-            flags = re.MULTILINE
-        elif flag_choice == "DOTALL":
-            flags = re.DOTALL
-        elif flag_choice == "MULTILINE|DOTALL":
-            flags = re.MULTILINE | re.DOTALL
-
-        self._log("=== Regex Test ===")
-        self._log(f"Target: {target_path}")
-        self._log(f"Flags: {flag_choice}")
-        self._log(f"Regex: {regex}")
-
-        try:
-            pattern = re.compile(regex, flags)
-        except re.error as e:
-            self._log(f"[REGEX ERROR] {e}")
-            self._log("=== Ende Regex Test ===\n")
-            return
-
-        m = pattern.search(text)
-        if not m:
-            self._log("-> Kein Treffer.")
-            self._log("=== Ende Regex Test ===\n")
-            return
-
-        self._log("-> Treffer gefunden.")
-        self._log(f"   match[0]: {m.group(0)}")
-        if m.groups():
-            for i, g in enumerate(m.groups(), start=1):
-                self._log(f"   group({i}): {g}")
-
-        # Context anzeigen (Zeile + Umgebung)
-        ctx = self._extract_match_context(text, m.start(), m.end(), max_lines=6)
-        self._log("\n--- Kontext (Ausschnitt) ---")
-        self._log(ctx)
-        self._log("=== Ende Regex Test ===\n")
-
-    def _extract_match_context(self, text: str, start: int, end: int, max_lines: int = 6) -> str:
-        """
-        Gibt einen kurzen Kontext um den Match zurück (einige Zeilen davor/danach).
-        """
-        lines = text.splitlines()
-        # Position -> Zeilenindex bestimmen
-        pos = 0
-        hit_line_idx = 0
-        for i, ln in enumerate(lines):
-            # +1 wegen splitlines ohne \n
-            next_pos = pos + len(ln) + 1
-            if pos <= start < next_pos:
-                hit_line_idx = i
-                break
-            pos = next_pos
-
-        lo = max(0, hit_line_idx - max_lines)
-        hi = min(len(lines), hit_line_idx + max_lines + 1)
-
-        out = []
-        for i in range(lo, hi):
-            prefix = ">> " if i == hit_line_idx else "   "
-            out.append(f"{prefix}{lines[i]}")
-        return "\n".join(out)
+def run_startup_smoke_check(project_root: str | Path | None = None) -> None:
+    root = Path(project_root) if project_root is not None else resolve_app_root(__file__)
+    rules_dir = root / "rules"
+    index_path = rules_dir / "index.json"
+    report = validate_rules_integrity(str(rules_dir), str(index_path))
+    has_issues = any(bool(v) for v in report.values())
+    if has_issues:
+        raise RuntimeError(f"rules_integrity_failed: {json.dumps(report, ensure_ascii=False)}")
+    _ = load_runtime_config(root)
 
 
 if __name__ == "__main__":
-    app = MinimalBatchGUI()
-    app.mainloop()
+    if os.getenv("ARE_SMOKE_EXIT", "").strip() == "1":
+        run_startup_smoke_check()
+    else:
+        app = MinimalBatchGUI()
+        app.mainloop()
