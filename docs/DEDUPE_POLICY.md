@@ -58,6 +58,39 @@ SQLite stores the same identity plus evidence fields:
 
 SQLite keeps the uniqueness guard on `(assay_key, dedupe_key)`.
 
+## Duplicate Queue Backend
+
+AP-12B.1 uses SQLite as the duplicate review ledger. When a new SQLite write
+hits the existing `(assay_key, dedupe_key)` uniqueness guard, the new payload is
+stored in `duplicate_candidates` with status `pending` instead of being silently
+discarded.
+
+Important boundary:
+
+- `jobs/{job_id}.json` idempotency is checked before the pipeline reaches
+  SQLite. A repeated PDF hash with existing `DONE` state still returns
+  `SKIPPED: already_done` and does not create a duplicate candidate.
+- Candidates are created only when the pipeline actually reaches SQLite, for
+  example with a different PDF file that has the same fachliche dedupe identity
+  or after an intentional force rerun / deleted job state.
+
+In `output_mode=both`, SQLite is now the ledger and runs before Excel. Excel is
+written only when SQLite returns `inserted`. If SQLite returns
+`duplicate_pending`, Excel is not written and the job result reports an Excel
+status of `skipped_duplicate_pending`.
+
+Known ledger-first recovery case: if SQLite returns `inserted` but the following
+Excel write fails, the run is already present in the SQLite ledger. A later
+rerun can therefore be reported as `duplicate_pending` and will not
+automatically backfill Excel. Until AP-12B.2, inspect the run/candidate manually;
+the review list will provide the explicit recovery decision.
+
+In `output_mode=excel`, behavior stays Excel-only. No SQLite duplicate queue is
+created in that mode.
+
+AP-12B.1 only records candidates. GUI review and decisions (`added`, `deleted`,
+`overwritten`) are reserved for AP-12B.2.
+
 ## Explicit Legacy Dedupe
 
 Rulesets with non-empty `extract_rules.dedupe_fields` remain supported. They are marked

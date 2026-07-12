@@ -131,6 +131,9 @@ def _format_dedupe_meta(write_item: Mapping[str, Any]) -> List[str]:
         ("device_id", "device_id"),
         ("dedupe_version", "dedupe_version"),
         ("dedupe_key", "dedupe_key"),
+        ("duplicate_status", "duplicate_status"),
+        ("duplicate_candidate_id", "duplicate_candidate_id"),
+        ("existing_run_id", "existing_run_id"),
         ("pdf_sha256", "pdf_sha256"),
         ("assay_block_hash", "assay_block_hash"),
     ):
@@ -160,6 +163,8 @@ def format_write_status_lines(outputs: Any) -> List[str]:
                     f"Excel: NICHT geschrieben — {out.get('error', 'Fehler')} "
                     f"(Ziel: {out.get('excel_path', '?')})"
                 )
+            elif status == "skipped_duplicate_pending":
+                lines.append("Excel: nicht geschrieben, Duplikat wartet auf Pruefung")
             elif status == "skipped":
                 lines.append(f"Excel: uebersprungen (Dedupe) — {out.get('excel_path', '?')}")
             else:
@@ -172,6 +177,10 @@ def format_write_status_lines(outputs: Any) -> List[str]:
                     f"SQLite: NICHT geschrieben — {out.get('error', 'Fehler')} "
                     f"(Ziel: {out.get('sqlite_path', '?')})"
                 )
+            elif status == "duplicate_pending":
+                candidate = out.get("duplicate_candidate_id")
+                suffix = f" | Candidate: {candidate}" if candidate else ""
+                lines.append(f"SQLite: Duplikat zur Pruefung{suffix}")
             elif status == "skipped":
                 lines.append(f"SQLite: uebersprungen (Dedupe) — {out.get('sqlite_path', '?')}")
             else:

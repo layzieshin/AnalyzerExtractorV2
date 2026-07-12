@@ -80,6 +80,9 @@ def test_format_assay_data_detail_shows_dedupe_meta():
             "device_id": "dev1",
             "dedupe_version": "v2",
             "dedupe_key": "v2|dev1|P|D|T|A.asy",
+            "duplicate_status": "pending",
+            "duplicate_candidate_id": 7,
+            "existing_run_id": 3,
             "pdf_sha256": "a" * 64,
             "assay_block_hash": "b" * 64,
             "dedupe_basis": {"PLATTE": "P", "TEST": "A.asy"},
@@ -87,6 +90,9 @@ def test_format_assay_data_detail_shows_dedupe_meta():
         }
     )
     assert "device_id: dev1" in text
+    assert "duplicate_status: pending" in text
+    assert "duplicate_candidate_id: 7" in text
+    assert "existing_run_id: 3" in text
     assert "dedupe_basis:" in text
     assert "PLATTE: P" in text
 
@@ -96,11 +102,15 @@ def test_format_write_status_lines_excel_and_sqlite():
         [
             {"sink": "excel", "status": "created", "excel_path": "a.xlsx", "sheet": "S1"},
             {"sink": "sqlite", "status": "skipped", "sqlite_path": "a.db", "table": "runs"},
+            {"sink": "sqlite", "status": "duplicate_pending", "duplicate_candidate_id": 9},
+            {"sink": "excel", "status": "skipped_duplicate_pending"},
             {"sink": "excel", "status": "failed", "error": "locked", "excel_path": "a.xlsx"},
         ]
     )
     assert any("Excel: created" in line for line in lines)
     assert any("uebersprungen" in line for line in lines)
+    assert any("Duplikat zur Pruefung" in line for line in lines)
+    assert any("Duplikat wartet auf Pruefung" in line for line in lines)
     assert any("NICHT geschrieben" in line for line in lines)
 
 

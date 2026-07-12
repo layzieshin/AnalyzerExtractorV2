@@ -6,6 +6,8 @@ from src.ruleresolver.api import RuleSet
 from .dbwriter import DbWriter
 from .model import DbWriteResult
 
+__all__ = ["DbWriteResult", "get_duplicate_candidate", "list_duplicate_candidates", "write_record_sqlite"]
+
 
 def write_record_sqlite(
     record: AssayRecord,
@@ -32,3 +34,13 @@ def write_record_sqlite(
         retry_count=retry_count,
         retry_sleep_s=retry_sleep_s,
     )
+
+
+def list_duplicate_candidates(sqlite_path: str, status: str = "pending") -> list[dict[str, object]]:
+    """Return duplicate review candidates from the SQLite ledger."""
+    return DbWriter().list_duplicate_candidates(sqlite_path, status=status)
+
+
+def get_duplicate_candidate(sqlite_path: str, candidate_id: int) -> dict[str, object] | None:
+    """Return one duplicate candidate with existing run and field comparison."""
+    return DbWriter().get_duplicate_candidate(sqlite_path, candidate_id)

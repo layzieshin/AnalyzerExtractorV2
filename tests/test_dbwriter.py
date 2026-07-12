@@ -1,12 +1,12 @@
 from pathlib import Path
 import sqlite3
 
-from src.dbwriter.api import write_record_sqlite
+from src.dbwriter.api import get_duplicate_candidate, list_duplicate_candidates, write_record_sqlite
 from src.extractor.model import AssayRecord
 from src.ruleresolver.model import RuleSet
 
 
-def test_sqlite_writer_inserts_and_dedupes(tmp_path: Path):
+def test_sqlite_writer_inserts_and_creates_duplicate_candidate(tmp_path: Path):
     sqlite_path = tmp_path / "results.sqlite3"
     ruleset = RuleSet(
         assay_key="(1111)",
@@ -22,6 +22,15 @@ def test_sqlite_writer_inserts_and_dedupes(tmp_path: Path):
         dedupe_version="v2",
         dedupe_basis={"device_id": "dev1", "TEST": "T"},
     )
+    duplicate = AssayRecord(
+        assay_key="(1111)",
+        lot_id="LOT1",
+        dedupe_key="T|2026-01-01|10:00:00",
+        data={"test": "T2", "date": "2026-01-01", "time": "10:00:00"},
+        device_id="dev1",
+        dedupe_version="v2",
+        dedupe_basis={"device_id": "dev1", "TEST": "T"},
+    )
 
     r1 = write_record_sqlite(
         record,
@@ -32,10 +41,32 @@ def test_sqlite_writer_inserts_and_dedupes(tmp_path: Path):
         pdf_sha256="a" * 64,
         assay_block_hash="b" * 64,
     )
-    r2 = write_record_sqlite(record, ruleset, str(sqlite_path), job_id="j1", pdf_path="a.pdf")
+    r2 = write_record_sqlite(
+        duplicate,
+        ruleset,
+        str(sqlite_path),
+        job_id="j2",
+        pdf_path="b.pdf",
+        pdf_sha256="c" * 64,
+        assay_block_hash="d" * 64,
+    )
+    r3 = write_record_sqlite(
+        duplicate,
+        ruleset,
+        str(sqlite_path),
+        job_id="j2",
+        pdf_path="b.pdf",
+        pdf_sha256="c" * 64,
+        assay_block_hash="d" * 64,
+    )
 
     assert r1.status == "inserted"
-    assert r2.status == "skipped"
+    assert r1.run_id is not None
+    assert r2.status == "duplicate_pending"
+    assert r2.existing_run_id == r1.run_id
+    assert r2.duplicate_candidate_id is not None
+    assert r3.status == "duplicate_pending"
+    assert r3.duplicate_candidate_id == r2.duplicate_candidate_id
 
     with sqlite3.connect(sqlite_path) as conn:
         row = conn.execute(
@@ -46,6 +77,21 @@ def test_sqlite_writer_inserts_and_dedupes(tmp_path: Path):
     assert '"TEST": "T"' in row[2]
     assert row[3] == "a" * 64
     assert row[4] == "b" * 64
+
+    candidates = list_duplicate_candidates(str(sqlite_path))
+    assert len(candidates) == 1
+    assert candidates[0]["candidate_id"] == r2.duplicate_candidate_id
+    assert candidates[0]["existing_run_id"] == r1.run_id
+    assert candidates[0]["pdf_sha256"] == "c" * 64
+
+    detail = get_duplicate_candidate(str(sqlite_path), int(r2.duplicate_candidate_id))
+    assert detail is not None
+    assert detail["existing"]["run_id"] == r1.run_id
+    assert detail["candidate"]["payload"]["test"] == "T2"
+    comparison = {row["field"]: row for row in detail["field_comparison"]}
+    assert comparison["test"]["existing"] == "T"
+    assert comparison["test"]["candidate"] == "T2"
+    assert comparison["test"]["same"] is False
 
 
 def test_sqlite_writer_migrates_existing_runs_table(tmp_path: Path):
@@ -87,3 +133,6 @@ def test_sqlite_writer_migrates_existing_runs_table(tmp_path: Path):
     with sqlite3.connect(sqlite_path) as conn:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
     assert {"device_id", "dedupe_version", "dedupe_basis_json", "pdf_sha256", "assay_block_hash"} <= cols
+    with sqlite3.connect(sqlite_path) as conn:
+        duplicate_cols = {row[1] for row in conn.execute("PRAGMA table_info(duplicate_candidates)").fetchall()}
+    assert {"existing_run_id", "candidate_payload_json", "candidate_meta_json", "detected_at"} <= duplicate_cols

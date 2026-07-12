@@ -178,10 +178,62 @@ class JobController:
                     "assay_block_hash": block_hashes.get(k, ""),
                     "data": rec.data,
                     "missing_required": self._missing_required_fields(ruleset, rec.data),
+                    "duplicate_status": "none",
+                    "duplicate_candidate_id": None,
+                    "existing_run_id": None,
                     "outputs": [],
                 }
 
-                if mode in ("both", "excel"):
+                if mode in ("both", "sqlite"):
+                    sqlite_target = sqlite_path or str(output_dir / "results.sqlite3")
+                    try:
+                        db_wr = write_record_sqlite(
+                            rec,
+                            ruleset,
+                            sqlite_target,
+                            job_id=job_id,
+                            pdf_path=str(pdf),
+                            pdf_sha256=pdf_sha256,
+                            assay_block_hash=block_hashes.get(k, ""),
+                            busy_timeout_ms=sqlite_busy_timeout_ms,
+                            retry_count=sqlite_retry_count,
+                            retry_sleep_s=sqlite_retry_sleep_s,
+                        )
+                        sqlite_output: Dict[str, Any] = {
+                            "sink": "sqlite",
+                            "sqlite_path": db_wr.sqlite_path,
+                            "table": db_wr.table_name,
+                            "status": db_wr.status,
+                        }
+                        if db_wr.run_id is not None:
+                            sqlite_output["run_id"] = db_wr.run_id
+                        if db_wr.existing_run_id is not None:
+                            sqlite_output["existing_run_id"] = db_wr.existing_run_id
+                        if db_wr.duplicate_candidate_id is not None:
+                            sqlite_output["duplicate_candidate_id"] = db_wr.duplicate_candidate_id
+                        write_item["outputs"].append(sqlite_output)
+                        if db_wr.status == "duplicate_pending":
+                            write_item["duplicate_status"] = "pending"
+                            write_item["duplicate_candidate_id"] = db_wr.duplicate_candidate_id
+                            write_item["existing_run_id"] = db_wr.existing_run_id
+                    except Exception as e:
+                        write_item["outputs"].append(
+                            {
+                                "sink": "sqlite",
+                                "status": "failed",
+                                "error": str(e),
+                            }
+                        )
+                        raise RuntimeError(f"sqlite_write_failed:{k}:{e}") from e
+
+                if mode == "both" and write_item["duplicate_status"] == "pending":
+                    write_item["outputs"].append(
+                        {
+                            "sink": "excel",
+                            "status": "skipped_duplicate_pending",
+                        }
+                    )
+                elif mode in ("both", "excel"):
                     try:
                         wr = write_record(rec, ruleset, str(output_dir))
                         write_item["outputs"].append(
@@ -201,39 +253,6 @@ class JobController:
                             }
                         )
                         raise RuntimeError(f"excel_write_failed:{k}:{e}") from e
-
-                if mode in ("both", "sqlite"):
-                    sqlite_target = sqlite_path or str(output_dir / "results.sqlite3")
-                    try:
-                        db_wr = write_record_sqlite(
-                            rec,
-                            ruleset,
-                            sqlite_target,
-                            job_id=job_id,
-                            pdf_path=str(pdf),
-                            pdf_sha256=pdf_sha256,
-                            assay_block_hash=block_hashes.get(k, ""),
-                            busy_timeout_ms=sqlite_busy_timeout_ms,
-                            retry_count=sqlite_retry_count,
-                            retry_sleep_s=sqlite_retry_sleep_s,
-                        )
-                        write_item["outputs"].append(
-                            {
-                                "sink": "sqlite",
-                                "sqlite_path": db_wr.sqlite_path,
-                                "table": db_wr.table_name,
-                                "status": db_wr.status,
-                            }
-                        )
-                    except Exception as e:
-                        write_item["outputs"].append(
-                            {
-                                "sink": "sqlite",
-                                "status": "failed",
-                                "error": str(e),
-                            }
-                        )
-                        raise RuntimeError(f"sqlite_write_failed:{k}:{e}") from e
 
                 writes.append(write_item)
 
