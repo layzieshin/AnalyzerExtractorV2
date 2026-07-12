@@ -6,7 +6,13 @@ from src.ruleresolver.api import RuleSet
 from .dbwriter import DbWriter
 from .model import DbWriteResult
 
-__all__ = ["DbWriteResult", "get_duplicate_candidate", "list_duplicate_candidates", "write_record_sqlite"]
+__all__ = [
+    "DbWriteResult",
+    "discard_duplicate_candidate",
+    "get_duplicate_candidate",
+    "list_duplicate_candidates",
+    "write_record_sqlite",
+]
 
 
 def write_record_sqlite(
@@ -44,3 +50,18 @@ def list_duplicate_candidates(sqlite_path: str, status: str = "pending") -> list
 def get_duplicate_candidate(sqlite_path: str, candidate_id: int) -> dict[str, object] | None:
     """Return one duplicate candidate with existing run and field comparison."""
     return DbWriter().get_duplicate_candidate(sqlite_path, candidate_id)
+
+
+def discard_duplicate_candidate(
+    sqlite_path: str,
+    candidate_id: int,
+    decided_by: str = "test-ui",
+    note: str = "",
+) -> dict[str, object]:
+    """Discard a pending duplicate candidate and keep an audit log entry."""
+    return DbWriter().discard_duplicate_candidate(
+        sqlite_path,
+        candidate_id,
+        decided_by=decided_by,
+        note=note,
+    )

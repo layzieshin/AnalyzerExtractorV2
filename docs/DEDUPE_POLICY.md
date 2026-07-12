@@ -88,8 +88,25 @@ the review list will provide the explicit recovery decision.
 In `output_mode=excel`, behavior stays Excel-only. No SQLite duplicate queue is
 created in that mode.
 
-AP-12B.1 only records candidates. GUI review and decisions (`added`, `deleted`,
-`overwritten`) are reserved for AP-12B.2.
+## Duplicate Review in the Main App
+
+AP-12B.2 makes the SQLite duplicate queue visible in the Tkinter main app. The
+`Duplikate` tab lists candidates from `duplicate_candidates`, opens the live
+comparison against the referenced `runs` row, and supports exactly one manual
+decision: discard the candidate.
+
+Discarding a candidate changes only the candidate audit state:
+
+- `duplicate_candidates.status` becomes `deleted`.
+- `decision_at`, `decision_by`, and `decision_note` are stored on the candidate.
+- `duplicate_decision_log` receives an action entry with `discard`.
+- The existing `runs` row and Excel output remain unchanged.
+
+Overwrite, add-entry behavior, and Excel recovery for the ledger-first failure
+case remain follow-up work. They need separate write semantics and audit rules.
+
+AP-12B.1 only records candidates. AP-12B.2 adds the first GUI review action:
+`deleted`. `added` and `overwritten` are reserved for later packages.
 
 ## Explicit Legacy Dedupe
 

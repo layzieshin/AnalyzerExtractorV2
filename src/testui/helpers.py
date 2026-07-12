@@ -224,6 +224,58 @@ def format_rules_report(report: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def format_duplicate_candidate_summary(row: Mapping[str, Any]) -> Dict[str, str]:
+    return {
+        "candidate_id": _string_or_empty(row.get("candidate_id")),
+        "status": _duplicate_status_label(row.get("status")),
+        "assay_key": _string_or_empty(row.get("assay_key")),
+        "device_id": _string_or_empty(row.get("device_id")),
+        "detected_at": _string_or_empty(row.get("detected_at")),
+        "existing_run_id": _string_or_empty(row.get("existing_run_id")),
+        "dedupe_key": _string_or_empty(row.get("dedupe_key")),
+    }
+
+
+def format_duplicate_candidate_detail(detail: Mapping[str, Any] | None) -> str:
+    if not isinstance(detail, Mapping):
+        return "(kein Kandidat)"
+    candidate = detail.get("candidate")
+    existing = detail.get("existing")
+    if not isinstance(candidate, Mapping):
+        return "(kein Kandidat)"
+
+    lines: List[str] = ["--- Kandidat ---"]
+    lines.extend(_duplicate_meta_lines(candidate, candidate=True))
+    lines.append("")
+    lines.append("--- Bestehender Run ---")
+    if isinstance(existing, Mapping):
+        lines.extend(_duplicate_meta_lines(existing, candidate=False))
+    else:
+        lines.append("(nicht gefunden)")
+    return "\n".join(lines)
+
+
+def format_duplicate_field_comparison(detail: Mapping[str, Any] | None) -> List[Dict[str, str]]:
+    if not isinstance(detail, Mapping):
+        return []
+    comparison = detail.get("field_comparison")
+    if not isinstance(comparison, list):
+        return []
+    rows: List[Dict[str, str]] = []
+    for item in comparison:
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            {
+                "field": _string_or_empty(item.get("field")),
+                "existing": _format_duplicate_value(item.get("existing")),
+                "candidate": _format_duplicate_value(item.get("candidate")),
+                "same": "Ja" if bool(item.get("same")) else "Nein",
+            }
+        )
+    return rows
+
+
 def _summarize_write_status(outputs: Any) -> str:
     lines = format_write_status_lines(outputs)
     if not lines:
@@ -233,3 +285,66 @@ def _summarize_write_status(outputs: Any) -> str:
 
 def _optional_missing_fields(data: Dict[str, Any]) -> List[str]:
     return sorted(key for key, value in data.items() if value is None or (isinstance(value, str) and not value.strip()))
+
+
+def _duplicate_status_label(status: object) -> str:
+    value = str(status or "")
+    if value == "pending":
+        return "wartet auf Pruefung"
+    if value == "deleted":
+        return "verworfen"
+    return value
+
+
+def _duplicate_meta_lines(data: Mapping[str, Any], *, candidate: bool) -> List[str]:
+    keys = (
+        ("candidate_id", "candidate_id"),
+        ("status", "status"),
+        ("existing_run_id", "existing_run_id"),
+        ("assay_key", "assay_key"),
+        ("device_id", "device_id"),
+        ("dedupe_version", "dedupe_version"),
+        ("dedupe_key", "dedupe_key"),
+        ("detected_at", "detected_at"),
+        ("decision_at", "decision_at"),
+        ("decision_by", "decision_by"),
+        ("decision_note", "decision_note"),
+        ("pdf_sha256", "pdf_sha256"),
+        ("assay_block_hash", "assay_block_hash"),
+    )
+    if not candidate:
+        keys = (
+            ("run_id", "run_id"),
+            ("job_id", "job_id"),
+            ("pdf_path", "pdf_path"),
+            ("assay_key", "assay_key"),
+            ("device_id", "device_id"),
+            ("dedupe_version", "dedupe_version"),
+            ("dedupe_key", "dedupe_key"),
+            ("created_at", "created_at"),
+        )
+    lines: List[str] = []
+    for key, label in keys:
+        value = data.get(key)
+        if value:
+            if key == "status":
+                value = _duplicate_status_label(value)
+            lines.append(f"{label}: {value}")
+    basis = data.get("dedupe_basis")
+    if isinstance(basis, Mapping) and basis:
+        lines.append("dedupe_basis:")
+        for key, value in sorted(basis.items(), key=lambda kv: str(kv[0])):
+            lines.append(f"  {key}: {value}")
+    return lines
+
+
+def _format_duplicate_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def _string_or_empty(value: object) -> str:
+    return "" if value is None else str(value)

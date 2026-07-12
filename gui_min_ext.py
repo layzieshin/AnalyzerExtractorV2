@@ -6,8 +6,9 @@ import shutil
 import threading
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
 from src.jobcontroller.api import submit
 from src.ruleresolver.api import validate_rules_integrity
 from src.rulesuite.api import activate_draft, create_draft, list_fields, preview_extract, set_field_regex
@@ -22,6 +23,9 @@ from src.testui.api import (
     classify_job_outcome,
     format_assay_data_detail,
     format_assay_overview_rows,
+    format_duplicate_candidate_detail,
+    format_duplicate_candidate_summary,
+    format_duplicate_field_comparison,
     format_job_result_summary,
     format_partial_writes_note,
     format_rules_report,
@@ -65,6 +69,8 @@ class MinimalBatchGUI(tk.Tk):
         self.var_field_key = tk.StringVar(value="")
         self.var_field_regex = tk.StringVar(value="")
         self.var_preview_pdf = tk.StringVar(value="")
+        self.var_duplicate_status = tk.StringVar(value="pending")
+        self._duplicate_details: dict[int, dict[str, object]] = {}
 
         self._action_buttons: list[tk.Widget] = []
         self._build_ui()
@@ -160,15 +166,18 @@ class MinimalBatchGUI(tk.Tk):
         tab_batch = tk.Frame(nb)
         tab_preview = tk.Frame(nb)
         tab_rules = tk.Frame(nb)
+        tab_duplicates = tk.Frame(nb)
         nb.add(tab_single, text="Single PDF")
         nb.add(tab_batch, text="Batch")
         nb.add(tab_preview, text="Rule Preview")
         nb.add(tab_rules, text="Rules Check")
+        nb.add(tab_duplicates, text="Duplikate")
 
         self._build_single_tab(tab_single)
         self._build_batch_tab(tab_batch)
         self._build_preview_tab(tab_preview)
         self._build_rules_tab(tab_rules)
+        self._build_duplicates_tab(tab_duplicates)
 
         result_frame = tk.LabelFrame(self, text="Ergebnis")
         result_frame.pack(fill="both", expand=False, padx=10, pady=(0, 6))
@@ -354,6 +363,66 @@ class MinimalBatchGUI(tk.Tk):
         btn_rules.pack(side="left")
         self._register_action(btn_rules)
 
+    def _build_duplicates_tab(self, parent: tk.Frame) -> None:
+        top = tk.Frame(parent)
+        top.pack(fill="x", padx=8, pady=8)
+
+        btn_refresh = tk.Button(top, text="Aktualisieren", command=self.on_refresh_duplicates)
+        btn_refresh.pack(side="left")
+        self._register_action(btn_refresh)
+
+        tk.Label(top, text="Status").pack(side="left", padx=(12, 4))
+        dd_status = tk.OptionMenu(top, self.var_duplicate_status, "pending", "deleted")
+        dd_status.pack(side="left")
+        self._register_action(dd_status)
+
+        btn_discard = tk.Button(top, text="Kandidat verwerfen", command=self.on_discard_duplicate_candidate)
+        btn_discard.pack(side="right")
+        self._register_action(btn_discard)
+
+        self.tree_duplicates = ttk.Treeview(
+            parent,
+            columns=("id", "status", "assay", "device", "detected", "existing", "dedupe"),
+            show="headings",
+            height=7,
+        )
+        for col, title, width in (
+            ("id", "ID", 70),
+            ("status", "Status", 150),
+            ("assay", "Assay", 110),
+            ("device", "Geraet", 120),
+            ("detected", "Erkannt am", 190),
+            ("existing", "Existing Run", 100),
+            ("dedupe", "Dedupe-Key", 360),
+        ):
+            self.tree_duplicates.heading(col, text=title)
+            self.tree_duplicates.column(col, width=width, anchor="w")
+        self.tree_duplicates.pack(fill="x", padx=8, pady=(0, 8))
+        self.tree_duplicates.bind("<<TreeviewSelect>>", self.on_duplicate_selected)
+
+        detail_frame = tk.LabelFrame(parent, text="Duplicate-Details")
+        detail_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.txt_duplicate_detail = tk.Text(detail_frame, height=8, wrap="word")
+        self.txt_duplicate_detail.pack(fill="both", expand=True, padx=4, pady=4)
+
+        compare_frame = tk.LabelFrame(parent, text="Feldvergleich")
+        compare_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.tree_duplicate_fields = ttk.Treeview(
+            compare_frame,
+            columns=("field", "existing", "candidate", "same"),
+            show="headings",
+            height=8,
+        )
+        for col, title, width in (
+            ("field", "Feld", 180),
+            ("existing", "Bestehend", 320),
+            ("candidate", "Kandidat", 320),
+            ("same", "Gleich", 70),
+        ):
+            self.tree_duplicate_fields.heading(col, text=title)
+            self.tree_duplicate_fields.column(col, width=width, anchor="w")
+        self.tree_duplicate_fields.pack(fill="both", expand=True, padx=4, pady=4)
+
     def _register_action(self, widget: tk.Widget) -> None:
         self._action_buttons.append(widget)
 
@@ -379,6 +448,136 @@ class MinimalBatchGUI(tk.Tk):
 
     def _root_path(self) -> Path:
         return Path(self.var_project_root.get().strip())
+
+    def _duplicate_sqlite_path(self) -> Path:
+        configured = self.var_sqlite_path.get().strip()
+        if configured:
+            return Path(configured)
+        return self._root_path() / "output" / "final" / "results.sqlite3"
+
+    def _clear_duplicate_view(self) -> None:
+        for row in self.tree_duplicates.get_children():
+            self.tree_duplicates.delete(row)
+        for row in self.tree_duplicate_fields.get_children():
+            self.tree_duplicate_fields.delete(row)
+        self._duplicate_details = {}
+        self._set_duplicate_detail("")
+
+    def _set_duplicate_detail(self, text: str) -> None:
+        self.txt_duplicate_detail.configure(state="normal")
+        self.txt_duplicate_detail.delete("1.0", tk.END)
+        if text:
+            self.txt_duplicate_detail.insert(tk.END, text)
+        self.txt_duplicate_detail.configure(state="disabled")
+
+    def _selected_duplicate_id(self) -> int | None:
+        sel = self.tree_duplicates.selection()
+        if not sel:
+            return None
+        try:
+            return int(str(sel[0]))
+        except ValueError:
+            return None
+
+    def on_refresh_duplicates(self) -> None:
+        self._clear_duplicate_view()
+        sqlite_path = self._duplicate_sqlite_path()
+        if not sqlite_path.exists():
+            self._log(f"Duplicate DB nicht gefunden: {sqlite_path}")
+            return
+        status = self.var_duplicate_status.get().strip() or "pending"
+        try:
+            rows = list_duplicate_candidates(str(sqlite_path), status=status)
+        except Exception as e:
+            messagebox.showerror("Duplikate", str(e))
+            return
+        for row in rows:
+            summary = format_duplicate_candidate_summary(row)
+            candidate_id = summary.get("candidate_id", "")
+            if not candidate_id:
+                continue
+            self.tree_duplicates.insert(
+                "",
+                tk.END,
+                iid=candidate_id,
+                values=(
+                    summary.get("candidate_id", ""),
+                    summary.get("status", ""),
+                    summary.get("assay_key", ""),
+                    summary.get("device_id", ""),
+                    summary.get("detected_at", ""),
+                    summary.get("existing_run_id", ""),
+                    summary.get("dedupe_key", ""),
+                ),
+            )
+        self._log(f"Duplikate geladen: status={status}, count={len(rows)}")
+
+    def on_duplicate_selected(self, _event: object = None) -> None:
+        candidate_id = self._selected_duplicate_id()
+        if candidate_id is None:
+            return
+        sqlite_path = self._duplicate_sqlite_path()
+        try:
+            detail = get_duplicate_candidate(str(sqlite_path), candidate_id)
+        except Exception as e:
+            messagebox.showerror("Duplikate", str(e))
+            return
+        if not detail:
+            self._set_duplicate_detail("(kein Kandidat)")
+            return
+        self._duplicate_details[candidate_id] = detail
+        self._set_duplicate_detail(format_duplicate_candidate_detail(detail))
+        for row in self.tree_duplicate_fields.get_children():
+            self.tree_duplicate_fields.delete(row)
+        for idx, cmp_row in enumerate(format_duplicate_field_comparison(detail)):
+            self.tree_duplicate_fields.insert(
+                "",
+                tk.END,
+                iid=f"{candidate_id}:{idx}",
+                values=(
+                    cmp_row.get("field", ""),
+                    cmp_row.get("existing", ""),
+                    cmp_row.get("candidate", ""),
+                    cmp_row.get("same", ""),
+                ),
+            )
+
+    def on_discard_duplicate_candidate(self) -> None:
+        candidate_id = self._selected_duplicate_id()
+        if candidate_id is None:
+            messagebox.showinfo("Duplikate", "Bitte zuerst einen Kandidaten auswaehlen.")
+            return
+        detail = self._duplicate_details.get(candidate_id)
+        if detail is None:
+            detail = get_duplicate_candidate(str(self._duplicate_sqlite_path()), candidate_id)
+            if detail:
+                self._duplicate_details[candidate_id] = detail
+        candidate = detail.get("candidate") if isinstance(detail, dict) else None
+        if not isinstance(candidate, dict) or candidate.get("status") != "pending":
+            messagebox.showinfo("Duplikate", "Nur pending Kandidaten koennen verworfen werden.")
+            return
+        if not messagebox.askyesno("Kandidat verwerfen", f"Kandidat {candidate_id} wirklich verwerfen?"):
+            return
+        note = simpledialog.askstring("Notiz", "Optionale Notiz:", initialvalue="") or ""
+        try:
+            result = discard_duplicate_candidate(
+                str(self._duplicate_sqlite_path()),
+                candidate_id,
+                decided_by="test-ui",
+                note=note,
+            )
+        except ValueError as e:
+            messagebox.showerror("Duplikate", str(e))
+            self.on_refresh_duplicates()
+            return
+        except Exception as e:
+            messagebox.showerror("Duplikate", str(e))
+            return
+        self._log(
+            "Duplicate-Kandidat verworfen: "
+            f"id={result.get('candidate_id')} by={result.get('decision_by')}"
+        )
+        self.on_refresh_duplicates()
 
     def _refresh_device_choices(self, *, log: bool = True) -> None:
         root = self._root_path()

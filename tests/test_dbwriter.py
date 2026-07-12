@@ -1,7 +1,14 @@
 from pathlib import Path
 import sqlite3
 
-from src.dbwriter.api import get_duplicate_candidate, list_duplicate_candidates, write_record_sqlite
+import pytest
+
+from src.dbwriter.api import (
+    discard_duplicate_candidate,
+    get_duplicate_candidate,
+    list_duplicate_candidates,
+    write_record_sqlite,
+)
 from src.extractor.model import AssayRecord
 from src.ruleresolver.model import RuleSet
 
@@ -94,6 +101,69 @@ def test_sqlite_writer_inserts_and_creates_duplicate_candidate(tmp_path: Path):
     assert comparison["test"]["same"] is False
 
 
+def test_discard_duplicate_candidate_sets_deleted_and_writes_log(tmp_path: Path):
+    sqlite_path = tmp_path / "results.sqlite3"
+    ruleset = RuleSet(
+        assay_key="(1111)",
+        ruleset_file="Test.json",
+        data={"assay_name": "AssayA", "lot_rule": {}, "extract_rules": {}, "excel_rules": {}},
+    )
+    record = AssayRecord(
+        assay_key="(1111)",
+        lot_id="LOT1",
+        dedupe_key="T|2026-01-01|10:00:00",
+        data={"test": "T", "date": "2026-01-01", "time": "10:00:00"},
+        device_id="dev1",
+        dedupe_version="v2",
+        dedupe_basis={"device_id": "dev1", "TEST": "T"},
+    )
+    duplicate = AssayRecord(
+        assay_key="(1111)",
+        lot_id="LOT1",
+        dedupe_key="T|2026-01-01|10:00:00",
+        data={"test": "T2", "date": "2026-01-01", "time": "10:00:00"},
+        device_id="dev1",
+        dedupe_version="v2",
+        dedupe_basis={"device_id": "dev1", "TEST": "T"},
+    )
+
+    first = write_record_sqlite(record, ruleset, str(sqlite_path), job_id="j1", pdf_sha256="a")
+    second = write_record_sqlite(duplicate, ruleset, str(sqlite_path), job_id="j2", pdf_sha256="b")
+    assert first.status == "inserted"
+    assert second.status == "duplicate_pending"
+    candidate_id = int(second.duplicate_candidate_id)
+
+    result = discard_duplicate_candidate(str(sqlite_path), candidate_id, decided_by="tester", note="false alarm")
+
+    assert result["candidate_id"] == candidate_id
+    assert result["status"] == "deleted"
+    assert result["action"] == "discard"
+    assert result["decision_by"] == "tester"
+    assert result["decision_note"] == "false alarm"
+    assert list_duplicate_candidates(str(sqlite_path), status="pending") == []
+    deleted = list_duplicate_candidates(str(sqlite_path), status="deleted")
+    assert len(deleted) == 1
+    assert deleted[0]["candidate_id"] == candidate_id
+
+    detail = get_duplicate_candidate(str(sqlite_path), candidate_id)
+    assert detail is not None
+    assert detail["candidate"]["status"] == "deleted"
+    assert detail["candidate"]["decision_by"] == "tester"
+    assert detail["candidate"]["decision_note"] == "false alarm"
+    assert detail["existing"]["run_id"] == first.run_id
+
+    with sqlite3.connect(sqlite_path) as conn:
+        log_row = conn.execute(
+            "SELECT candidate_id, action, decided_by, note FROM duplicate_decision_log"
+        ).fetchone()
+    assert log_row == (candidate_id, "discard", "tester", "false alarm")
+
+    with pytest.raises(ValueError, match="candidate_not_pending"):
+        discard_duplicate_candidate(str(sqlite_path), candidate_id)
+    with pytest.raises(ValueError, match="candidate_not_found"):
+        discard_duplicate_candidate(str(sqlite_path), candidate_id + 100)
+
+
 def test_sqlite_writer_migrates_existing_runs_table(tmp_path: Path):
     sqlite_path = tmp_path / "existing.sqlite3"
     with sqlite3.connect(sqlite_path) as conn:
@@ -136,3 +206,6 @@ def test_sqlite_writer_migrates_existing_runs_table(tmp_path: Path):
     with sqlite3.connect(sqlite_path) as conn:
         duplicate_cols = {row[1] for row in conn.execute("PRAGMA table_info(duplicate_candidates)").fetchall()}
     assert {"existing_run_id", "candidate_payload_json", "candidate_meta_json", "detected_at"} <= duplicate_cols
+    with sqlite3.connect(sqlite_path) as conn:
+        log_cols = {row[1] for row in conn.execute("PRAGMA table_info(duplicate_decision_log)").fetchall()}
+    assert {"candidate_id", "action", "decided_at", "decided_by", "note"} <= log_cols

@@ -115,6 +115,18 @@ class DbWriter:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS duplicate_decision_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                candidate_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                decided_at TEXT NOT NULL,
+                decided_by TEXT NOT NULL,
+                note TEXT NOT NULL
+            )
+            """
+        )
 
     def _ensure_columns(self, conn: sqlite3.Connection, columns: dict[str, str]) -> None:
         existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
@@ -264,7 +276,8 @@ class DbWriter:
             rows = conn.execute(
                 """
                 SELECT id, status, existing_run_id, assay_key, dedupe_key, device_id,
-                       dedupe_version, dedupe_basis_json, pdf_sha256, assay_block_hash, detected_at
+                       dedupe_version, dedupe_basis_json, pdf_sha256, assay_block_hash, detected_at,
+                       decision_at, decision_by, decision_note
                 FROM duplicate_candidates
                 WHERE status = ?
                 ORDER BY id
@@ -288,6 +301,9 @@ class DbWriter:
                 "pdf_sha256": row[8],
                 "assay_block_hash": row[9],
                 "detected_at": row[10],
+                "decision_at": row[11],
+                "decision_by": row[12],
+                "decision_note": row[13],
             }
             for row in rows
         ]
@@ -303,7 +319,8 @@ class DbWriter:
                 """
                 SELECT id, status, existing_run_id, assay_key, dedupe_key, device_id,
                        dedupe_version, dedupe_basis_json, candidate_payload_json,
-                       candidate_meta_json, pdf_sha256, assay_block_hash, detected_at
+                       candidate_meta_json, pdf_sha256, assay_block_hash, detected_at,
+                       decision_at, decision_by, decision_note
                 FROM duplicate_candidates
                 WHERE id = ?
                 """,
@@ -340,6 +357,9 @@ class DbWriter:
             "pdf_sha256": cand[10],
             "assay_block_hash": cand[11],
             "detected_at": cand[12],
+            "decision_at": cand[13],
+            "decision_by": cand[14],
+            "decision_note": cand[15],
         }
         existing_payload: dict[str, object] = {}
         existing_obj: dict[str, object] | None = None
@@ -363,6 +383,63 @@ class DbWriter:
             "existing": existing_obj,
             "field_comparison": _field_comparison(existing_payload, candidate_payload),
         }
+
+    def discard_duplicate_candidate(
+        self,
+        sqlite_path: str,
+        candidate_id: int,
+        decided_by: str = "test-ui",
+        note: str = "",
+    ) -> dict[str, object]:
+        path = Path(sqlite_path)
+        conn = sqlite3.connect(str(path))
+        try:
+            self._ensure_schema(conn)
+            row = conn.execute(
+                "SELECT status FROM duplicate_candidates WHERE id = ?",
+                (int(candidate_id),),
+            ).fetchone()
+            if row is None:
+                raise ValueError("candidate_not_found")
+            if row[0] != "pending":
+                raise ValueError("candidate_not_pending")
+
+            decision_at = datetime.now(timezone.utc).isoformat()
+            decision_by_value = str(decided_by or "test-ui")
+            note_value = str(note or "")
+            conn.execute(
+                """
+                UPDATE duplicate_candidates
+                SET status = 'deleted',
+                    decision_at = ?,
+                    decision_by = ?,
+                    decision_note = ?
+                WHERE id = ?
+                """,
+                (decision_at, decision_by_value, note_value, int(candidate_id)),
+            )
+            conn.execute(
+                """
+                INSERT INTO duplicate_decision_log (
+                    candidate_id, action, decided_at, decided_by, note
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (int(candidate_id), "discard", decision_at, decision_by_value, note_value),
+            )
+            conn.commit()
+            return {
+                "candidate_id": int(candidate_id),
+                "status": "deleted",
+                "action": "discard",
+                "decision_at": decision_at,
+                "decision_by": decision_by_value,
+                "decision_note": note_value,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def _loads_json_object(raw: object) -> dict[str, object]:

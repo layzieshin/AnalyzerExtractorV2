@@ -2,6 +2,9 @@ from src.testui.helpers import (
     classify_job_outcome,
     format_assay_data_detail,
     format_assay_overview_rows,
+    format_duplicate_candidate_detail,
+    format_duplicate_candidate_summary,
+    format_duplicate_field_comparison,
     format_job_result_summary,
     format_partial_writes_note,
     format_rules_report,
@@ -150,3 +153,54 @@ def test_format_rules_report_counts_sections():
     )
     assert "missing_files: 1" in lines
     assert "duplicate_json_key_files: 2" in lines
+
+
+def test_duplicate_candidate_formatters_show_status_and_comparison():
+    summary = format_duplicate_candidate_summary(
+        {
+            "candidate_id": 7,
+            "status": "pending",
+            "existing_run_id": 3,
+            "assay_key": "(1111)",
+            "dedupe_key": "v2|dev1|P|D|T|A.asy",
+            "device_id": "dev1",
+            "detected_at": "2026-01-01T10:00:00+00:00",
+        }
+    )
+    assert summary["candidate_id"] == "7"
+    assert summary["status"] == "wartet auf Pruefung"
+    assert summary["device_id"] == "dev1"
+
+    detail = {
+        "candidate": {
+            "candidate_id": 7,
+            "status": "deleted",
+            "existing_run_id": 3,
+            "assay_key": "(1111)",
+            "device_id": "dev1",
+            "dedupe_key": "v2|dev1|P|D|T|A.asy",
+            "decision_by": "tester",
+            "decision_note": "false alarm",
+            "dedupe_basis": {"TEST": "A.asy"},
+        },
+        "existing": {
+            "run_id": 3,
+            "job_id": "j1",
+            "pdf_path": "a.pdf",
+            "assay_key": "(1111)",
+            "dedupe_key": "v2|dev1|P|D|T|A.asy",
+        },
+        "field_comparison": [
+            {"field": "test", "existing": "A", "candidate": "B", "same": False},
+            {"field": "unit", "existing": "mg/L", "candidate": "mg/L", "same": True},
+        ],
+    }
+    text = format_duplicate_candidate_detail(detail)
+    assert "status: verworfen" in text
+    assert "decision_by: tester" in text
+    assert "run_id: 3" in text
+    assert "TEST: A.asy" in text
+
+    rows = format_duplicate_field_comparison(detail)
+    assert rows[0] == {"field": "test", "existing": "A", "candidate": "B", "same": "Nein"}
+    assert rows[1] == {"field": "unit", "existing": "mg/L", "candidate": "mg/L", "same": "Ja"}
