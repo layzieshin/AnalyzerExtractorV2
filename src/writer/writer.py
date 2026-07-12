@@ -80,10 +80,14 @@ class Writer:
         for h in headers:
             if h == "assay_key":
                 row_values.append(record.assay_key)
+            elif h == "device_id":
+                row_values.append(record.device_id)
             elif h == "lot_id":
                 row_values.append(record.lot_id)
             elif h == "dedupe_key":
                 row_values.append(record.dedupe_key)
+            elif h == "dedupe_version":
+                row_values.append(record.dedupe_version)
             else:
                 # Wichtig: Wenn Header gemappt ist (z.B. "Haltbarkeit"), dann den originalen Key nehmen (z.B. "expiry_raw")
                 internal_key = reverse_mapping.get(h, h)
@@ -108,7 +112,7 @@ class Writer:
 
     def _ensure_headers(self, ws: Worksheet, record: AssayRecord, excel_rules: Dict[str, Any]) -> List[str]:
         mapping: Dict[str, str] = excel_rules.get("column_mapping", {})
-        base_cols = ["assay_key", "lot_id", "dedupe_key"]
+        base_cols = ["assay_key", "device_id", "lot_id", "dedupe_key", "dedupe_version"]
 
         # Excel-Header-Namen (gemappt), aber Keys bleiben intern im record.data
         data_cols = [mapping.get(k, k) for k in record.data.keys()]

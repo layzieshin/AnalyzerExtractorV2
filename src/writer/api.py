@@ -15,7 +15,7 @@ def write_record(record: AssayRecord, ruleset: RuleSet, output_dir: str) -> Writ
     - One Excel file per assay.
     - One sheet per lot.
     - One row per run.
-    - Dedupe by record.dedupe_key (test|date|time).
+    - Dedupe by record.dedupe_key.
     - Global excel writer lock file in output dir.
     """
     return Writer().write_record(record, ruleset, output_dir)

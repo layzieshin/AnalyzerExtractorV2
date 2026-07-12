@@ -20,6 +20,7 @@ def test_submit_writes_excel_and_sqlite(tmp_path: Path, monkeypatch):
         "lot_rule": {"regex": r"Lot:\s*(\w+)"},
         "extract_rules": {
             "fields": [
+                {"key": "plate_name", "regex": r"Plate:\s*(\w+)", "required": True},
                 {"key": "test", "regex": r"Test:\s*(\w+)", "required": True},
                 {"key": "date", "regex": r"Date:\s*([0-9\-]+)", "required": True},
                 {"key": "time", "regex": r"Time:\s*([0-9:]+)", "required": True},
@@ -38,6 +39,7 @@ def test_submit_writes_excel_and_sqlite(tmp_path: Path, monkeypatch):
             "Assay A",
             "(1111)",
             "Lot: LOTA",
+            "Plate: PLATE1",
             "Test: TESTX",
             "Date: 2026-05-28",
             "Time: 12:00:00",
@@ -47,7 +49,7 @@ def test_submit_writes_excel_and_sqlite(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("src.parser.api.parse", fake_parse)
 
     sqlite_path = root / "output" / "final" / "res.sqlite3"
-    result = submit(str(pdf), str(root), output_mode="both", sqlite_path=str(sqlite_path))
+    result = submit(str(pdf), str(root), output_mode="both", sqlite_path=str(sqlite_path), device_id="dev1")
 
     assert result.status == "DONE"
     assert (root / "output" / "final" / "Assay_A.xlsx").exists()
@@ -60,7 +62,13 @@ def test_submit_writes_excel_and_sqlite(tmp_path: Path, monkeypatch):
     assert item["assay_name"] == "Assay A"
     assert item["ruleset_file"] == "AssayA.json"
     assert item["lot_id"] == "LOTA"
-    assert item["dedupe_key"].startswith("(1111)|LOTA|")
+    assert item["device_id"] == "dev1"
+    assert item["dedupe_version"] == "v2"
+    assert item["dedupe_key"] == "v2|dev1|PLATE1|2026-05-28|12:00:00|TESTX"
+    assert item["dedupe_basis"]["PLATTE"] == "PLATE1"
+    assert len(item["pdf_sha256"]) == 64
+    assert item["pdf_sha256"].startswith(result.job_id)
+    assert len(item["assay_block_hash"]) == 64
     assert item["data"]["test"] == "TESTX"
     assert item["missing_required"] == []
     assert len(item["outputs"]) == 2
@@ -81,6 +89,7 @@ def test_submit_reports_missing_required_in_write_item(tmp_path: Path, monkeypat
         "lot_rule": {"regex": r"Lot:\s*(\w+)"},
         "extract_rules": {
             "fields": [
+                {"key": "plate_name", "regex": r"Plate:\s*(\w+)", "required": True},
                 {"key": "test", "regex": r"Test:\s*(\w+)", "required": True},
                 {"key": "date", "regex": r"Date:\s*([0-9\-]+)", "required": True},
                 {"key": "optional", "regex": r"Opt:\s*(\w+)", "required": False},
@@ -120,6 +129,7 @@ def test_submit_sqlite_only_skips_excel(tmp_path: Path, monkeypatch):
         "lot_rule": {"regex": r"Lot:\s*(\w+)"},
         "extract_rules": {
             "fields": [
+                {"key": "plate_name", "regex": r"Plate:\s*(\w+)", "required": True},
                 {"key": "test", "regex": r"Test:\s*(\w+)", "required": True},
                 {"key": "date", "regex": r"Date:\s*([0-9\-]+)", "required": True},
                 {"key": "time", "regex": r"Time:\s*([0-9:]+)", "required": True},
@@ -138,6 +148,7 @@ def test_submit_sqlite_only_skips_excel(tmp_path: Path, monkeypatch):
             "Assay A",
             "(1111)",
             "Lot: LOTA",
+            "Plate: PLATE1",
             "Test: TESTX",
             "Date: 2026-05-28",
             "Time: 12:00:00",

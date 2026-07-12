@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from src.runtime.api import release_exclusive, try_acquire_exclusive
+from src.runtime.api import resolve_device_id
 
 from .model import JobResult
 
@@ -22,6 +23,7 @@ class JobController:
         sqlite_busy_timeout_ms: int = 5000,
         sqlite_retry_count: int = 3,
         sqlite_retry_sleep_s: float = 0.2,
+        device_id: str | None = None,
     ):
         root = Path(project_root)
         pdf = Path(pdf_path)
@@ -33,7 +35,9 @@ class JobController:
         if not pdf.exists():
             return self._result("FAILED", "", str(pdf), {"error": "pdf_not_found"})
 
-        job_id = self._hash_file(pdf)
+        pdf_sha256 = self._sha256_file(pdf)
+        job_id = pdf_sha256[:16]
+        effective_device_id = resolve_device_id(root, device_id)
         locks_dir = root / "locks"
         jobs_dir = root / "jobs"
         rules_dir = root / "rules"
@@ -60,7 +64,14 @@ class JobController:
         except FileExistsError:
             return self._result("SKIPPED", job_id, str(pdf), {"reason": "locked"})
 
-        state: Dict[str, Any] = {"job_id": job_id, "pdf_path": str(pdf), "status": "LOCKED", "steps": []}
+        state: Dict[str, Any] = {
+            "job_id": job_id,
+            "pdf_path": str(pdf),
+            "pdf_sha256": pdf_sha256,
+            "device_id": effective_device_id,
+            "status": "LOCKED",
+            "steps": [],
+        }
         self._save_state(state_path, state)
 
         try:
@@ -138,11 +149,13 @@ class JobController:
 
             # DEBUG DUMP: per-assay blocks (exact input to Extractor)
             block_dumps = {}
+            block_hashes: Dict[str, str] = {}
             for k, block in blocks.items():
                 safe_k = k.replace("(", "").replace(")", "")
                 p = jobs_dir / f"{job_id}_{safe_k}_block.txt"
                 p.write_text(block, encoding="utf-8")
                 block_dumps[k] = str(p)
+                block_hashes[k] = self._hash_text(block)
 
             state["steps"].append({"step": "debug_blocks", "block_dumps": block_dumps})
             self._save_state(state_path, state)
@@ -151,13 +164,18 @@ class JobController:
             writes: List[Dict[str, Any]] = []
             for k in assay_keys:
                 ruleset = assay_rulesets[k]
-                rec = extract_record(blocks[k], ruleset)
+                rec = extract_record(blocks[k], ruleset, device_id=effective_device_id)
                 write_item: Dict[str, Any] = {
                     "assay_key": k,
                     "assay_name": str(ruleset.data.get("assay_name", "")).strip(),
                     "ruleset_file": ruleset.ruleset_file,
                     "lot_id": rec.lot_id,
                     "dedupe_key": rec.dedupe_key,
+                    "device_id": rec.device_id,
+                    "dedupe_version": rec.dedupe_version,
+                    "dedupe_basis": rec.dedupe_basis,
+                    "pdf_sha256": pdf_sha256,
+                    "assay_block_hash": block_hashes.get(k, ""),
                     "data": rec.data,
                     "missing_required": self._missing_required_fields(ruleset, rec.data),
                     "outputs": [],
@@ -193,6 +211,8 @@ class JobController:
                             sqlite_target,
                             job_id=job_id,
                             pdf_path=str(pdf),
+                            pdf_sha256=pdf_sha256,
+                            assay_block_hash=block_hashes.get(k, ""),
                             busy_timeout_ms=sqlite_busy_timeout_ms,
                             retry_count=sqlite_retry_count,
                             retry_sleep_s=sqlite_retry_sleep_s,
@@ -234,12 +254,19 @@ class JobController:
         finally:
             self._release_lock(lock_path)
 
-    def _hash_file(self, path: Path) -> str:
+    def _sha256_file(self, path: Path) -> str:
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 h.update(chunk)
-        return h.hexdigest()[:16]
+        return h.hexdigest()
+
+    def _hash_file(self, path: Path) -> str:
+        return self._sha256_file(path)[:16]
+
+    @staticmethod
+    def _hash_text(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _acquire_lock(self, lock_path: Path, stale_ttl_s: float) -> None:
         if not try_acquire_exclusive(lock_path, stale_ttl_s):

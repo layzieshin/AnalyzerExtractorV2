@@ -416,6 +416,9 @@ class RuleSuite:
             "used_ruleset": draft_path or ruleset.ruleset_file,
             "lot_id": record.lot_id,
             "dedupe_key": record.dedupe_key,
+            "device_id": getattr(record, "device_id", "DEFAULT_DEVICE"),
+            "dedupe_version": getattr(record, "dedupe_version", ""),
+            "dedupe_basis": getattr(record, "dedupe_basis", {}),
             "data": record.data,
         }
 

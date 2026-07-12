@@ -1077,6 +1077,9 @@ def test_preview_extract_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         "used_ruleset",
         "lot_id",
         "dedupe_key",
+        "device_id",
+        "dedupe_version",
+        "dedupe_basis",
         "data",
     }
     assert out["pdf_path"] == "dummy.pdf"

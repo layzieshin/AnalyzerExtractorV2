@@ -24,6 +24,7 @@ def test_humanize_job_error_maps_common_cases():
     assert humanize_job_error(error="pdf_not_found") == "PDF-Datei nicht gefunden."
     assert humanize_job_error(error="no_assay_detected") == "Kein Assay im PDF erkannt."
     assert "Excel-Schreibfehler" in humanize_job_error(error="excel_write_failed:(1):locked")
+    assert "Dedupe-Basis" in humanize_job_error(error="dedupe basis missing: PLATTE")
 
 
 def test_format_job_result_summary_includes_status_and_human_text():
@@ -71,6 +72,23 @@ def test_format_assay_data_detail_shows_values_and_missing():
     assert "test: 'VAL'" in text
     assert "missing_required: date" in text
     assert "optional_missing: date" in text
+
+
+def test_format_assay_data_detail_shows_dedupe_meta():
+    text = format_assay_data_detail(
+        {
+            "device_id": "dev1",
+            "dedupe_version": "v2",
+            "dedupe_key": "v2|dev1|P|D|T|A.asy",
+            "pdf_sha256": "a" * 64,
+            "assay_block_hash": "b" * 64,
+            "dedupe_basis": {"PLATTE": "P", "TEST": "A.asy"},
+            "data": {"TEST": "A.asy"},
+        }
+    )
+    assert "device_id: dev1" in text
+    assert "dedupe_basis:" in text
+    assert "PLATTE: P" in text
 
 
 def test_format_write_status_lines_excel_and_sqlite():

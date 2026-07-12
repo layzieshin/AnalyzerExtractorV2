@@ -11,7 +11,13 @@ from tkinter import filedialog, messagebox, ttk
 from src.jobcontroller.api import submit
 from src.ruleresolver.api import validate_rules_integrity
 from src.rulesuite.api import activate_draft, create_draft, list_fields, preview_extract, set_field_regex
-from src.runtime.api import load_runtime_config, resolve_app_root
+from src.runtime.api import (
+    get_default_device_id,
+    get_device_config_status,
+    list_devices,
+    load_runtime_config,
+    resolve_app_root,
+)
 from src.testui.api import (
     classify_job_outcome,
     format_assay_data_detail,
@@ -51,6 +57,8 @@ class MinimalBatchGUI(tk.Tk):
         self.var_sqlite_retry_count = tk.StringVar(value=str(cfg.sqlite_retry_count))
         self.var_sqlite_retry_sleep = tk.StringVar(value=str(cfg.sqlite_retry_sleep_s))
         self.var_reject_invalid = tk.BooleanVar(value=True)
+        self.var_device_choice = tk.StringVar(value="")
+        self._device_choice_to_id: dict[str, str] = {}
 
         self.var_assay_key = tk.StringVar(value="")
         self.var_draft_path = tk.StringVar(value="")
@@ -115,6 +123,19 @@ class MinimalBatchGUI(tk.Tk):
         cb_invalid = tk.Checkbutton(row, text="reject_invalid_runs", variable=self.var_reject_invalid)
         cb_invalid.pack(side="left")
         self._register_action(cb_invalid)
+
+        device_row = tk.Frame(cfg_frame)
+        device_row.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(device_row, text="Gerät").pack(side="left")
+        self.device_menu = tk.OptionMenu(device_row, self.var_device_choice, "")
+        self.device_menu.pack(side="left", padx=(4, 8))
+        self._register_action(self.device_menu)
+        btn_devices = tk.Button(device_row, text="Geräte neu laden", command=self.on_reload_devices)
+        btn_devices.pack(side="left", padx=(0, 8))
+        self._register_action(btn_devices)
+        self.lbl_device_status = tk.Label(device_row, text="", anchor="w", fg="#8a6d00")
+        self.lbl_device_status.pack(side="left", fill="x", expand=True)
+        self._refresh_device_choices(log=False)
 
         note = tk.Label(
             self,
@@ -359,12 +380,50 @@ class MinimalBatchGUI(tk.Tk):
     def _root_path(self) -> Path:
         return Path(self.var_project_root.get().strip())
 
+    def _refresh_device_choices(self, *, log: bool = True) -> None:
+        root = self._root_path()
+        devices = list_devices(root)
+        default_id = get_default_device_id(root)
+        status = get_device_config_status(root)
+        self._device_choice_to_id = {}
+        menu = self.device_menu["menu"]
+        menu.delete(0, "end")
+        selected_label = ""
+        for device in devices:
+            device_id = str(device.get("device_id", "")).strip()
+            display_name = str(device.get("display_name", device_id)).strip() or device_id
+            if not device_id:
+                continue
+            label = f"{display_name} ({device_id})"
+            self._device_choice_to_id[label] = device_id
+            menu.add_command(label=label, command=lambda value=label: self.var_device_choice.set(value))
+            if device_id == default_id:
+                selected_label = label
+        if not selected_label and self._device_choice_to_id:
+            selected_label = next(iter(self._device_choice_to_id))
+        self.var_device_choice.set(selected_label)
+
+        msg = ""
+        if bool(status.get("using_fallback")):
+            msg = str(status.get("message", "Geräte-Fallback aktiv."))
+        self.lbl_device_status.config(text=msg)
+        if log and msg:
+            self._log(f"Geräte-Konfiguration: {msg}")
+
+    def _selected_device_id(self) -> str | None:
+        label = self.var_device_choice.get()
+        return self._device_choice_to_id.get(label)
+
+    def on_reload_devices(self) -> None:
+        self._refresh_device_choices(log=True)
+
     def on_pick_root(self) -> None:
         if self._is_running:
             return
         d = filedialog.askdirectory(title="Projekt-Root waehlen")
         if d:
             self.var_project_root.set(d)
+            self._refresh_device_choices(log=True)
             self._log(f"project_root gesetzt: {d}")
 
     def on_pick_pdfs(self) -> None:
@@ -407,6 +466,7 @@ class MinimalBatchGUI(tk.Tk):
             "sqlite_busy_timeout_ms": int(self.var_sqlite_busy_timeout.get().strip() or "5000"),
             "sqlite_retry_count": int(self.var_sqlite_retry_count.get().strip() or "3"),
             "sqlite_retry_sleep_s": float(self.var_sqlite_retry_sleep.get().strip() or "0.2"),
+            "device_id": self._selected_device_id(),
         }
 
     def _with_env(self) -> None:

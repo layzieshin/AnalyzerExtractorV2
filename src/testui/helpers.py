@@ -49,6 +49,8 @@ def humanize_job_error(error: str | None = None, reason: str | None = None) -> s
         return "SQLite-Schreibfehler."
     if "required field not found" in err:
         return f"Pflichtfeld fehlt: {err}"
+    if "dedupe basis missing" in err:
+        return f"Dedupe-Basis unvollstaendig: {err}"
     if "dedupe fields empty" in err:
         return "Dedupe-Felder leer — Extraktion abgebrochen."
     return f"Unerwarteter Fehler: {err}"
@@ -106,7 +108,13 @@ def format_assay_data_detail(write_item: Mapping[str, Any]) -> str:
     data = write_item.get("data")
     if not isinstance(data, dict):
         return "(keine Feldwerte)"
-    lines = [f"{key}: {value!r}" for key, value in sorted(data.items(), key=lambda kv: str(kv[0]))]
+    lines: List[str] = []
+    meta_lines = _format_dedupe_meta(write_item)
+    if meta_lines:
+        lines.extend(meta_lines)
+        lines.append("")
+        lines.append("--- Feldwerte ---")
+    lines.extend(f"{key}: {value!r}" for key, value in sorted(data.items(), key=lambda kv: str(kv[0])))
     missing = write_item.get("missing_required")
     if isinstance(missing, list) and missing:
         lines.append("")
@@ -115,6 +123,26 @@ def format_assay_data_detail(write_item: Mapping[str, Any]) -> str:
     if optional_missing:
         lines.append(f"optional_missing: {', '.join(optional_missing)}")
     return "\n".join(lines) if lines else "(keine Feldwerte)"
+
+
+def _format_dedupe_meta(write_item: Mapping[str, Any]) -> List[str]:
+    lines: List[str] = []
+    for key, label in (
+        ("device_id", "device_id"),
+        ("dedupe_version", "dedupe_version"),
+        ("dedupe_key", "dedupe_key"),
+        ("pdf_sha256", "pdf_sha256"),
+        ("assay_block_hash", "assay_block_hash"),
+    ):
+        value = write_item.get(key)
+        if value:
+            lines.append(f"{label}: {value}")
+    basis = write_item.get("dedupe_basis")
+    if isinstance(basis, dict) and basis:
+        lines.append("dedupe_basis:")
+        for key, value in sorted(basis.items(), key=lambda kv: str(kv[0])):
+            lines.append(f"  {key}: {value}")
+    return lines
 
 
 def format_write_status_lines(outputs: Any) -> List[str]:
