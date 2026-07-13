@@ -2,16 +2,33 @@ from src.testui.helpers import (
     classify_job_outcome,
     format_assay_data_detail,
     format_assay_overview_rows,
+    format_device_choice,
     format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
     format_duplicate_field_comparison,
     format_job_result_summary,
     format_partial_writes_note,
+    format_queue_job_row,
     format_rules_report,
+    format_runtime_options_summary,
+    format_validation_status,
+    format_watch_file_row,
     format_write_outputs,
     format_write_status_lines,
     humanize_job_error,
 )
+
+
+class _QueueLike:
+    job_id = "j1"
+    pdf_path = "C:/in/a.pdf"
+    status = "PENDING"
+    created_at = "c"
+    updated_at = "u"
+    source = "watchdog"
+    worker_id = ""
+    attempts = 2
+    last_error = "locked"
 
 
 def test_classify_job_outcome():
@@ -204,3 +221,53 @@ def test_duplicate_candidate_formatters_show_status_and_comparison():
     rows = format_duplicate_field_comparison(detail)
     assert rows[0] == {"field": "test", "existing": "A", "candidate": "B", "same": "Nein"}
     assert rows[1] == {"field": "unit", "existing": "mg/L", "candidate": "mg/L", "same": "Ja"}
+
+
+def test_test_app_presenters_format_device_queue_options_watch_and_validation():
+    device = format_device_choice({"device_id": "dev1", "display_name": "Analyzer I", "active": True})
+    assert device == {
+        "device_id": "dev1",
+        "display_name": "Analyzer I",
+        "label": "Analyzer I (dev1)",
+        "status": "aktiv",
+    }
+
+    obj_row = format_queue_job_row(_QueueLike())
+    map_row = format_queue_job_row(
+        {
+            "job_id": "j1",
+            "pdf_path": "C:/in/a.pdf",
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": "watchdog",
+            "worker_id": "",
+            "attempts": 2,
+            "last_error": "locked",
+        }
+    )
+    assert obj_row == map_row
+    assert obj_row["file"] == "a.pdf"
+    assert obj_row["last_error"] == "locked"
+
+    options = format_runtime_options_summary(
+        {
+            "output_mode": "both",
+            "sqlite_path": "out/results.sqlite3",
+            "watch_dir": "input/watch",
+            "device_id": "dev1",
+            "watch_mode": "Ueberwachter Ordner",
+        }
+    )
+    assert "Output: both" in options
+    assert "Geraet: dev1" in options
+
+    watch_row = format_watch_file_row("C:/watch/sample.pdf", source="manual")
+    assert watch_row["file"] == "sample.pdf"
+    assert watch_row["source"] == "manual"
+    assert watch_row["action"] == "bereit"
+
+    ok = format_validation_status({"missing_files": [], "key_mismatches": []})
+    bad = format_validation_status({"missing_files": ["a"], "key_mismatches": []})
+    assert ok["status"] == "OK"
+    assert bad["status"] == "FEHLER"
+    assert bad["missing_files"] == "1"

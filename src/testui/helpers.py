@@ -224,6 +224,76 @@ def format_rules_report(report: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def format_device_choice(device: Mapping[str, object]) -> Dict[str, str]:
+    device_id = _string_or_empty(device.get("device_id")).strip()
+    display_name = _string_or_empty(device.get("display_name")).strip() or device_id
+    active = device.get("active")
+    status = "aktiv" if active is not False else "inaktiv"
+    label = f"{display_name} ({device_id})" if device_id and display_name != device_id else device_id
+    return {
+        "device_id": device_id,
+        "display_name": display_name,
+        "label": label,
+        "status": status,
+    }
+
+
+def format_queue_job_row(job: object | Mapping[str, object]) -> Dict[str, str]:
+    return {
+        "job_id": _object_field(job, "job_id"),
+        "file": Path(_object_field(job, "pdf_path")).name,
+        "path": _object_field(job, "pdf_path"),
+        "status": _object_field(job, "status"),
+        "source": _object_field(job, "source"),
+        "worker_id": _object_field(job, "worker_id"),
+        "attempts": _object_field(job, "attempts"),
+        "last_error": _object_field(job, "last_error"),
+        "updated_at": _object_field(job, "updated_at"),
+    }
+
+
+def format_runtime_options_summary(options: Mapping[str, object]) -> List[str]:
+    lines = [
+        f"Output: {_string_or_empty(options.get('output_mode')) or '-'}",
+        f"SQLite: {_string_or_empty(options.get('sqlite_path')) or '-'}",
+        f"Watch: {_string_or_empty(options.get('watch_dir')) or '-'}",
+        f"Geraet: {_string_or_empty(options.get('device_id')) or '-'}",
+        f"Watch-Modus: {_string_or_empty(options.get('watch_mode')) or '-'}",
+    ]
+    return lines
+
+
+def format_watch_file_row(path: str | Path, *, source: str = "watch") -> Dict[str, str]:
+    p = Path(path)
+    return {
+        "file": p.name,
+        "path": str(p),
+        "source": source,
+        "queue_status": "",
+        "job_id": "",
+        "device_id": "",
+        "last_error": "",
+        "action": "bereit",
+    }
+
+
+def format_validation_status(report: Mapping[str, object]) -> Dict[str, str]:
+    counts = {
+        key: len(value) if isinstance(value, list) else 0
+        for key, value in report.items()
+    }
+    total = sum(counts.values())
+    return {
+        "status": "OK" if total == 0 else "FEHLER",
+        "summary": "Rules OK" if total == 0 else f"Rules mit Befunden: {total}",
+        "missing_files": str(counts.get("missing_files", 0)),
+        "key_mismatches": str(counts.get("key_mismatches", 0)),
+        "duplicate_json_key_files": str(counts.get("duplicate_json_key_files", 0)),
+        "content_errors": str(counts.get("content_errors", 0)),
+        "orphan_rulesets": str(counts.get("orphan_rulesets", 0)),
+    }
+
+
 def format_duplicate_candidate_summary(row: Mapping[str, Any]) -> Dict[str, str]:
     return {
         "candidate_id": _string_or_empty(row.get("candidate_id")),
@@ -348,3 +418,9 @@ def _format_duplicate_value(value: object) -> str:
 
 def _string_or_empty(value: object) -> str:
     return "" if value is None else str(value)
+
+
+def _object_field(obj: object | Mapping[str, object], key: str) -> str:
+    if isinstance(obj, Mapping):
+        return _string_or_empty(obj.get(key))
+    return _string_or_empty(getattr(obj, key, None))
