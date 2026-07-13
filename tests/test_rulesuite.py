@@ -1351,3 +1351,48 @@ def test_clone_ruleset_to_draft_overwrite_and_include_fields_toggle(tmp_path: Pa
         if field["key"] not in REQUIRED_HEADER_FIELD_KEYS
     }
     assert extra_keys == set()
+
+
+def test_clone_ruleset_to_draft_overwrite_keeps_target_key_and_name(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    _write_clone_source_ruleset(root)
+
+    target_path = Path(draft_path_for_assay(str(root), "(9999)"))
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(
+        json.dumps(
+            {
+                "assay_name": "Old Draft Name",
+                "assay_key": "(1111)",
+                "lot_rule": {"regex": ""},
+                "extract_rules": {"fields": [], "dedupe_fields": []},
+                "excel_rules": {
+                    "excel_filename_template": "{assay_name}.xlsx",
+                    "sheetname_template": "{lot_id}",
+                    "column_mapping": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = clone_ruleset_to_draft(
+        str(root),
+        "(1111)",
+        "(9999)",
+        "Distinct Target Name",
+        overwrite=True,
+        include_fields=False,
+    )
+
+    assert result["status"] == "overwritten"
+    assert result["source_assay_key"] == "(1111)"
+    assert result["target_assay_key"] == "(9999)"
+    assert result["target_assay_name"] == "Distinct Target Name"
+
+    data = load_draft(str(target_path))
+    assert data["assay_key"] == "(9999)"
+    assert data["assay_name"] == "Distinct Target Name"
+    assert data["assay_key"] != "(1111)"
+    assert data["assay_name"] != "Source Assay"
