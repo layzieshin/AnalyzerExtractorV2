@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .helpers import (
+    build_rework_items,
     classify_job_outcome,
     format_assay_data_detail,
     format_assay_overview_rows,
@@ -14,6 +15,8 @@ from .helpers import (
     format_job_result_summary,
     format_partial_writes_note,
     format_queue_job_row,
+    format_rework_item_detail,
+    format_rework_item_summary,
     format_rules_report,
     format_runtime_options_summary,
     format_submit_row_update,
@@ -28,6 +31,7 @@ from .helpers import (
 )
 
 __all__ = [
+    "build_rework_items",
     "classify_job_outcome",
     "format_assay_data_detail",
     "format_assay_overview_rows",
@@ -41,6 +45,8 @@ __all__ = [
     "format_job_result_summary",
     "format_partial_writes_note",
     "format_queue_job_row",
+    "format_rework_item_detail",
+    "format_rework_item_summary",
     "format_rules_report",
     "format_runtime_options_summary",
     "format_submit_row_update",

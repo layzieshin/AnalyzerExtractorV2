@@ -343,7 +343,188 @@ def format_extractor_error_label(error: object) -> str:
         return "SQLite-Schreibfehler"
     if "content_split_failed" in err or "split_failed" in err or "split fehl" in err.lower():
         return "Aufteilung fehlgeschlagen"
+    if "ruleset missing assay_name" in err:
+        return "Regelset unvollständig"
     return "Technischer Fehler"
+
+
+def classify_rework_error(queue_error: object, state_error: object) -> tuple[str, str] | None:
+    queue_err = _string_or_empty(queue_error).strip()
+    state_err = _string_or_empty(state_error).strip()
+    root = queue_err
+    if queue_err == "max_attempts_exceeded" and state_err:
+        root = state_err
+    elif state_err and _is_rule_relevant_rework_error(state_err) and not _is_rule_relevant_rework_error(queue_err):
+        root = state_err
+
+    if _is_ignored_rework_error(root):
+        if _is_rule_relevant_rework_error(queue_err) and queue_err != "max_attempts_exceeded":
+            root = queue_err
+        else:
+            return None
+    if not _is_rule_relevant_rework_error(root):
+        return None
+    return _rework_error_label(root), root
+
+
+def build_rework_items(
+    project_root: str | Path,
+    queue_jobs: List[object | Mapping[str, object]],
+) -> List[Dict[str, Any]]:
+    root = Path(project_root)
+    items: List[Dict[str, Any]] = []
+    for job in queue_jobs:
+        row = format_queue_job_row(job)
+        if row["status"] != "FAILED":
+            continue
+        job_id = row["job_id"]
+        if not job_id:
+            continue
+        state = load_job_state(str(root), job_id)
+        state_error = _string_or_empty(state.get("error") if state else "")
+        classified = classify_rework_error(row["last_error"], state_error)
+        if classified is None:
+            continue
+        error_label, root_error = classified
+        normalized_dump, block_dumps = _collect_rework_artifacts(state)
+        state_path = str(root / "jobs" / f"{job_id}.json")
+        items.append(
+            {
+                "item_id": job_id,
+                "job_id": job_id,
+                "pdf_path": row["path"],
+                "file": row["file"],
+                "queue_status": row["status"],
+                "queue_error": row["last_error"],
+                "state_error": state_error,
+                "error_label": error_label,
+                "context_label": _build_rework_context_label(normalized_dump, block_dumps),
+                "state_path": state_path if state is not None else "",
+                "normalized_dump": normalized_dump,
+                "block_dumps": block_dumps,
+                "root_error": root_error,
+            }
+        )
+    return sorted(items, key=lambda item: str(item.get("file", "")).casefold())
+
+
+def format_rework_item_summary(item: Mapping[str, object]) -> Dict[str, str]:
+    return {
+        "file": _string_or_empty(item.get("file")),
+        "error_label": _string_or_empty(item.get("error_label")),
+        "queue_status": _extractor_queue_status_label(item.get("queue_status")),
+        "job_id": _string_or_empty(item.get("job_id")),
+        "context_label": _string_or_empty(item.get("context_label")) or "-",
+    }
+
+
+def format_rework_item_detail(item: Mapping[str, object]) -> str:
+    lines = [
+        f"Datei: {_string_or_empty(item.get('file'))}",
+        f"Job-ID: {_string_or_empty(item.get('job_id'))}",
+        f"PDF: {_string_or_empty(item.get('pdf_path'))}",
+        f"Status: {_extractor_queue_status_label(item.get('queue_status'))}",
+        f"Fehler: {_string_or_empty(item.get('error_label'))}",
+        f"Queue-Fehler: {_string_or_empty(item.get('queue_error')) or '-'}",
+        f"State-Fehler: {_string_or_empty(item.get('state_error')) or '-'}",
+        f"Kontext: {_string_or_empty(item.get('context_label')) or '-'}",
+        f"Job-State: {_string_or_empty(item.get('state_path')) or '-'}",
+    ]
+    normalized_dump = _string_or_empty(item.get("normalized_dump"))
+    if normalized_dump:
+        status = "vorhanden" if Path(normalized_dump).exists() else "nicht vorhanden"
+        lines.append(f"Normalized dump: {normalized_dump} ({status})")
+    else:
+        lines.append("Normalized dump: -")
+
+    block_dumps = item.get("block_dumps")
+    if isinstance(block_dumps, Mapping) and block_dumps:
+        lines.append("Block dumps:")
+        for key in sorted(block_dumps.keys(), key=lambda value: str(value).casefold()):
+            path = _string_or_empty(block_dumps[key])
+            status = "vorhanden" if path and Path(path).exists() else "nicht vorhanden"
+            lines.append(f"  {key}: {path or '-'} ({status})")
+    else:
+        lines.append("Block dumps: -")
+    return "\n".join(lines)
+
+
+def _is_ignored_rework_error(error: str) -> bool:
+    err = error.strip().lower()
+    if not err:
+        return True
+    if err == "pdf_not_found":
+        return True
+    if err.startswith("excel_write_failed:"):
+        return True
+    if err.startswith("sqlite_write_failed:"):
+        return True
+    if "duplicate" in err:
+        return True
+    if err.startswith("worker_submit_error:"):
+        return True
+    return False
+
+
+def _is_rule_relevant_rework_error(error: str) -> bool:
+    err = error.strip()
+    lower = err.lower()
+    if err == "no_assay_detected":
+        return True
+    if "ruleset missing assay_name" in err:
+        return True
+    if "content_split_failed" in lower or "split_failed" in lower:
+        return True
+    return False
+
+
+def _rework_error_label(error: str) -> str:
+    err = error.strip()
+    lower = err.lower()
+    if err == "no_assay_detected":
+        return "Assay nicht erkannt"
+    if "ruleset missing assay_name" in err:
+        return "Regelset unvollständig"
+    if "content_split_failed" in lower or "split_failed" in lower:
+        return "Aufteilung fehlgeschlagen"
+    return err
+
+
+def _collect_rework_artifacts(state: Mapping[str, object] | None) -> tuple[str, Dict[str, str]]:
+    normalized_dump = ""
+    block_dumps: Dict[str, str] = {}
+    if not state:
+        return normalized_dump, block_dumps
+    steps = state.get("steps")
+    if not isinstance(steps, list):
+        return normalized_dump, block_dumps
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        dump = step.get("normalized_dump")
+        if dump:
+            normalized_dump = _string_or_empty(dump)
+        dumps = step.get("block_dumps")
+        if isinstance(dumps, Mapping):
+            for key, value in dumps.items():
+                if value:
+                    block_dumps[str(key)] = _string_or_empty(value)
+    return normalized_dump, dict(sorted(block_dumps.items(), key=lambda item: item[0].casefold()))
+
+
+def _build_rework_context_label(normalized_dump: str, block_dumps: Mapping[str, str]) -> str:
+    if normalized_dump and Path(normalized_dump).exists():
+        return "Normalisierter Text"
+    for key in sorted(block_dumps.keys(), key=lambda value: str(value).casefold()):
+        path = block_dumps[key]
+        if path and Path(path).exists():
+            return f"Assay-Block {key}"
+    if normalized_dump:
+        return "Normalisierter Text (fehlend)"
+    if block_dumps:
+        first = sorted(block_dumps.keys(), key=lambda value: str(value).casefold())[0]
+        return f"Assay-Block {first} (fehlend)"
+    return "-"
 
 
 def format_enqueue_result(job: object | Mapping[str, object]) -> str:

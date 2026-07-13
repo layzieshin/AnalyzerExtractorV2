@@ -14,12 +14,15 @@ from src.jobqueue.api import enqueue_pdf_job, list_jobs, retry_failed_job
 from src.ruleresolver.api import validate_rules_integrity
 from src.runtime.api import list_devices, load_runtime_config, resolve_app_root
 from src.testui.api import (
+    build_rework_items,
     format_device_choice,
     format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
     format_duplicate_field_comparison,
     format_extractor_file_row,
     format_queue_job_row,
+    format_rework_item_detail,
+    format_rework_item_summary,
     format_runtime_options_summary,
     format_validation_status,
     merge_file_rows_with_queue,
@@ -72,6 +75,7 @@ class TestApp(tk.Tk):
         self._device_choice_to_id: dict[str, str] = {}
         self._watch_rows: dict[str, dict[str, str]] = {}
         self._duplicate_details: dict[int, dict[str, object]] = {}
+        self._rework_items: dict[str, dict[str, object]] = {}
         self._busy = False
         self._extraction_running = False
         self._stop_extraction_event = threading.Event()
@@ -213,10 +217,37 @@ class TestApp(tk.Tk):
     def _build_rule_suite_tab(self, parent: tk.Frame) -> None:
         controls = tk.Frame(parent)
         controls.pack(fill="x", padx=8, pady=8)
-        tk.Button(controls, text="Rule Editor oeffnen", command=self.open_rule_editor).pack(side="left")
+        tk.Button(controls, text="Nacharbeit aktualisieren", command=self.refresh_rework_items).pack(side="left")
+        tk.Button(controls, text="Kontext anzeigen", command=self.show_rework_context).pack(side="left", padx=(6, 0))
+        tk.Button(controls, text="Rule Editor oeffnen", command=self.open_rule_editor_from_rework).pack(side="left", padx=(6, 0))
+        tk.Button(controls, text="Erneut starten", command=self.retry_selected_rework_items).pack(side="left", padx=(6, 0))
         tk.Button(controls, text="Rules validieren", command=self.validate_rules).pack(side="left", padx=(6, 0))
         self.lbl_validation = tk.Label(parent, text="Noch keine Validierung.", anchor="w")
         self.lbl_validation.pack(fill="x", padx=8, pady=(0, 8))
+
+        rework_frame = tk.LabelFrame(parent, text="Nacharbeit aus fehlgeschlagenen Arbeitslisten-Jobs")
+        rework_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.tree_rework = ttk.Treeview(
+            rework_frame,
+            columns=("file", "error_label", "queue_status", "job_id", "context_label"),
+            show="headings",
+            height=8,
+        )
+        for col, title, width in (
+            ("file", "Datei", 190),
+            ("error_label", "Fehler", 180),
+            ("queue_status", "Status", 110),
+            ("job_id", "Job-ID", 140),
+            ("context_label", "Kontext", 180),
+        ):
+            self.tree_rework.heading(col, text=title)
+            self.tree_rework.column(col, width=width, anchor="w")
+        self.tree_rework.pack(fill="x", padx=8, pady=8)
+        self.tree_rework.bind("<<TreeviewSelect>>", self.on_rework_selected)
+
+        self.txt_rework_detail = tk.Text(rework_frame, height=12, wrap="word")
+        self.txt_rework_detail.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.txt_rework_detail.configure(state="disabled")
 
     def _build_logs_tab(self, parent: tk.Frame) -> None:
         self.txt_logs = tk.Text(parent, height=20, wrap="word")
@@ -717,6 +748,106 @@ class TestApp(tk.Tk):
             return
         subprocess.Popen([sys.executable, str(script)], cwd=str(self.project_root))
         self._log("Rule Editor gestartet.")
+
+    def refresh_rework_items(self) -> None:
+        for item in self.tree_rework.get_children():
+            self.tree_rework.delete(item)
+        self._set_text(self.txt_rework_detail, "")
+        jobs = list_jobs(str(self.project_root))
+        items = build_rework_items(str(self.project_root), jobs)
+        self._rework_items = {str(item["item_id"]): item for item in items}
+        for item in items:
+            summary = format_rework_item_summary(item)
+            item_id = str(item["item_id"])
+            self.tree_rework.insert(
+                "",
+                tk.END,
+                iid=item_id,
+                values=(
+                    summary["file"],
+                    summary["error_label"],
+                    summary["queue_status"],
+                    summary["job_id"],
+                    summary["context_label"],
+                ),
+            )
+        self._log(f"Nacharbeit aktualisiert: {len(items)} Eintrag/Eintraege.")
+
+    def on_rework_selected(self, _event: object = None) -> None:
+        selection = self.tree_rework.selection()
+        if not selection:
+            return
+        item = self._rework_items.get(str(selection[0]))
+        if item:
+            self._set_text(self.txt_rework_detail, format_rework_item_detail(item))
+
+    def show_rework_context(self) -> None:
+        selection = self.tree_rework.selection()
+        if not selection:
+            messagebox.showinfo("Nacharbeit", "Bitte zuerst einen Eintrag auswaehlen.")
+            return
+        item = self._rework_items.get(str(selection[0]))
+        if not item:
+            return
+        detail = format_rework_item_detail(item)
+        path = str(item.get("normalized_dump", "") or "")
+        label = "Normalisierter Text"
+        if not path or not Path(path).exists():
+            block_dumps = item.get("block_dumps")
+            path = ""
+            if isinstance(block_dumps, dict):
+                for key in sorted(block_dumps.keys(), key=lambda value: str(value).casefold()):
+                    candidate = str(block_dumps[key] or "")
+                    if candidate and Path(candidate).exists():
+                        path = candidate
+                        label = f"Assay-Block {key}"
+                        break
+                if not path and block_dumps:
+                    first = sorted(block_dumps.keys(), key=lambda value: str(value).casefold())[0]
+                    path = str(block_dumps.get(first, "") or "")
+                    label = f"Assay-Block {first}"
+        if not path:
+            self._set_text(self.txt_rework_detail, detail + "\n\nKontext: nicht vorhanden")
+            return
+        if not Path(path).exists():
+            self._set_text(self.txt_rework_detail, detail + f"\n\nKontext ({label}): Datei nicht vorhanden\n{path}")
+            return
+        try:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            self._set_text(self.txt_rework_detail, detail + f"\n\nKontext konnte nicht gelesen werden: {e}")
+            return
+        self._set_text(self.txt_rework_detail, detail + f"\n\n--- Kontext: {label} ---\n{path}\n\n{content}")
+
+    def open_rule_editor_from_rework(self) -> None:
+        selection = self.tree_rework.selection()
+        if selection:
+            item = self._rework_items.get(str(selection[0]))
+            if item:
+                self._log(f"Rule Editor fuer Nacharbeit: {item.get('file', item.get('pdf_path', '?'))}")
+        self.open_rule_editor()
+
+    def retry_selected_rework_items(self) -> None:
+        selection = list(self.tree_rework.selection())
+        if not selection:
+            messagebox.showinfo("Nacharbeit", "Bitte fehlgeschlagene Eintraege auswaehlen.")
+            return
+        restarted = 0
+        skipped = 0
+        for item_id in selection:
+            item = self._rework_items.get(str(item_id))
+            if not item:
+                skipped += 1
+                continue
+            try:
+                retry_failed_job(str(self.project_root), str(item["job_id"]))
+                restarted += 1
+            except Exception as e:
+                skipped += 1
+                self._log(f"Erneut starten fehlgeschlagen: {item.get('file', item.get('job_id', '?'))} | {e}")
+        self.refresh_queue()
+        self.refresh_rework_items()
+        self._log(f"Nacharbeit erneut gestartet: {restarted}. Uebersprungen: {skipped}.")
 
     def refresh_duplicates(self) -> None:
         for item in self.tree_duplicates.get_children():

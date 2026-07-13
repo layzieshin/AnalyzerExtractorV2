@@ -765,3 +765,206 @@ def test_test_app_start_selected_files_delegates_to_extraction(tmp_path, monkeyp
         assert called == [1]
     finally:
         app.destroy()
+
+
+def test_test_app_rework_section_controls_exist(tmp_path) -> None:
+    app = _make_test_app(tmp_path)
+    try:
+        assert hasattr(app, "tree_rework")
+        assert hasattr(app, "txt_rework_detail")
+        headings = [app.tree_rework.heading(col)["text"] for col in app.tree_rework["columns"]]
+        assert "Datei" in headings
+        assert "Fehler" in headings
+        assert "Kontext" in headings
+    finally:
+        app.destroy()
+
+
+def test_test_app_refresh_rework_items_renders_failed_jobs(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    queue_job = {
+        "job_id": "job1",
+        "pdf_path": str(pdf),
+        "status": "FAILED",
+        "updated_at": "u",
+        "source": "test-app-manual",
+        "worker_id": "",
+        "attempts": 1,
+        "last_error": "no_assay_detected",
+    }
+    monkeypatch.setattr(test_app, "list_jobs", lambda _root: [queue_job])
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+
+        assert "job1" in app._rework_items
+        assert app.tree_rework.get_children()
+        assert app.tree_rework.item("job1", "values")[1] == "Assay nicht erkannt"
+    finally:
+        app.destroy()
+
+
+def test_test_app_rework_selection_shows_detail(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.on_rework_selected()
+
+        detail = app.txt_rework_detail.get("1.0", tk.END)
+        assert "Assay nicht erkannt" in detail
+    finally:
+        app.destroy()
+
+
+def test_test_app_show_rework_context_loads_dump_or_reports_missing(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    dump = tmp_path / "jobs" / "job1_normalized.txt"
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text("normalized", encoding="utf-8")
+    import json
+
+    (tmp_path / "jobs" / "job1.json").write_text(
+        json.dumps(
+            {
+                "job_id": "job1",
+                "error": "no_assay_detected",
+                "steps": [{"step": "debug", "normalized_dump": str(dump)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.show_rework_context()
+        detail = app.txt_rework_detail.get("1.0", tk.END)
+        assert "normalized" in detail
+
+        dump.unlink()
+        app.show_rework_context()
+        detail_missing = app.txt_rework_detail.get("1.0", tk.END)
+        assert "nicht vorhanden" in detail_missing
+    finally:
+        app.destroy()
+
+
+def test_test_app_rework_retry_updates_queue_and_rework(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    retry_calls: list[str] = []
+    refresh_queue_calls: list[int] = []
+    refresh_rework_calls: list[int] = []
+
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+    monkeypatch.setattr(test_app, "retry_failed_job", lambda _root, job_id: retry_calls.append(job_id))
+    monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: refresh_queue_calls.append(1))
+    monkeypatch.setattr(test_app.TestApp, "refresh_rework_items", lambda self: refresh_rework_calls.append(1))
+
+    app = _make_test_app(tmp_path)
+    try:
+        refresh_queue_calls.clear()
+        refresh_rework_calls.clear()
+        app._rework_items = {
+            "job1": {
+                "item_id": "job1",
+                "job_id": "job1",
+                "file": "failed.pdf",
+                "pdf_path": str(pdf),
+            }
+        }
+        app.tree_rework.insert("", tk.END, iid="job1", values=("failed.pdf", "Assay nicht erkannt", "Fehler", "job1", "-"))
+        app.tree_rework.selection_set("job1")
+        app.retry_selected_rework_items()
+
+        assert retry_calls == ["job1"]
+        assert refresh_queue_calls == [1]
+        assert refresh_rework_calls == [1]
+    finally:
+        app.destroy()
+
+
+def test_test_app_rework_rule_editor_uses_existing_start_path(tmp_path, monkeypatch) -> None:
+    logs: list[str] = []
+    started: list[int] = []
+
+    monkeypatch.setattr(test_app.TestApp, "open_rule_editor", lambda self: started.append(1))
+    monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(tmp_path / "failed.pdf"),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.open_rule_editor_from_rework()
+
+        assert started == [1]
+        assert any("Rule Editor fuer Nacharbeit" in line for line in logs)
+    finally:
+        app.destroy()

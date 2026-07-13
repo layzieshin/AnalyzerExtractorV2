@@ -1,4 +1,5 @@
 from src.testui.helpers import (
+    build_rework_items,
     classify_job_outcome,
     format_assay_data_detail,
     format_assay_overview_rows,
@@ -12,6 +13,8 @@ from src.testui.helpers import (
     format_job_result_summary,
     format_partial_writes_note,
     format_queue_job_row,
+    format_rework_item_detail,
+    format_rework_item_summary,
     format_rules_report,
     format_runtime_options_summary,
     format_submit_row_update,
@@ -482,3 +485,141 @@ def test_merge_file_rows_with_queue_updates_existing_row(tmp_path):
         "action": "PASS",
         "last_error": "Bereits verarbeitet (Job-State DONE). Force rerun moeglich.",
     }
+
+
+def _failed_queue_job(job_id: str, pdf_path: str, last_error: str) -> dict[str, str]:
+    return {
+        "job_id": job_id,
+        "pdf_path": pdf_path,
+        "status": "FAILED",
+        "updated_at": "u",
+        "source": "test-app-manual",
+        "worker_id": "",
+        "attempts": 3,
+        "last_error": last_error,
+    }
+
+
+def _write_job_state(tmp_path, job_id: str, *, error: str = "", steps: list | None = None) -> None:
+    import json
+
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"job_id": job_id, "error": error, "steps": steps or []}
+    (jobs_dir / f"{job_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_build_rework_items_includes_no_assay_with_normalized_dump(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    dump = tmp_path / "jobs" / "job1_normalized.txt"
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text("normalized text", encoding="utf-8")
+    _write_job_state(
+        tmp_path,
+        "job1",
+        error="no_assay_detected",
+        steps=[{"step": "debug", "normalized_dump": str(dump)}],
+    )
+
+    items = build_rework_items(tmp_path, [_failed_queue_job("job1", str(pdf), "no_assay_detected")])
+
+    assert len(items) == 1
+    assert items[0]["error_label"] == "Assay nicht erkannt"
+    assert items[0]["normalized_dump"] == str(dump)
+    assert items[0]["context_label"] == "Normalisierter Text"
+
+
+def test_build_rework_items_recognizes_ruleset_and_split_errors(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    _write_job_state(tmp_path, "job2", error="ruleset missing assay_name for (6bd7)")
+    _write_job_state(tmp_path, "job3", error="content_split_failed: assay block empty")
+
+    items = build_rework_items(
+        tmp_path,
+        [
+            _failed_queue_job("job2", str(pdf), "ruleset missing assay_name for (6bd7)"),
+            _failed_queue_job("job3", str(pdf), "content_split_failed: assay block empty"),
+        ],
+    )
+
+    labels = {item["job_id"]: item["error_label"] for item in items}
+    assert labels == {
+        "job2": "Regelset unvollständig",
+        "job3": "Aufteilung fehlgeschlagen",
+    }
+
+
+def test_build_rework_items_uses_state_error_for_max_attempts(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    _write_job_state(tmp_path, "job4", error="no_assay_detected")
+
+    items = build_rework_items(tmp_path, [_failed_queue_job("job4", str(pdf), "max_attempts_exceeded")])
+
+    assert len(items) == 1
+    assert items[0]["error_label"] == "Assay nicht erkannt"
+    assert items[0]["state_error"] == "no_assay_detected"
+
+
+def test_build_rework_items_ignores_non_rule_relevant_failures(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    ignored = [
+        _failed_queue_job("job5", str(pdf), "pdf_not_found"),
+        _failed_queue_job("job6", str(pdf), "excel_write_failed: locked"),
+        _failed_queue_job("job7", str(pdf), "sqlite_write_failed: busy"),
+        _failed_queue_job("job8", str(pdf), "duplicate_candidate_pending"),
+        _failed_queue_job("job9", str(pdf), "worker_submit_error: timeout"),
+    ]
+
+    items = build_rework_items(tmp_path, ignored)
+
+    assert items == []
+
+
+def test_build_rework_items_without_state_file_uses_queue_error_when_rule_relevant(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+
+    items = build_rework_items(tmp_path, [_failed_queue_job("job10", str(pdf), "no_assay_detected")])
+
+    assert len(items) == 1
+    assert items[0]["state_path"] == ""
+    assert items[0]["normalized_dump"] == ""
+
+
+def test_build_rework_items_marks_missing_dump_files_in_detail(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    missing_dump = tmp_path / "jobs" / "job11_normalized.txt"
+    _write_job_state(
+        tmp_path,
+        "job11",
+        error="no_assay_detected",
+        steps=[{"step": "debug", "normalized_dump": str(missing_dump)}],
+    )
+
+    items = build_rework_items(tmp_path, [_failed_queue_job("job11", str(pdf), "no_assay_detected")])
+    detail = format_rework_item_detail(items[0])
+
+    assert "nicht vorhanden" in detail
+    assert items[0]["context_label"] == "Normalisierter Text (fehlend)"
+
+
+def test_format_rework_item_summary_and_detail_are_readable(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    dump = tmp_path / "jobs" / "job12_normalized.txt"
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text("text", encoding="utf-8")
+    _write_job_state(
+        tmp_path,
+        "job12",
+        error="no_assay_detected",
+        steps=[{"step": "debug", "normalized_dump": str(dump)}],
+    )
+    item = build_rework_items(tmp_path, [_failed_queue_job("job12", str(pdf), "no_assay_detected")])[0]
+
+    summary = format_rework_item_summary(item)
+    detail = format_rework_item_detail(item)
+
+    assert summary["file"] == "sample.pdf"
+    assert summary["error_label"] == "Assay nicht erkannt"
+    assert summary["queue_status"] == "Fehler"
+    assert "Assay nicht erkannt" in detail
+    assert "Normalized dump:" in detail
