@@ -1205,3 +1205,36 @@ def test_adopt_candidate_fields_honors_field_keys_and_missing(tmp_path: Path) ->
 
     assert result["adopted"] == ["S1"]
     assert result["missing"] == ["MISSING"]
+
+
+def test_adopt_candidate_fields_skipped_existing_leaves_field_and_mapping_unchanged(
+    tmp_path: Path,
+) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    _write_source_ruleset_with_extra_fields(root)
+    draft = create_draft_from_template(str(root), "(9997)", "Target Draft")
+    source = {"source_assay_key": "(1111)"}
+
+    data = load_draft(draft)
+    data["extract_rules"]["fields"].append(
+        {
+            "key": "PCQ1",
+            "regex": r"Custom\s+PCQ1\s+(\d+)",
+            "required": False,
+            "search_from": {"line": 9},
+        }
+    )
+    data["excel_rules"]["column_mapping"]["PCQ1"] = "Custom PCQ1 Header"
+    save_draft(draft, data)
+    before = load_draft(draft)
+
+    result = adopt_candidate_fields(str(root), draft, source)
+
+    assert result["adopted"] == ["S1"]
+    assert result["skipped_existing"] == ["PCQ1"]
+    after = load_draft(draft)
+    before_pcq = next(field for field in before["extract_rules"]["fields"] if field["key"] == "PCQ1")
+    after_pcq = next(field for field in after["extract_rules"]["fields"] if field["key"] == "PCQ1")
+    assert after_pcq == before_pcq
+    assert after["excel_rules"]["column_mapping"]["PCQ1"] == "Custom PCQ1 Header"
