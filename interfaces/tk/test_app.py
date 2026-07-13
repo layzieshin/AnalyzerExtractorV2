@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -1133,3 +1134,13 @@ class TestApp(tk.Tk):
 def main(project_root: str | Path | None = None) -> None:
     app = TestApp(project_root=project_root)
     app.mainloop()
+
+
+def run_startup_smoke_check(project_root: str | Path | None = None) -> None:
+    root = Path(project_root) if project_root is not None else resolve_app_root()
+    rules_dir = root / "rules"
+    index_path = rules_dir / "index.json"
+    report = validate_rules_integrity(str(rules_dir), str(index_path))
+    if any(bool(v) for v in report.values()):
+        raise RuntimeError(f"rules_integrity_failed: {json.dumps(report, ensure_ascii=False)}")
+    _ = load_runtime_config(root)

@@ -1,4 +1,6 @@
+import json
 import tkinter as tk
+from pathlib import Path
 
 import pytest
 
@@ -1404,3 +1406,48 @@ def test_test_app_create_draft_from_unchecked_candidate_warns_and_creates(tmp_pa
         assert (tmp_path / "rules" / "drafts" / "ef01.draft.json").exists()
     finally:
         app.destroy()
+
+
+def _write_valid_rules_for_smoke(root: Path) -> None:
+    rules = root / "rules"
+    rules.mkdir(parents=True)
+    (rules / "index.json").write_text(
+        json.dumps({"assays": [{"assay_key": "(1111)", "ruleset_file": "AssayA.json"}]}),
+        encoding="utf-8",
+    )
+    (rules / "AssayA.json").write_text(
+        json.dumps(
+            {
+                "assay_name": "Assay A",
+                "assay_key": "(1111)",
+                "lot_rule": {"regex": r"Lot:\s*(\w+)"},
+                "extract_rules": {
+                    "fields": [{"key": "test", "regex": r"Test:\s*(\w+)", "required": True}],
+                    "dedupe_fields": ["test"],
+                },
+                "excel_rules": {
+                    "excel_filename_template": "{assay_name}.xlsx",
+                    "sheetname_template": "{lot_id}",
+                    "column_mapping": {"test": "TEST"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_test_app_startup_smoke_check_accepts_valid_rules(tmp_path) -> None:
+    _write_valid_rules_for_smoke(tmp_path)
+    test_app.run_startup_smoke_check(tmp_path)
+
+
+def test_test_app_startup_smoke_check_rejects_invalid_rules(tmp_path) -> None:
+    rules = tmp_path / "rules"
+    rules.mkdir(parents=True)
+    (rules / "index.json").write_text(
+        json.dumps({"assays": [{"assay_key": "(1111)", "ruleset_file": "Missing.json"}]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="rules_integrity_failed"):
+        test_app.run_startup_smoke_check(tmp_path)

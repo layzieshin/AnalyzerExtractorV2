@@ -95,3 +95,27 @@ Busy-Loops begrenzt.
 
 Folgepakete koennen Queue-/Worker-Steuerung, vollstaendige Duplicate-Workflows
 und spaetere PyQt/QMTool-Adapter auf denselben Presenter-Funktionen aufbauen.
+
+## Feldversuch-Paket (AP-17A)
+
+Der kanonische portable Build startet die Test-App ueber `test_app_main.py`:
+
+```powershell
+.\.venv\Scripts\python.exe packaging\build_onedir.py
+```
+
+Artefakte:
+
+- Onedir: `packaging/dist_output/AnalyzerResultExtractorV2/`
+- ZIP: `packaging/dist_output/AnalyzerResultExtractorV2.zip`
+
+Smoke ohne GUI-Blockade:
+
+```powershell
+$env:ARE_HOME = "I:\Pfad\zum\entpackten\AnalyzerResultExtractorV2"
+$env:ARE_SMOKE_EXIT = "1"
+.\AnalyzerResultExtractorV2.exe
+```
+
+Das Bundle enthaelt aktive Rules und leere Laufzeitordner (`jobs/`, `output/final/`,
+`input/watch/`). `rules/drafts/` wird bewusst nicht mitgeliefert.
