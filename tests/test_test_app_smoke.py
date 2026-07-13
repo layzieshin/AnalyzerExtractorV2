@@ -1025,3 +1025,143 @@ def test_test_app_rework_rule_editor_uses_existing_start_path(tmp_path, monkeypa
         assert any("Dump=" in line for line in logs)
     finally:
         app.destroy()
+
+
+def test_test_app_assay_candidate_button_exists(tmp_path) -> None:
+    app = _make_test_app(tmp_path)
+    try:
+        assert hasattr(app, "tree_rework_candidates")
+        assert hasattr(app, "preview_assay_candidates")
+        assert app.lbl_rework_candidates.cget("text") == "Noch keine Kandidaten geprüft."
+    finally:
+        app.destroy()
+
+
+def test_test_app_preview_assay_candidates_requires_no_assay_error(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "ruleset missing assay_name for (6bd7)",
+            }
+        ],
+    )
+    shown: list[str] = []
+    monkeypatch.setattr(test_app.messagebox, "showinfo", lambda _title, message: shown.append(message))
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.preview_assay_candidates()
+
+        assert shown
+        assert "Assay nicht erkannt" in shown[0]
+        assert not app.tree_rework_candidates.get_children()
+    finally:
+        app.destroy()
+
+
+def test_test_app_preview_assay_candidates_shows_missing_dump_message(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.preview_assay_candidates()
+
+        assert app.lbl_rework_candidates.cget("text") == "Kein normalisierter Kontext vorhanden."
+        assert not app.tree_rework_candidates.get_children()
+    finally:
+        app.destroy()
+
+
+def test_test_app_preview_assay_candidates_shows_known_and_unknown(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    dump = tmp_path / "jobs" / "job1_normalized.txt"
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text(
+        "\n".join(
+            [
+                "Test: ANA Screen IgG.asy (1c9e)",
+                "Test: New Assay.asy (abcd)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    import json
+
+    (tmp_path / "jobs" / "job1.json").write_text(
+        json.dumps(
+            {
+                "job_id": "job1",
+                "error": "no_assay_detected",
+                "steps": [{"step": "debug", "normalized_dump": str(dump)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "rules").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "rules" / "index.json").write_text(
+        json.dumps({"assays": [{"assay_key": "(1c9e)", "ruleset_file": "ANA Screen IgG.json"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.preview_assay_candidates()
+
+        rows = [app.tree_rework_candidates.item(iid, "values") for iid in app.tree_rework_candidates.get_children()]
+        assert len(rows) == 2
+        statuses = {row[0]: row[4] for row in rows}
+        assert statuses["(1c9e)"] == "bekannt"
+        assert statuses["(abcd)"] == "unbekannt"
+        assert (tmp_path / "rules" / "index.json").read_text(encoding="utf-8") == json.dumps(
+            {"assays": [{"assay_key": "(1c9e)", "ruleset_file": "ANA Screen IgG.json"}]}
+        )
+    finally:
+        app.destroy()

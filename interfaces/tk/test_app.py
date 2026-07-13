@@ -9,6 +9,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from interfaces.common.queue_worker import QueueWorkerConfig, process_next_pending
+from src.assaycandidate.api import (
+    annotate_assay_candidates,
+    find_assay_candidates,
+    load_known_assay_keys,
+)
 from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
 from src.jobqueue.api import enqueue_pdf_job, list_jobs, retry_failed_job
 from src.ruleresolver.api import validate_rules_integrity
@@ -37,6 +42,11 @@ from src.testui.api import (
 from .watch_scan import InAppWatchScanner, list_watch_pdf_paths
 
 SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
+REWORK_CANDIDATE_STATUS_LABELS = {
+    "known": "bekannt",
+    "unknown": "unbekannt",
+    "unchecked": "ungeprüft",
+}
 
 class TestApp(tk.Tk):
     """Production-shaped test shell; long-running process control is out of scope."""
@@ -229,6 +239,9 @@ class TestApp(tk.Tk):
         tk.Button(controls, text="Rule Editor oeffnen", command=self.open_rule_editor_from_rework).pack(side="left", padx=(6, 0))
         tk.Button(controls, text="Erneut starten", command=self.retry_selected_rework_items).pack(side="left", padx=(6, 0))
         tk.Button(controls, text="Rules validieren", command=self.validate_rules).pack(side="left", padx=(6, 0))
+        tk.Button(controls, text="Assay-Kandidaten prüfen", command=self.preview_assay_candidates).pack(
+            side="left", padx=(6, 0)
+        )
         tk.Label(controls, text="Filter").pack(side="left", padx=(12, 4))
         self.cmb_rework_filter = ttk.Combobox(
             controls,
@@ -262,7 +275,34 @@ class TestApp(tk.Tk):
         self.tree_rework.pack(fill="x", padx=8, pady=8)
         self.tree_rework.bind("<<TreeviewSelect>>", self.on_rework_selected)
 
-        self.txt_rework_detail = tk.Text(rework_frame, height=12, wrap="word")
+        candidate_frame = tk.LabelFrame(rework_frame, text="Assay-Kandidaten")
+        candidate_frame.pack(fill="x", padx=8, pady=(0, 8))
+        self.lbl_rework_candidates = tk.Label(
+            candidate_frame,
+            text="Noch keine Kandidaten geprüft.",
+            anchor="w",
+        )
+        self.lbl_rework_candidates.pack(fill="x", padx=8, pady=(8, 4))
+        self.tree_rework_candidates = ttk.Treeview(
+            candidate_frame,
+            columns=("assay_key", "name", "file", "line_no", "status", "confidence", "reason"),
+            show="headings",
+            height=4,
+        )
+        for col, title, width in (
+            ("assay_key", "Assay-Key", 90),
+            ("name", "Name", 150),
+            ("file", "Datei", 170),
+            ("line_no", "Zeile", 55),
+            ("status", "Status", 95),
+            ("confidence", "Confidence", 85),
+            ("reason", "Grund", 120),
+        ):
+            self.tree_rework_candidates.heading(col, text=title)
+            self.tree_rework_candidates.column(col, width=width, anchor="w")
+        self.tree_rework_candidates.pack(fill="x", padx=8, pady=(0, 8))
+
+        self.txt_rework_detail = tk.Text(rework_frame, height=10, wrap="word")
         self.txt_rework_detail.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.txt_rework_detail.configure(state="disabled")
 
@@ -768,6 +808,7 @@ class TestApp(tk.Tk):
 
     def refresh_rework_items(self) -> None:
         self._set_text(self.txt_rework_detail, "")
+        self._clear_rework_candidates("Noch keine Kandidaten geprüft.")
         jobs = list_jobs(str(self.project_root))
         self._rework_items_all = build_rework_items(str(self.project_root), jobs)
         filtered = filter_rework_items(self._rework_items_all, self.var_rework_filter.get())
@@ -780,6 +821,7 @@ class TestApp(tk.Tk):
     def _on_rework_filter_changed(self, _event: object = None) -> None:
         filtered = filter_rework_items(self._rework_items_all, self.var_rework_filter.get())
         self._set_text(self.txt_rework_detail, "")
+        self._clear_rework_candidates("Noch keine Kandidaten geprüft.")
         self._render_rework_table(filtered)
 
     def _render_rework_table(self, items: list[dict[str, object]]) -> None:
@@ -806,9 +848,81 @@ class TestApp(tk.Tk):
         selection = self.tree_rework.selection()
         if not selection:
             return
+        self._clear_rework_candidates("Noch keine Kandidaten geprüft.")
         item = self._rework_items.get(str(selection[0]))
         if item:
             self._set_text(self.txt_rework_detail, format_rework_item_detail(item))
+
+    def _clear_rework_candidates(self, message: str) -> None:
+        for row_id in self.tree_rework_candidates.get_children():
+            self.tree_rework_candidates.delete(row_id)
+        self.lbl_rework_candidates.configure(text=message)
+
+    def _render_rework_candidates(self, candidates: list[dict[str, str]], message: str) -> None:
+        self._clear_rework_candidates(message)
+        for index, candidate in enumerate(candidates):
+            status = REWORK_CANDIDATE_STATUS_LABELS.get(
+                str(candidate.get("known_status", "")),
+                str(candidate.get("known_status", "")),
+            )
+            self.tree_rework_candidates.insert(
+                "",
+                tk.END,
+                iid=f"candidate-{index}",
+                values=(
+                    candidate.get("assay_key") or "-",
+                    candidate.get("assay_name_hint") or "-",
+                    candidate.get("test_file") or "-",
+                    candidate.get("line_no") or "-",
+                    status,
+                    candidate.get("confidence") or "-",
+                    candidate.get("reason") or "-",
+                ),
+            )
+
+    def preview_assay_candidates(self) -> None:
+        selection = self.tree_rework.selection()
+        if not selection:
+            messagebox.showinfo("Nacharbeit", "Bitte zuerst einen Eintrag auswaehlen.")
+            return
+        item = self._rework_items.get(str(selection[0]))
+        if not item:
+            return
+        if str(item.get("error_label", "")) != "Assay nicht erkannt":
+            messagebox.showinfo(
+                "Nacharbeit",
+                "Assay-Kandidatenpruefung ist nur fuer 'Assay nicht erkannt' verfuegbar.",
+            )
+            return
+
+        normalized_dump = str(item.get("normalized_dump", "") or "").strip()
+        if not normalized_dump or not Path(normalized_dump).exists():
+            self._clear_rework_candidates("Kein normalisierter Kontext vorhanden.")
+            return
+
+        try:
+            text = Path(normalized_dump).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            self._clear_rework_candidates(f"Normalisierter Kontext konnte nicht gelesen werden: {exc}")
+            return
+
+        candidates = find_assay_candidates(text)
+        index_path = self.project_root / "rules" / "index.json"
+        known_keys = load_known_assay_keys(str(index_path))
+        if known_keys is None:
+            self._log(
+                "Assay-Kandidaten: rules/index.json konnte nicht gelesen werden; Status ungeprueft."
+            )
+        annotated = annotate_assay_candidates(candidates, known_keys)
+        if not annotated:
+            self._clear_rework_candidates("Keine Kandidaten erkannt.")
+            return
+
+        self._render_rework_candidates(
+            annotated,
+            f"{len(annotated)} Kandidat(en) aus normalisiertem Kontext.",
+        )
+        self._log(f"Assay-Kandidaten geprueft: {len(annotated)} Kandidat(en).")
 
     def show_rework_context(self) -> None:
         selection = self.tree_rework.selection()
