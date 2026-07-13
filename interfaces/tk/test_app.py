@@ -42,7 +42,7 @@ class TestApp(tk.Tk):
 
     def __init__(self, project_root: str | Path | None = None) -> None:
         super().__init__()
-        root = Path(project_root) if project_root is not None else resolve_app_root(__file__)
+        root = Path(project_root) if project_root is not None else resolve_app_root()
         self.project_root = root.resolve()
         self.title("AREV2 Test-App")
         self.geometry("1240x820")
@@ -711,6 +711,6 @@ class TestApp(tk.Tk):
         super().destroy()
 
 
-def main() -> None:
-    app = TestApp()
+def main(project_root: str | Path | None = None) -> None:
+    app = TestApp(project_root=project_root)
     app.mainloop()

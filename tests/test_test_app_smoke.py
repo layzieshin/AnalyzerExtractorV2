@@ -16,7 +16,39 @@ def test_test_app_class_constructable_when_tk_available(tmp_path) -> None:
         pytest.skip(f"Tk not available: {e}")
     try:
         assert app.project_root == tmp_path.resolve()
+        assert app.project_root / "rules" / "index.json" == tmp_path.resolve() / "rules" / "index.json"
         assert set(app._tabs) == set(test_app.SECTION_KEYS)
+    finally:
+        app.destroy()
+
+
+def test_main_passes_project_root_to_test_app(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeApp:
+        def __init__(self, project_root=None) -> None:
+            captured["project_root"] = project_root
+
+        def mainloop(self) -> None:
+            captured["mainloop"] = True
+
+    monkeypatch.setattr(test_app, "TestApp", FakeApp)
+
+    test_app.main(project_root=tmp_path)
+
+    assert captured["project_root"] == tmp_path
+    assert captured["mainloop"] is True
+
+
+def test_test_app_default_root_uses_are_home(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARE_HOME", str(tmp_path))
+    try:
+        app = test_app.TestApp(project_root=None)
+    except tk.TclError as e:
+        pytest.skip(f"Tk not available: {e}")
+    try:
+        assert app.project_root == tmp_path.resolve()
+        assert app.project_root / "rules" / "index.json" == tmp_path.resolve() / "rules" / "index.json"
     finally:
         app.destroy()
 
