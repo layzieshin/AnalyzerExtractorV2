@@ -32,8 +32,10 @@ __all__ = [
     "create_draft_from_ruleset",
     "create_draft_from_template",
     "create_draft_from_template_if_missing",
+    "delete_inventory_item",
     "delete_ruleset",
     "derive_draft",
+    "deactivate_ruleset",
     "diff_draft_vs_active",
     "draft_path_for_assay",
     "get_assay_text",
@@ -42,6 +44,7 @@ __all__ = [
     "list_rulesuite_inventory",
     "load_draft",
     "locate_fields",
+    "open_inactive_as_draft",
     "read_candidate_fields",
     "move_field",
     "preview_extract",
@@ -377,9 +380,27 @@ def list_rulesets(project_root: str) -> List[Dict[str, Any]]:
 
 
 def delete_ruleset(project_root: str, assay_key: str) -> Dict[str, Any]:
-    from .manage import delete_ruleset as _impl
+    from .lifecycle import delete_ruleset as _impl
 
     return _impl(project_root, assay_key)
+
+
+def deactivate_ruleset(project_root: str, assay_key: str) -> Dict[str, Any]:
+    from .lifecycle import deactivate_ruleset as _impl
+
+    return _impl(project_root, assay_key)
+
+
+def delete_inventory_item(project_root: str, kind: str, path_or_key: str) -> Dict[str, Any]:
+    from .lifecycle import delete_inventory_item as _impl
+
+    return _impl(project_root, kind, path_or_key)
+
+
+def open_inactive_as_draft(project_root: str, inactive_path: str) -> Dict[str, Any]:
+    from .lifecycle import open_inactive_as_draft as _impl
+
+    return _impl(project_root, inactive_path)
 
 
 def list_rulesuite_inventory(project_root: str, kind: str = "all") -> List[Dict[str, Any]]:

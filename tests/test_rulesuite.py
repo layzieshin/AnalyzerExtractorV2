@@ -19,6 +19,8 @@ from src.rulesuite.api import (
     create_draft_from_ruleset,
     create_draft_from_template,
     create_draft_from_template_if_missing,
+    deactivate_ruleset,
+    delete_inventory_item,
     delete_ruleset,
     diff_draft_vs_active,
     draft_path_for_assay,
@@ -29,6 +31,7 @@ from src.rulesuite.api import (
     list_rulesuite_inventory,
     load_draft,
     locate_fields,
+    open_inactive_as_draft,
     move_field,
     preview_extract,
     read_candidate_fields,
@@ -787,36 +790,36 @@ def test_list_rulesets_inventory(tmp_path: Path) -> None:
     assert row_b["error"] == "file_missing"
 
 
-def test_delete_ruleset_moves_to_trash(tmp_path: Path) -> None:
+def test_delete_ruleset_deactivates_to_inactive(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
 
     result = delete_ruleset(str(root), "(1111)")
     assert result["ruleset_file"] == "AssayA.json"
-    assert result["trash_path"] is not None
+    assert result["inactive_path"] is not None
 
-    trash_file = Path(result["trash_path"])
-    assert trash_file.exists()
-    assert trash_file.parent == root / "rules" / "trash"
+    inactive_file = Path(result["inactive_path"])
+    assert inactive_file.exists()
+    assert inactive_file.parent == root / "rules" / "inactive"
     assert not (root / "rules" / "AssayA.json").exists()
 
     index = json.loads((root / "rules" / "index.json").read_text(encoding="utf-8"))
     assert all(row["assay_key"] != "(1111)" for row in index["assays"])
     assert any(row["assay_key"] == "(2222)" for row in index["assays"])
 
-    moved = json.loads(trash_file.read_text(encoding="utf-8"))
+    moved = json.loads(inactive_file.read_text(encoding="utf-8"))
     assert moved["assay_key"] == "(1111)"
 
 
-def test_delete_ruleset_rejects_unknown_and_protected(tmp_path: Path) -> None:
+def test_deactivate_ruleset_rejects_unknown_and_protected(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
 
     with pytest.raises(RuleSuiteError, match="assay_not_found"):
-        delete_ruleset(str(root), "(9999)")
+        deactivate_ruleset(str(root), "(9999)")
 
     index = {"assays": [{"assay_key": "(7777)", "ruleset_file": "template.json"}]}
     (root / "rules" / "index.json").write_text(json.dumps(index), encoding="utf-8")
     with pytest.raises(RuleSuiteError, match="protected_or_invalid_ruleset_file"):
-        delete_ruleset(str(root), "(7777)")
+        deactivate_ruleset(str(root), "(7777)")
 
 
 def test_resolve_ruleset_rejects_invalid_search_from_marker_regex(tmp_path: Path) -> None:
@@ -1396,3 +1399,65 @@ def test_clone_ruleset_to_draft_overwrite_keeps_target_key_and_name(tmp_path: Pa
     assert data["assay_name"] == "Distinct Target Name"
     assert data["assay_key"] != "(1111)"
     assert data["assay_name"] != "Source Assay"
+
+
+def test_list_rulesuite_inventory_includes_inactive_and_filter(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    inactive_dir = root / "rules" / "inactive"
+    inactive_dir.mkdir(parents=True, exist_ok=True)
+    inactive_path = inactive_dir / "AssayA.20260101.json"
+    inactive_path.write_text((root / "rules" / "AssayA.json").read_text(encoding="utf-8"), encoding="utf-8")
+    (inactive_dir / "broken.json").write_text("{bad", encoding="utf-8")
+
+    rows = list_rulesuite_inventory(str(root), kind="inactive")
+    assert len(rows) == 2
+    assert all(row["kind"] == "inactive" for row in rows)
+    assert all(row["display_type"] == "Inaktiv" for row in rows)
+    broken = next(row for row in rows if row["path"].endswith("broken.json"))
+    assert broken["valid"] is False
+    assert broken["error"]
+
+
+def test_delete_inventory_item_moves_draft_and_inactive_without_index_change(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft_dir = root / "rules" / "drafts"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    draft_path = draft_dir / "test.draft.json"
+    draft_path.write_text('{"assay_key":"(d1)","assay_name":"D1"}', encoding="utf-8")
+    inactive_dir = root / "rules" / "inactive"
+    inactive_dir.mkdir(parents=True, exist_ok=True)
+    inactive_path = inactive_dir / "old.json"
+    inactive_path.write_text('{"assay_key":"(i1)","assay_name":"I1"}', encoding="utf-8")
+    index_before = (root / "rules" / "index.json").read_text(encoding="utf-8")
+
+    draft_result = delete_inventory_item(str(root), "draft", str(draft_path))
+    inactive_result = delete_inventory_item(str(root), "inactive", str(inactive_path))
+
+    assert Path(draft_result["trash_path"]).exists()
+    assert Path(inactive_result["trash_path"]).exists()
+    assert not draft_path.exists()
+    assert not inactive_path.exists()
+    assert (root / "rules" / "index.json").read_text(encoding="utf-8") == index_before
+
+    with pytest.raises(RuleSuiteError, match="active_must_be_deactivated_first"):
+        delete_inventory_item(str(root), "active", str(root / "rules" / "AssayA.json"))
+
+
+def test_open_inactive_as_draft_copies_to_drafts_without_overwrite(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    inactive_dir = root / "rules" / "inactive"
+    inactive_dir.mkdir(parents=True, exist_ok=True)
+    inactive_path = inactive_dir / "AssayA.20260101.json"
+    payload = json.loads((root / "rules" / "AssayA.json").read_text(encoding="utf-8"))
+    inactive_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    created = open_inactive_as_draft(str(root), str(inactive_path))
+    assert created["status"] == "created"
+    draft_path = Path(created["draft_path"])
+    assert draft_path.exists()
+    assert json.loads(draft_path.read_text(encoding="utf-8"))["assay_key"] == "(1111)"
+
+    draft_path.write_text('{"marker": true}', encoding="utf-8")
+    exists = open_inactive_as_draft(str(root), str(inactive_path))
+    assert exists["status"] == "exists"
+    assert json.loads(draft_path.read_text(encoding="utf-8")) == {"marker": True}

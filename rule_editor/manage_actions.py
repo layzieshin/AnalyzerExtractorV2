@@ -1,4 +1,4 @@
-"""ManageMixin: Inventar, Clone-Dialog und Regelset-Verwaltung (AP-16C)."""
+"""ManageMixin: Inventar, Lifecycle und Regelset-Verwaltung (AP-16C/16D)."""
 from __future__ import annotations
 
 import tkinter as tk
@@ -8,9 +8,11 @@ from tkinter import messagebox, simpledialog
 from src.rulesuite.api import (
     adopt_candidate_fields,
     clone_ruleset_to_draft,
-    delete_ruleset,
+    deactivate_ruleset,
+    delete_inventory_item,
     draft_path_for_assay,
     list_rulesuite_inventory,
+    open_inactive_as_draft,
 )
 
 from .clone_dialog import CloneRulesetDialog
@@ -20,6 +22,7 @@ _INVENTORY_FILTER_TO_KIND = {
     "Alle": "all",
     "Aktiv": "active",
     "Drafts": "draft",
+    "Inaktiv": "inactive",
 }
 
 
@@ -100,16 +103,16 @@ class ManageMixin:
         if row is None:
             return
         menu = tk.Menu(self, tearoff=0)
-        if row.get("kind") == "active":
+        kind = row.get("kind")
+        if kind == "active":
+            menu.add_command(label="Inaktivieren...", command=self.on_manage_deactivate_selected)
             menu.add_command(label="Als Basis fuer Draft verwenden...", command=self.on_open_clone_ruleset_dialog)
-        else:
+        elif kind == "draft":
             menu.add_command(label="Draft oeffnen", command=self.on_manage_edit_selected)
-            menu.add_command(
-                label="Als Ziel fuer Uebernahme verwenden...",
-                command=lambda: self.on_open_clone_ruleset_dialog(
-                    initial_target_draft_path=str(row.get("path", "")),
-                ),
-            )
+            menu.add_command(label="Loeschen...", command=self.on_manage_delete_selected)
+        elif kind == "inactive":
+            menu.add_command(label="Als Draft oeffnen", command=self.on_manage_edit_selected)
+            menu.add_command(label="Loeschen...", command=self.on_manage_delete_selected)
         try:
             menu.tk_popup(event.x_root, event.y_root)  # type: ignore[attr-defined]
         finally:
@@ -160,6 +163,7 @@ class ManageMixin:
         status = str(result.get("status", ""))
         self.var_draft_path.set(draft_path)
         self.on_load_draft_into_editor()
+        self._reload_assays()
         self._refresh_ruleset_overview()
         self._log(f"Draft geklont ({status}): {draft_path}")
         self._set_hint(f"Draft geklont ({status}).")
@@ -214,6 +218,7 @@ class ManageMixin:
     def _wizard_open_draft(self, draft_path: str) -> None:
         self.var_draft_path.set(draft_path)
         self.on_load_draft_into_editor()
+        self._reload_assays()
         self._refresh_ruleset_overview()
         self._set_hint("Wizard abgeschlossen - Draft im Editor geladen.")
 
@@ -221,6 +226,7 @@ class ManageMixin:
         self.var_draft_path.set(draft_path)
         self.on_load_draft_into_editor()
         self.on_activate()
+        self._reload_assays()
         self._refresh_ruleset_overview()
 
     def on_manage_edit_selected(self) -> None:
@@ -229,10 +235,41 @@ class ManageMixin:
             self._set_hint("Bitte zuerst einen Inventar-Eintrag auswaehlen.")
             return
 
-        if row.get("kind") == "draft":
+        kind = row.get("kind")
+        if kind == "draft":
             self.var_draft_path.set(str(row.get("path", "")))
             self.on_load_draft_into_editor()
             self._set_hint("Draft geladen.")
+            return
+
+        if kind == "inactive":
+            inactive_path = str(row.get("path", ""))
+            try:
+                result = open_inactive_as_draft(self.var_root.get().strip(), inactive_path)
+            except Exception as exc:
+                messagebox.showerror("Inaktiv oeffnen", str(exc))
+                return
+            draft_path = str(result.get("draft_path", ""))
+            if result.get("status") == "exists":
+                open_existing = messagebox.askyesno(
+                    "Draft vorhanden",
+                    (
+                        f"Fuer dieses inaktive Regelwerk existiert bereits ein Draft:\n{draft_path}\n\n"
+                        "Vorhandenen Draft oeffnen?\n"
+                        "(Nein = Abbruch ohne Ueberschreiben)"
+                    ),
+                )
+                if not open_existing:
+                    self._set_hint("Abgebrochen: vorhandener Draft wurde nicht ueberschrieben.")
+                    return
+            self.var_draft_path.set(draft_path)
+            self.on_load_draft_into_editor()
+            self._log(
+                f"Inaktiv als Draft geoeffnet ({result.get('status')}): {draft_path} "
+                f"(Quelle: {inactive_path})"
+            )
+            self._set_hint("Inaktives Regelwerk als Draft geladen.")
+            self._refresh_ruleset_overview()
             return
 
         project_root = self.var_root.get().strip()
@@ -269,46 +306,84 @@ class ManageMixin:
             return
         self.var_draft_path.set(str(result["draft_path"]))
         self.on_load_draft_into_editor()
+        self._reload_assays()
         self._refresh_ruleset_overview()
         self._set_hint(f"Regelset {assay_key} als neuer Draft geladen.")
 
-    def on_manage_delete_selected(self) -> None:
+    def on_manage_deactivate_selected(self) -> None:
         row = self._selected_inventory_row()
         if row is None:
             self._set_hint("Bitte zuerst einen Inventar-Eintrag auswaehlen.")
             return
         if row.get("kind") != "active":
-            self._set_hint("Loeschen ist nur fuer aktive Regelwerke verfuegbar.")
+            self._set_hint("Inaktivieren ist nur fuer aktive Regelwerke verfuegbar.")
             return
 
         key = str(row.get("assay_key", "")).strip()
         if not messagebox.askyesno(
-            "Regelset loeschen",
+            "Regelwerk inaktivieren",
             (
-                f"Regelset {key} wirklich loeschen?\n\n"
-                "Der Eintrag wird aus index.json entfernt und die Datei in den "
-                "Papierkorb (rules/trash/) verschoben."
+                f"Regelwerk {key} wirklich inaktivieren?\n\n"
+                "Der Eintrag wird aus der produktiven Erkennung entfernt (index.json). "
+                "Die Datei bleibt unter rules/inactive/ erhalten."
             ),
         ):
             return
         typed = simpledialog.askstring(
-            "Loeschen bestaetigen",
+            "Inaktivieren bestaetigen",
             f"Zur Bestaetigung den Assay-Key exakt eintippen:\n{key}",
             parent=self,
         )
         if typed is None:
             return
         if typed.strip() != key:
-            self._set_hint("Loeschen abgebrochen: Eingabe stimmt nicht mit dem Assay-Key ueberein.")
+            self._set_hint("Inaktivieren abgebrochen: Eingabe stimmt nicht mit dem Assay-Key ueberein.")
             return
 
         try:
-            result = delete_ruleset(self.var_root.get().strip(), key)
+            result = deactivate_ruleset(self.var_root.get().strip(), key)
         except Exception as exc:
-            messagebox.showerror("Fehler", str(exc))
+            messagebox.showerror("Inaktivieren", str(exc))
             return
-        trash = result.get("trash_path") or "(Datei war nicht vorhanden)"
-        self._log(f"Regelset geloescht: {key} -> {trash}")
-        self._set_hint(f"Regelset {key} geloescht (wiederherstellbar unter rules/trash/).")
+        inactive = result.get("inactive_path") or "(Datei war nicht vorhanden)"
+        self._log(f"Regelwerk inaktiviert: {key} -> {inactive}")
+        self._set_hint(f"Regelwerk {key} inaktiviert (unter rules/inactive/).")
         self._reload_assays()
+        self._refresh_ruleset_overview()
+
+    def on_manage_delete_selected(self) -> None:
+        row = self._selected_inventory_row()
+        if row is None:
+            self._set_hint("Bitte zuerst einen Inventar-Eintrag auswaehlen.")
+            return
+
+        kind = str(row.get("kind", ""))
+        if kind == "active":
+            self._set_hint("Aktive Regelwerke bitte zuerst inaktivieren.")
+            messagebox.showinfo("Loeschen", "Aktive Regelwerke bitte zuerst inaktivieren.")
+            return
+        if kind not in ("draft", "inactive"):
+            self._set_hint("Loeschen ist nur fuer Drafts und inaktive Regelwerke verfuegbar.")
+            return
+
+        path = str(row.get("path", ""))
+        if kind == "draft":
+            if not messagebox.askyesno("Draft loeschen", f"Draft wirklich nach rules/trash/ verschieben?\n\n{path}"):
+                return
+        else:
+            label = str(row.get("assay_key", "")).strip() or Path(path).name
+            if not messagebox.askyesno(
+                "Inaktives Regelwerk loeschen",
+                f"Inaktives Regelwerk wirklich nach rules/trash/ verschieben?\n\n{label}\n{path}",
+            ):
+                return
+
+        try:
+            result = delete_inventory_item(self.var_root.get().strip(), kind, path)
+        except Exception as exc:
+            messagebox.showerror("Loeschen", str(exc))
+            return
+        trash = result.get("trash_path") or "(unbekannt)"
+        self._log(f"Inventar geloescht ({kind}): {path} -> {trash}")
+        self._set_hint(f"Eintrag nach rules/trash/ verschoben: {trash}")
         self._refresh_ruleset_overview()

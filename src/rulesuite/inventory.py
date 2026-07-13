@@ -8,7 +8,7 @@ from .json_io import _read_json_object
 from .manage import list_rulesets
 from .validation import _validate_draft_data
 
-_INVENTORY_KINDS = frozenset({"all", "active", "draft"})
+_INVENTORY_KINDS = frozenset({"all", "active", "draft", "inactive"})
 
 
 def list_rulesuite_inventory(project_root: str, kind: str = "all") -> List[Dict[str, Any]]:
@@ -53,6 +53,33 @@ def list_rulesuite_inventory(project_root: str, kind: str = "all") -> List[Dict[
                 }
                 try:
                     data = _read_json_object(draft_path)
+                    entry["assay_key"] = str(data.get("assay_key", "")).strip()
+                    entry["assay_name"] = str(data.get("assay_name", "")).strip()
+                    extract_rules = data.get("extract_rules")
+                    fields = extract_rules.get("fields", []) if isinstance(extract_rules, dict) else []
+                    entry["field_count"] = len(fields) if isinstance(fields, list) else 0
+                    entry["valid"] = bool(_validate_draft_data(data).get("ok"))
+                except Exception as exc:
+                    entry["error"] = str(exc)
+                rows.append(entry)
+
+    if normalized_kind in ("all", "inactive"):
+        inactive_dir = root / "rules" / "inactive"
+        if inactive_dir.is_dir():
+            for inactive_path in sorted(inactive_dir.glob("*.json")):
+                entry: Dict[str, Any] = {
+                    "kind": "inactive",
+                    "display_type": "Inaktiv",
+                    "assay_key": "",
+                    "assay_name": "",
+                    "path": str(inactive_path),
+                    "ruleset_file": "",
+                    "field_count": 0,
+                    "valid": False,
+                    "error": None,
+                }
+                try:
+                    data = _read_json_object(inactive_path)
                     entry["assay_key"] = str(data.get("assay_key", "")).strip()
                     entry["assay_name"] = str(data.get("assay_name", "")).strip()
                     extract_rules = data.get("extract_rules")

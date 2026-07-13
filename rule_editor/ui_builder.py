@@ -126,6 +126,7 @@ class UiBuilderMixin:
         manage_btns.pack(fill="x", padx=6, pady=(6, 4))
         tk.Button(manage_btns, text="Neues Regelset (gefuehrt)...", command=self.on_open_wizard).pack(side="left")
         tk.Button(manage_btns, text="Ansehen/Bearbeiten", command=self.on_manage_edit_selected).pack(side="left", padx=(6, 0))
+        tk.Button(manage_btns, text="Inaktivieren...", command=self.on_manage_deactivate_selected).pack(side="left", padx=(6, 0))
         tk.Button(manage_btns, text="Loeschen...", command=self.on_manage_delete_selected).pack(side="left", padx=(6, 0))
         tk.Button(manage_btns, text="Aktualisieren", command=self._refresh_ruleset_overview).pack(side="left", padx=(6, 0))
         tk.Button(
@@ -142,7 +143,7 @@ class UiBuilderMixin:
         self.cmb_inventory_filter = ttk.Combobox(
             manage_btns,
             textvariable=self.var_inventory_filter,
-            values=["Alle", "Aktiv", "Drafts"],
+            values=["Alle", "Aktiv", "Drafts", "Inaktiv"],
             state="readonly",
             width=10,
         )
