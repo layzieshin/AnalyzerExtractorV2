@@ -343,3 +343,90 @@ def create_draft_from_ruleset(
     }
     _write_json_atomic(draft_path, data)
     return draft_path
+
+
+def adopt_candidate_fields(
+    project_root: str,
+    draft_path: str,
+    candidate_source: Dict[str, Any],
+    field_keys: List[str] | None = None,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    path = Path(draft_path)
+    data = _read_json_object(path)
+    extract_rules = data.setdefault("extract_rules", {})
+    fields = extract_rules.get("fields")
+    if not isinstance(fields, list):
+        fields = []
+        extract_rules["fields"] = fields
+
+    existing_keys = {
+        str(field.get("key", "")).strip()
+        for field in fields
+        if isinstance(field, dict) and str(field.get("key", "")).strip()
+    }
+
+    bundle = read_candidate_fields(project_root, **bundle_kwargs_from_source(candidate_source))
+    full_bundle = _load_source_bundle(project_root, candidate_source)
+    source_fields = bundle["fields"]
+
+    wanted_keys: set[str] | None = None
+    if field_keys is not None:
+        wanted_keys = {str(key).strip() for key in field_keys if str(key).strip()}
+        source_fields = [
+            field
+            for field in source_fields
+            if str(field.get("key", "")).strip() in wanted_keys
+        ]
+
+    adopted: List[str] = []
+    skipped_existing: List[str] = []
+    missing: List[str] = []
+    if wanted_keys is not None:
+        found_keys = {str(field.get("key", "")).strip() for field in source_fields}
+        missing = sorted(key for key in wanted_keys if key not in found_keys)
+
+    col_map = data.setdefault("excel_rules", {}).setdefault("column_mapping", {})
+    if not isinstance(col_map, dict):
+        col_map = {}
+        data["excel_rules"]["column_mapping"] = col_map
+
+    for source_field in source_fields:
+        key = str(source_field.get("key", "")).strip()
+        if not key:
+            continue
+        if key in existing_keys:
+            if overwrite:
+                fields[:] = [
+                    field
+                    for field in fields
+                    if not (isinstance(field, dict) and str(field.get("key", "")).strip() == key)
+                ]
+            else:
+                skipped_existing.append(key)
+                continue
+
+        row = deepcopy(source_field)
+        row["key"] = key
+        row["required"] = bool(source_field.get("required", False))
+        if isinstance(source_field.get("search_from"), dict):
+            row["search_from"] = deepcopy(source_field["search_from"])
+        else:
+            row.pop("search_from", None)
+        fields.append(row)
+        existing_keys.add(key)
+
+        if key in full_bundle["column_mapping"]:
+            col_map[key] = full_bundle["column_mapping"][key]
+        elif key not in col_map:
+            col_map[key] = key
+        adopted.append(key)
+
+    _write_json_atomic(path, data)
+    return {
+        "adopted": adopted,
+        "skipped_existing": skipped_existing,
+        "missing": missing,
+        "draft_path": str(path),
+        "source": bundle["source"],
+    }

@@ -20,6 +20,7 @@ __all__ = [
     "activate_new_draft",
     "add_field",
     "adopt_candidate_field",
+    "adopt_candidate_fields",
     "batch_check_fields",
     "build_regex_from_builder_spec",
     "check_authoring_readiness",
@@ -29,9 +30,11 @@ __all__ = [
     "create_draft",
     "create_draft_from_ruleset",
     "create_draft_from_template",
+    "create_draft_from_template_if_missing",
     "delete_ruleset",
     "derive_draft",
     "diff_draft_vs_active",
+    "draft_path_for_assay",
     "get_assay_text",
     "list_fields",
     "list_rulesets",
@@ -260,6 +263,22 @@ def create_draft_from_template(project_root: str, assay_key: str, assay_name: st
     return str(_impl(project_root, assay_key, assay_name))
 
 
+def draft_path_for_assay(project_root: str, assay_key: str) -> str:
+    from .templates import draft_path_for_assay as _impl
+
+    return _impl(project_root, assay_key)
+
+
+def create_draft_from_template_if_missing(
+    project_root: str,
+    assay_key: str,
+    assay_name: str,
+) -> Dict[str, Any]:
+    from .templates import create_draft_from_template_if_missing as _impl
+
+    return _impl(project_root, assay_key, assay_name)
+
+
 def create_draft_from_ruleset(
     project_root: str,
     source_assay_key: str,
@@ -328,6 +347,24 @@ def adopt_candidate_field(
             required=required,
             search_from=sf,  # type: ignore[arg-type]
         )
+    )
+
+
+def adopt_candidate_fields(
+    project_root: str,
+    draft_path: str,
+    candidate_source: Dict[str, Any],
+    field_keys: List[str] | None = None,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    from .candidates import adopt_candidate_fields as _impl
+
+    return _impl(
+        project_root,
+        draft_path,
+        candidate_source,
+        field_keys=field_keys,
+        overwrite=overwrite,
     )
 
 

@@ -1165,3 +1165,242 @@ def test_test_app_preview_assay_candidates_shows_known_and_unknown(tmp_path, mon
         )
     finally:
         app.destroy()
+
+
+def test_test_app_create_draft_from_known_candidate_is_blocked(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    dump = tmp_path / "jobs" / "job1_normalized.txt"
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text("Test: ANA Screen IgG.asy (1c9e)", encoding="utf-8")
+    import json
+
+    (tmp_path / "jobs" / "job1.json").write_text(
+        json.dumps(
+            {
+                "job_id": "job1",
+                "error": "no_assay_detected",
+                "steps": [{"step": "debug", "normalized_dump": str(dump)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "rules").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "rules" / "index.json").write_text(
+        json.dumps({"assays": [{"assay_key": "(1c9e)", "ruleset_file": "ANA Screen IgG.json"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "rules" / "template.json").write_text(
+        json.dumps(
+            {
+                "assay_name": "Template",
+                "assay_key": "(0000)",
+                "lot_rule": {"regex": ""},
+                "extract_rules": {"fields": []},
+                "excel_rules": {
+                    "excel_filename_template": "{assay_name}.xlsx",
+                    "sheetname_template": "{lot_id}",
+                    "column_mapping": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+    shown: list[str] = []
+    monkeypatch.setattr(test_app.messagebox, "showinfo", lambda _title, message: shown.append(message))
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.preview_assay_candidates()
+        app.tree_rework_candidates.selection_set("(1c9e)")
+        app.create_draft_from_rework_candidate()
+
+        assert shown
+        assert "existiert bereits" in shown[-1]
+        assert not list((tmp_path / "rules" / "drafts").glob("*.draft.json")) if (tmp_path / "rules" / "drafts").exists() else True
+    finally:
+        app.destroy()
+
+
+def test_test_app_create_draft_from_unknown_candidate_creates_header_draft(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    dump = tmp_path / "jobs" / "job1_normalized.txt"
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text("Test: New Assay.asy (abcd)", encoding="utf-8")
+    import json
+
+    (tmp_path / "jobs" / "job1.json").write_text(
+        json.dumps(
+            {
+                "job_id": "job1",
+                "error": "no_assay_detected",
+                "steps": [{"step": "debug", "normalized_dump": str(dump)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "rules").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "rules" / "index.json").write_text(json.dumps({"assays": []}), encoding="utf-8")
+    (tmp_path / "rules" / "template.json").write_text(
+        json.dumps(
+            {
+                "assay_name": "Template",
+                "assay_key": "(0000)",
+                "lot_rule": {"regex": ""},
+                "extract_rules": {
+                    "fields": [
+                        {"key": "DATUM", "regex": "", "required": False},
+                        {"key": "ZEIT", "regex": "", "required": False},
+                        {"key": "ANWENDER", "regex": "", "required": False},
+                        {"key": "PLATTE", "regex": "", "required": False},
+                        {"key": "CHARGE", "regex": "", "required": False},
+                        {"key": "TEST", "regex": "", "required": False},
+                        {"key": "VALIDATION", "regex": "", "required": False},
+                        {"key": "HALTBARKEIT", "regex": "", "required": False},
+                    ]
+                },
+                "excel_rules": {
+                    "excel_filename_template": "{assay_name}.xlsx",
+                    "sheetname_template": "{lot_id}",
+                    "column_mapping": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+    monkeypatch.setattr(test_app.messagebox, "askyesno", lambda *_args, **_kwargs: False)
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.preview_assay_candidates()
+        assert "(abcd)" in app._rework_candidates_by_id
+        app.tree_rework_candidates.selection_set("(abcd)")
+        app.create_draft_from_rework_candidate()
+
+        draft_path = tmp_path / "rules" / "drafts" / "abcd.draft.json"
+        assert draft_path.exists()
+        detail = app.txt_rework_detail.get("1.0", tk.END)
+        assert str(draft_path) in detail
+        assert (tmp_path / "rules" / "index.json").read_text(encoding="utf-8") == json.dumps({"assays": []})
+    finally:
+        app.destroy()
+
+
+def test_test_app_create_draft_from_unchecked_candidate_warns_and_creates(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    dump = tmp_path / "jobs" / "job1_normalized.txt"
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text("Test: Unchecked Assay.asy (ef01)", encoding="utf-8")
+    import json
+
+    (tmp_path / "jobs" / "job1.json").write_text(
+        json.dumps(
+            {
+                "job_id": "job1",
+                "error": "no_assay_detected",
+                "steps": [{"step": "debug", "normalized_dump": str(dump)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "rules").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "rules" / "template.json").write_text(
+        json.dumps(
+            {
+                "assay_name": "Template",
+                "assay_key": "(0000)",
+                "lot_rule": {"regex": ""},
+                "extract_rules": {
+                    "fields": [
+                        {"key": "DATUM", "regex": "", "required": False},
+                        {"key": "ZEIT", "regex": "", "required": False},
+                        {"key": "ANWENDER", "regex": "", "required": False},
+                        {"key": "PLATTE", "regex": "", "required": False},
+                        {"key": "CHARGE", "regex": "", "required": False},
+                        {"key": "TEST", "regex": "", "required": False},
+                        {"key": "VALIDATION", "regex": "", "required": False},
+                        {"key": "HALTBARKEIT", "regex": "", "required": False},
+                    ]
+                },
+                "excel_rules": {
+                    "excel_filename_template": "{assay_name}.xlsx",
+                    "sheetname_template": "{lot_id}",
+                    "column_mapping": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        test_app,
+        "list_jobs",
+        lambda _root: [
+            {
+                "job_id": "job1",
+                "pdf_path": str(pdf),
+                "status": "FAILED",
+                "updated_at": "u",
+                "source": "test-app-manual",
+                "worker_id": "",
+                "attempts": 1,
+                "last_error": "no_assay_detected",
+            }
+        ],
+    )
+    monkeypatch.setattr(test_app, "load_known_assay_keys", lambda _path: None)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        test_app.messagebox,
+        "askokcancel",
+        lambda _title, message: prompts.append(message) or True,
+    )
+    monkeypatch.setattr(test_app.messagebox, "askyesno", lambda *_args, **_kwargs: False)
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        app.tree_rework.selection_set("job1")
+        app.preview_assay_candidates()
+        app.tree_rework_candidates.selection_set("(ef01)")
+        app.create_draft_from_rework_candidate()
+
+        assert prompts
+        assert "Index konnte nicht geprueft werden" in prompts[0]
+        assert (tmp_path / "rules" / "drafts" / "ef01.draft.json").exists()
+    finally:
+        app.destroy()

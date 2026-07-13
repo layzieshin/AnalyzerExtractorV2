@@ -8,6 +8,7 @@ from src.rulesuite.api import (
     activate_new_draft,
     add_field,
     adopt_candidate_field,
+    adopt_candidate_fields,
     batch_check_fields,
     check_authoring_readiness,
     check_candidates,
@@ -16,8 +17,10 @@ from src.rulesuite.api import (
     create_draft,
     create_draft_from_ruleset,
     create_draft_from_template,
+    create_draft_from_template_if_missing,
     delete_ruleset,
     diff_draft_vs_active,
+    draft_path_for_assay,
     duplicate_field,
     derive_draft,
     list_fields,
@@ -1100,3 +1103,105 @@ def test_activate_draft_overwrites_valid_draft(tmp_path: Path) -> None:
     data = json.loads(Path(target).read_text(encoding="utf-8"))
     field = next(f for f in data["extract_rules"]["fields"] if f["key"] == "test")
     assert field["regex"] == r"Test:\s*(UPDATED)"
+
+
+def test_draft_path_for_assay_returns_path_without_creating_file(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    path = draft_path_for_assay(str(root), "(abcd)")
+
+    assert path.endswith("rules\\drafts\\abcd.draft.json") or path.endswith("rules/drafts/abcd.draft.json")
+    assert not Path(path).exists()
+
+
+def test_create_draft_from_template_if_missing_creates_header_draft(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+
+    result = create_draft_from_template_if_missing(str(root), "(abcd)", "New Assay")
+
+    assert result["status"] == "created"
+    assert Path(result["draft_path"]).exists()
+    data = load_draft(result["draft_path"])
+    keys = [field["key"] for field in data["extract_rules"]["fields"]]
+    assert keys == list(REQUIRED_HEADER_FIELD_KEYS)
+    assert all(bool(field.get("required")) for field in data["extract_rules"]["fields"])
+
+
+def test_create_draft_from_template_if_missing_does_not_overwrite_existing(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    first = create_draft_from_template_if_missing(str(root), "(abcd)", "First Name")
+    Path(first["draft_path"]).write_text('{"marker": true}', encoding="utf-8")
+
+    second = create_draft_from_template_if_missing(str(root), "(abcd)", "Second Name")
+
+    assert first["draft_path"] == second["draft_path"]
+    assert second["status"] == "exists"
+    assert json.loads(Path(second["draft_path"]).read_text(encoding="utf-8")) == {"marker": True}
+
+
+def _write_source_ruleset_with_extra_fields(root: Path) -> None:
+    ruleset = {
+        "assay_name": "Source Assay",
+        "assay_key": "(1111)",
+        "lot_rule": {"regex": r"Lot:\s*(\S+)"},
+        "extract_rules": {
+            "fields": [
+                {"key": "DATUM", "regex": r"Datum:\s*(\S+)", "required": True},
+                {"key": "PCQ1", "regex": r"PCQ1\s+(\d+)", "required": True, "search_from": {"line": 3}},
+                {"key": "S1", "regex": r"S1\s+(\d+)", "required": False},
+            ],
+            "dedupe_fields": [],
+        },
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {
+                "DATUM": "DATUM",
+                "PCQ1": "PCQ1 Column",
+                "S1": "S1",
+            },
+        },
+    }
+    (root / "rules" / "AssayA.json").write_text(json.dumps(ruleset), encoding="utf-8")
+
+
+def test_adopt_candidate_fields_copies_non_header_fields_and_skips_existing(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    _write_source_ruleset_with_extra_fields(root)
+    draft = create_draft_from_template(str(root), "(9999)", "Target Draft")
+    source = {"source_assay_key": "(1111)"}
+
+    result = adopt_candidate_fields(str(root), draft, source)
+
+    assert result["adopted"] == ["PCQ1", "S1"]
+    assert result["skipped_existing"] == []
+    assert result["missing"] == []
+    assert result["source"] == {"source_assay_key": "(1111)"}
+
+    data = load_draft(draft)
+    keys = [field["key"] for field in data["extract_rules"]["fields"]]
+    assert "DATUM" not in keys[8:]  # no extra DATUM from source
+    pcq = next(field for field in data["extract_rules"]["fields"] if field["key"] == "PCQ1")
+    assert pcq["regex"] == r"PCQ1\s+(\d+)"
+    assert pcq["required"] is True
+    assert pcq["search_from"] == {"line": 3}
+    assert data["excel_rules"]["column_mapping"]["PCQ1"] == "PCQ1 Column"
+
+    result2 = adopt_candidate_fields(str(root), draft, source)
+    assert result2["adopted"] == []
+    assert set(result2["skipped_existing"]) == {"PCQ1", "S1"}
+
+
+def test_adopt_candidate_fields_honors_field_keys_and_missing(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    _write_source_ruleset_with_extra_fields(root)
+    draft = create_draft_from_template(str(root), "(9998)", "Target Draft")
+    source = {"source_assay_key": "(1111)"}
+
+    result = adopt_candidate_fields(str(root), draft, source, field_keys=["S1", "MISSING"])
+
+    assert result["adopted"] == ["S1"]
+    assert result["missing"] == ["MISSING"]

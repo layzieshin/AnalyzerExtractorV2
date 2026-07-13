@@ -17,6 +17,7 @@ from src.assaycandidate.api import (
 from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
 from src.jobqueue.api import enqueue_pdf_job, list_jobs, retry_failed_job
 from src.ruleresolver.api import validate_rules_integrity
+from src.rulesuite.api import create_draft_from_template_if_missing
 from src.runtime.api import list_devices, load_runtime_config, resolve_app_root
 from src.testui.api import (
     REWORK_FILTER_LABELS,
@@ -92,6 +93,7 @@ class TestApp(tk.Tk):
         self._duplicate_details: dict[int, dict[str, object]] = {}
         self._rework_items: dict[str, dict[str, object]] = {}
         self._rework_items_all: list[dict[str, object]] = []
+        self._rework_candidates_by_id: dict[str, dict[str, str]] = {}
         self.var_rework_filter = tk.StringVar(value="Alle")
         self._busy = False
         self._extraction_running = False
@@ -301,6 +303,11 @@ class TestApp(tk.Tk):
             self.tree_rework_candidates.heading(col, text=title)
             self.tree_rework_candidates.column(col, width=width, anchor="w")
         self.tree_rework_candidates.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Button(
+            candidate_frame,
+            text="Draft aus Kandidat erstellen",
+            command=self.create_draft_from_rework_candidate,
+        ).pack(anchor="w", padx=8, pady=(0, 8))
 
         self.txt_rework_detail = tk.Text(rework_frame, height=10, wrap="word")
         self.txt_rework_detail.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -856,11 +863,16 @@ class TestApp(tk.Tk):
     def _clear_rework_candidates(self, message: str) -> None:
         for row_id in self.tree_rework_candidates.get_children():
             self.tree_rework_candidates.delete(row_id)
+        self._rework_candidates_by_id = {}
         self.lbl_rework_candidates.configure(text=message)
 
     def _render_rework_candidates(self, candidates: list[dict[str, str]], message: str) -> None:
         self._clear_rework_candidates(message)
-        for index, candidate in enumerate(candidates):
+        for candidate in candidates:
+            candidate_id = str(candidate.get("candidate_id", "") or "").strip()
+            if not candidate_id:
+                continue
+            self._rework_candidates_by_id[candidate_id] = dict(candidate)
             status = REWORK_CANDIDATE_STATUS_LABELS.get(
                 str(candidate.get("known_status", "")),
                 str(candidate.get("known_status", "")),
@@ -868,7 +880,7 @@ class TestApp(tk.Tk):
             self.tree_rework_candidates.insert(
                 "",
                 tk.END,
-                iid=f"candidate-{index}",
+                iid=candidate_id,
                 values=(
                     candidate.get("assay_key") or "-",
                     candidate.get("assay_name_hint") or "-",
@@ -923,6 +935,74 @@ class TestApp(tk.Tk):
             f"{len(annotated)} Kandidat(en) aus normalisiertem Kontext.",
         )
         self._log(f"Assay-Kandidaten geprueft: {len(annotated)} Kandidat(en).")
+
+    def create_draft_from_rework_candidate(self) -> None:
+        selection = self.tree_rework_candidates.selection()
+        if not selection:
+            messagebox.showinfo("Nacharbeit", "Bitte zuerst einen Assay-Kandidaten auswaehlen.")
+            return
+        candidate = self._rework_candidates_by_id.get(str(selection[0]))
+        if not candidate:
+            return
+
+        known_status = str(candidate.get("known_status", ""))
+        if known_status == "known":
+            messagebox.showinfo(
+                "Nacharbeit",
+                "Regelwerk existiert bereits. Bitte Retry oder vorhandene Rule pruefen.",
+            )
+            return
+
+        assay_key = str(candidate.get("assay_key", "") or "").strip()
+        assay_name = str(candidate.get("assay_name_hint", "") or "").strip()
+        if not assay_key or not assay_name:
+            messagebox.showinfo(
+                "Nacharbeit",
+                "Draft erfordert Assay-Key und Namenshinweis aus einer Testzeile.",
+            )
+            return
+
+        if known_status == "unchecked":
+            proceed = messagebox.askokcancel(
+                "Nacharbeit",
+                "Index konnte nicht geprueft werden. Draft wird nur angelegt, nicht aktiviert.",
+            )
+            if not proceed:
+                return
+
+        try:
+            result = create_draft_from_template_if_missing(
+                str(self.project_root),
+                assay_key,
+                assay_name,
+            )
+        except Exception as exc:
+            messagebox.showerror("Nacharbeit", f"Draft konnte nicht erstellt werden: {exc}")
+            return
+
+        draft_path = str(result["draft_path"])
+        status = str(result["status"])
+        if status == "created":
+            self._log(f"Draft erstellt: {draft_path}")
+        else:
+            self._log(f"Draft existiert bereits: {draft_path}")
+
+        rework_selection = self.tree_rework.selection()
+        detail = ""
+        if rework_selection:
+            item = self._rework_items.get(str(rework_selection[0]))
+            if item:
+                detail = format_rework_item_detail(item) + "\n\n"
+        detail += (
+            f"Draft-Pfad: {draft_path}\n"
+            f"Draft-Status: {status}\n"
+            f"Assay-Key: {assay_key}\n"
+            f"Assay-Name: {assay_name}"
+        )
+        self._set_text(self.txt_rework_detail, detail)
+
+        if messagebox.askyesno("Nacharbeit", "Rule Editor oeffnen?"):
+            self.open_rule_editor()
 
     def show_rework_context(self) -> None:
         selection = self.tree_rework.selection()

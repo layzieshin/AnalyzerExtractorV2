@@ -63,6 +63,42 @@ def read_header_rules(project_root: str) -> Dict[str, Any]:
     }
 
 
+def draft_path_for_assay(project_root: str, assay_key: str) -> str:
+    assay_key = assay_key.strip()
+    if not assay_key:
+        raise RuleSuiteError("assay_key is required")
+    draft_dir = Path(project_root) / "rules" / "drafts"
+    return str(draft_dir / f"{_safe_key(assay_key)}.draft.json")
+
+
+def create_draft_from_template_if_missing(
+    project_root: str,
+    assay_key: str,
+    assay_name: str,
+) -> Dict[str, str]:
+    assay_key = assay_key.strip()
+    assay_name = assay_name.strip()
+    if not assay_key or not assay_name:
+        raise RuleSuiteError("assay_key and assay_name are required")
+
+    draft_path = Path(draft_path_for_assay(project_root, assay_key))
+    if draft_path.exists():
+        return {
+            "status": "exists",
+            "draft_path": str(draft_path),
+            "assay_key": assay_key,
+            "assay_name": assay_name,
+        }
+
+    created = create_draft_from_template(project_root, assay_key, assay_name)
+    return {
+        "status": "created",
+        "draft_path": str(created),
+        "assay_key": assay_key,
+        "assay_name": assay_name,
+    }
+
+
 def create_draft_from_template(project_root: str, assay_key: str, assay_name: str) -> Path:
     """Like create_blank_draft, but pre-filled with required header rules from template.json."""
     assay_key = assay_key.strip()
