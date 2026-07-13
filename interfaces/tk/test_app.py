@@ -30,7 +30,7 @@ from src.testui.api import (
     normalize_file_row_key,
 )
 
-from .watch_scan import InAppWatchScanner
+from .watch_scan import InAppWatchScanner, list_watch_pdf_paths
 
 SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
 
@@ -57,6 +57,7 @@ class TestApp(tk.Tk):
         self.var_auto_watch_status = tk.StringVar(value="Auto-Suche: inaktiv")
         self.var_auto_watch_last_scan = tk.StringVar(value="Letzter Scan: -")
         self.var_auto_watch_found = tk.StringVar(value="Neue PDFs: -")
+        self.var_watch_recursive = tk.BooleanVar(value=False)
         self.var_status = tk.StringVar(value="Bereit.")
         self.var_technical_status = tk.StringVar(value="idle")
         self._auto_watch_interval_s = max(0.5, float(cfg.scan_interval_s or 3.0))
@@ -119,6 +120,9 @@ class TestApp(tk.Tk):
         self.btn_auto_watch_start.pack(side="left", padx=(18, 0))
         self.btn_auto_watch_stop = tk.Button(controls, text="Auto-Suche stoppen", command=self.stop_auto_watch)
         self.btn_auto_watch_stop.pack(side="left", padx=(6, 0))
+        tk.Checkbutton(controls, text="Unterordner einbeziehen", variable=self.var_watch_recursive).pack(
+            side="left", padx=(12, 0)
+        )
         self._action_buttons.extend(
             [
                 self.btn_scan_watch,
@@ -388,6 +392,7 @@ class TestApp(tk.Tk):
                 self.var_watch_dir.get().strip(),
                 known_paths,
                 self._auto_watch_stable_window_s,
+                recursive=self.var_watch_recursive.get(),
             )
             self.var_auto_watch_last_scan.set(f"Letzter Scan: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             self.var_auto_watch_found.set(
@@ -409,13 +414,13 @@ class TestApp(tk.Tk):
             if result.stable_new_paths:
                 queued_count = 0
                 for path in result.stable_new_paths:
-                    self._auto_watch_suppressed_paths.add(path)
                     try:
                         enqueue_pdf_job(
                             str(self.project_root),
                             path,
                             source="test-app-auto-watch",
                         )
+                        self._auto_watch_suppressed_paths.add(path)
                         queued_count += 1
                     except Exception as e:
                         self._log(f"Auto-Suche Queue-Fehler bei {Path(path).name}: {e}")
@@ -433,13 +438,13 @@ class TestApp(tk.Tk):
                 self._schedule_auto_watch()
 
     def scan_watch_dir(self) -> None:
-        watch = Path(self.var_watch_dir.get().strip())
-        rows = []
-        if watch.exists():
-            rows = [format_watch_file_row(path, source="watch") for path in sorted(watch.glob("*.pdf"))]
+        recursive = self.var_watch_recursive.get()
+        paths = list_watch_pdf_paths(self.var_watch_dir.get().strip(), recursive=recursive)
+        rows = [format_watch_file_row(path, source="watch") for path in paths]
         self._upsert_file_rows(rows, replace_source="watch")
         self.refresh_queue()
-        self._log(f"Watch-Ordner gescannt: {len(rows)} PDF(s)")
+        recursive_label = "ja" if recursive else "nein"
+        self._log(f"Watch-Ordner gescannt: {len(rows)} PDF(s), rekursiv={recursive_label}")
 
     def pick_manual_files(self) -> None:
         files = filedialog.askopenfilenames(title="PDFs waehlen", filetypes=[("PDF Dateien", "*.pdf")])

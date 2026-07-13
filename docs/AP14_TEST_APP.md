@@ -28,11 +28,15 @@ Hauptbereiche:
 Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
 
 - `Watch-Ordner scannen` liest vorhandene PDFs aus dem eingestellten Watch-Ordner.
+  Optional `Unterordner einbeziehen` durchsucht Jahres-/Monatsordner rekursiv.
+  Der manuelle Scan ist nur Sichtprüfung: Er fuellt die Extractor-Liste und queued
+  nie automatisch, auch nicht bei vielen rekursiven Funden.
 - `Dateien auswaehlen` ergaenzt manuell gewaehlte PDFs.
 - `Direkt verarbeiten` ruft `src.jobcontroller.api.submit(...)` fuer die Auswahl auf.
 - `In Queue stellen` ruft `src.jobqueue.api.enqueue_pdf_job(...)` fuer die Auswahl auf.
 - `Liste aktualisieren` merged den Queue-Status aus `src.jobqueue.api.list_jobs(...)`.
 - `Auto-Suche starten` scannt den Watch-Ordner zyklisch, solange die App offen ist.
+  Mit `Unterordner einbeziehen` werden auch Unterordner beruecksichtigt.
 - `Auto-Suche stoppen` beendet den geplanten In-App-Scan.
 
 Watch- und manuelle Eintraege teilen dieselbe Arbeitsliste. Gleiche PDFs werden
@@ -41,11 +45,21 @@ ist, arbeiten `Direkt verarbeiten` und `In Queue stellen` auf allen sichtbaren
 Dateizeilen.
 
 Die Auto-Suche ist ein sichtbarer In-App-Watchdog light. Sie erkennt stabile neue
-PDFs im Watch-Ordner und stellt sie per `enqueue_pdf_job(..., source="test-app-auto-watch")`
-in `jobs/queue/` ein. Sie startet keinen Worker, ruft kein `submit(...)` auf,
-schreibt keine Ergebnisse und bewegt keine Dateien. Bekannte Pfade kommen aus der
-Extractor-Liste, bestehenden Queue-Jobs und einer kleinen Session-Suppress-Liste
-(nur Anti-Spam innerhalb der laufenden GUI-Session).
+PDFs im Watch-Ordner (optional rekursiv) und stellt sie per
+`enqueue_pdf_job(..., source="test-app-auto-watch")` in `jobs/queue/` ein.
+Rekursion dient dem Sammeln fuer die persistente Queue-Aufnahme, nicht der
+automatischen Verarbeitung. Der manuelle `Watch-Ordner scannen` nutzt
+`list_watch_pdf_paths(...)` nur zur Anzeige und veraendert keine Scanner-
+Stabilitaetsbeobachtungen.
+
+Unterordner mit Namen wie `processed`, `failed`, `duplicates`, `duplicate`,
+`archive` oder `_archive` werden bei rekursiver Suche case-insensitive
+uebersprungen. Symlink-Verzeichnisse werden nicht rekursiv betreten.
+
+Sie startet keinen Worker, ruft kein `submit(...)` auf, schreibt keine Ergebnisse
+und bewegt keine Dateien. Bekannte Pfade kommen aus der Extractor-Liste,
+bestehenden Queue-Jobs und einer kleinen Session-Suppress-Liste (nur Anti-Spam
+innerhalb der laufenden GUI-Session, Eintrag erst nach erfolgreichem Enqueue).
 
 `Liste aktualisieren` und der Queue-Merge zeigen Queue-Jobs auch ohne vorherige
 GUI-Session in der Extractor-Liste an. `Direkt verarbeiten` ist fuer Queue-Zeilen

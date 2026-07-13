@@ -302,6 +302,7 @@ def test_test_app_auto_watch_logs_queue_error_but_stays_active(tmp_path, monkeyp
 
         assert app._auto_watch_active is True
         assert any("Queue-Fehler" in line for line in logs)
+        assert str(pdf.resolve(strict=False)) not in app._auto_watch_suppressed_paths
     finally:
         app.stop_auto_watch(log=False)
         app.destroy()
@@ -338,6 +339,150 @@ def test_test_app_direct_submit_blocks_queue_rows(tmp_path, monkeypatch) -> None
         assert started == []
         assert any("Queue-Jobs" in line for line in logs)
     finally:
+        app.destroy()
+
+
+def test_test_app_watch_recursive_defaults_false(tmp_path) -> None:
+    app = _make_test_app(tmp_path)
+    try:
+        assert app.var_watch_recursive.get() is False
+    finally:
+        app.destroy()
+
+
+def test_test_app_auto_watch_passes_recursive_flag_to_scanner(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeScanner:
+        def scan(self, watch_dir, known_paths, stable_window_s, now=None, *, recursive=False, excluded_dir_names=None):
+            captured["recursive"] = recursive
+            from interfaces.tk.watch_scan import WatchScanResult
+
+            return WatchScanResult([], 0, 0)
+
+    monkeypatch.setattr(test_app, "InAppWatchScanner", FakeScanner)
+    monkeypatch.setattr(test_app, "list_jobs", lambda _root: [])
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.var_watch_recursive.set(True)
+        app._auto_watch_active = True
+        app._run_auto_watch_scan()
+        assert captured["recursive"] is True
+    finally:
+        app.stop_auto_watch(log=False)
+        app.destroy()
+
+
+def test_test_app_manual_watch_scan_recursive_display_only(tmp_path, monkeypatch) -> None:
+    watch = tmp_path / "watch"
+    nested = watch / "2026" / "nested.pdf"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"pdf")
+    enqueue_calls: list[str] = []
+    logs: list[str] = []
+
+    monkeypatch.setattr(test_app, "enqueue_pdf_job", lambda *args, **kwargs: enqueue_calls.append("called"))
+    monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
+    monkeypatch.setattr(test_app, "list_jobs", lambda _root: [])
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.var_watch_dir.set(str(watch))
+        app.var_watch_recursive.set(True)
+        app.scan_watch_dir()
+
+        key = test_app.normalize_file_row_key(nested)
+        assert key in app._watch_rows
+        assert enqueue_calls == []
+        assert len(logs) == 1
+        assert "Watch-Ordner gescannt: 1 PDF(s), rekursiv=ja" in logs[0]
+    finally:
+        app.destroy()
+
+
+def test_test_app_auto_watch_recursive_enqueue(tmp_path, monkeypatch) -> None:
+    watch = tmp_path / "watch"
+    nested = watch / "2026" / "nested.pdf"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"pdf")
+    enqueue_calls: list[tuple[str, str]] = []
+
+    def fake_enqueue(project_root: str, pdf_path: str, source: str = "watchdog") -> dict[str, str]:
+        enqueue_calls.append((pdf_path, source))
+        return {
+            "job_id": "job1",
+            "pdf_path": pdf_path,
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": source,
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "",
+        }
+
+    monkeypatch.setattr(test_app, "enqueue_pdf_job", fake_enqueue)
+    monkeypatch.setattr(test_app, "list_jobs", lambda _root: [])
+    monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: None)
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.var_watch_dir.set(str(watch))
+        app.var_watch_recursive.set(True)
+        app._auto_watch_stable_window_s = 0
+        app._auto_watch_active = True
+        app._run_auto_watch_scan()
+
+        assert len(enqueue_calls) == 1
+        assert enqueue_calls[0][1] == "test-app-auto-watch"
+    finally:
+        app.stop_auto_watch(log=False)
+        app.destroy()
+
+
+def test_test_app_auto_watch_retry_enqueue_after_failed_attempt(tmp_path, monkeypatch) -> None:
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    pdf = watch / "sample.pdf"
+    pdf.write_bytes(b"pdf")
+    enqueue_calls: list[str] = []
+    attempts = {"count": 0}
+
+    def fake_enqueue(project_root: str, pdf_path: str, source: str = "watchdog") -> dict[str, str]:
+        enqueue_calls.append(pdf_path)
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("queue failed")
+        return {
+            "job_id": "job1",
+            "pdf_path": pdf_path,
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": source,
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "",
+        }
+
+    monkeypatch.setattr(test_app, "enqueue_pdf_job", fake_enqueue)
+    monkeypatch.setattr(test_app, "list_jobs", lambda _root: [])
+    monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: None)
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.var_watch_dir.set(str(watch))
+        app._auto_watch_stable_window_s = 0
+        app._auto_watch_active = True
+
+        app._run_auto_watch_scan()
+        assert str(pdf.resolve(strict=False)) not in app._auto_watch_suppressed_paths
+        assert len(enqueue_calls) == 1
+
+        app._run_auto_watch_scan()
+        assert len(enqueue_calls) == 2
+        assert str(pdf.resolve(strict=False)) in app._auto_watch_suppressed_paths
+    finally:
+        app.stop_auto_watch(log=False)
         app.destroy()
 
 
