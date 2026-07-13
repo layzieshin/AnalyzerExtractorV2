@@ -22,6 +22,41 @@ def test_test_app_class_constructable_when_tk_available(tmp_path) -> None:
         app.destroy()
 
 
+def test_test_app_extractor_uses_friendly_controls_and_columns(tmp_path) -> None:
+    try:
+        app = test_app.TestApp(project_root=tmp_path)
+    except tk.TclError as e:
+        pytest.skip(f"Tk not available: {e}")
+    try:
+        button_texts = {
+            app.btn_scan_watch.cget("text"),
+            app.btn_pick_files.cget("text"),
+            app.btn_start_extraction.cget("text"),
+            app.btn_refresh_queue.cget("text"),
+            app.btn_auto_watch_start.cget("text"),
+            app.btn_auto_watch_stop.cget("text"),
+        }
+        assert "Ergebnisse suchen" in button_texts
+        assert "Dateien hinzufügen" in button_texts
+        assert "Extraktion starten" in button_texts
+        assert "Aktualisieren" in button_texts
+        assert "Automatische Suche starten" in button_texts
+        assert "Automatische Suche stoppen" in button_texts
+        assert "Direkt verarbeiten" not in button_texts
+        assert "In Queue stellen" not in button_texts
+        assert not hasattr(app, "btn_direct_submit")
+        assert not hasattr(app, "btn_enqueue")
+
+        headings = [app.tree_files.heading(col)["text"] for col in app.tree_files["columns"]]
+        assert "Herkunft" in headings
+        assert "Status" in headings
+        assert "Verarbeitung" in headings
+        assert "Queue" not in headings
+        assert headings[-1] == "Job-ID"
+    finally:
+        app.destroy()
+
+
 def test_main_passes_project_root_to_test_app(tmp_path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -53,40 +88,62 @@ def test_test_app_default_root_uses_are_home(tmp_path, monkeypatch) -> None:
         app.destroy()
 
 
-def test_test_app_file_rows_preserve_manual_rows_when_watch_scans(tmp_path) -> None:
+def test_test_app_refresh_queue_replaces_temporary_rows_with_worklist(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "queued.pdf"
+    queue_job = {
+        "job_id": "job1",
+        "pdf_path": str(pdf),
+        "status": "PENDING",
+        "updated_at": "u",
+        "source": "test-app-manual",
+        "worker_id": "",
+        "attempts": 0,
+        "last_error": "",
+    }
+    monkeypatch.setattr(test_app, "list_jobs", lambda _root: [queue_job])
+
     try:
         app = test_app.TestApp(project_root=tmp_path)
     except tk.TclError as e:
         pytest.skip(f"Tk not available: {e}")
     try:
-        manual = tmp_path / "manual.pdf"
-        watch = tmp_path / "watch.pdf"
-        app._upsert_file_rows([{"file": "manual.pdf", "path": str(manual), "source": "manual", "queue_status": "", "job_id": "", "device_id": "", "last_error": "", "action": "bereit"}])
-        app._upsert_file_rows([{"file": "watch.pdf", "path": str(watch), "source": "watch", "queue_status": "", "job_id": "", "device_id": "", "last_error": "", "action": "bereit"}], replace_source="watch")
+        app._upsert_file_rows(
+            [
+                {
+                    "file": "temporary.pdf",
+                    "path": str(tmp_path / "temporary.pdf"),
+                    "source": "manual",
+                    "queue_status": "",
+                    "job_id": "",
+                    "device_id": "",
+                    "last_error": "",
+                    "action": "bereit",
+                }
+            ]
+        )
 
-        sources = sorted(row["source"] for row in app._watch_rows.values())
-        assert sources == ["manual", "watch"]
+        app.refresh_queue()
+
+        assert list(app._watch_rows.values())[0]["job_id"] == "job1"
+        assert all(row["job_id"] for row in app._watch_rows.values())
     finally:
         app.destroy()
 
 
-def test_test_app_action_snapshot_contains_plain_values(tmp_path) -> None:
+def test_test_app_worker_config_snapshot_contains_ui_values(tmp_path) -> None:
     try:
         app = test_app.TestApp(project_root=tmp_path)
     except tk.TclError as e:
         pytest.skip(f"Tk not available: {e}")
     try:
-        pdf = tmp_path / "sample.pdf"
         app.var_output_mode.set("sqlite")
         app.var_sqlite_path.set(str(tmp_path / "out.sqlite3"))
-        app._upsert_file_rows([{"file": "sample.pdf", "path": str(pdf), "source": "manual", "queue_status": "", "job_id": "", "device_id": "", "last_error": "", "action": "bereit"}])
 
-        snapshot = app._build_action_snapshot()
+        snapshot = app._build_worker_config_snapshot()
 
-        assert snapshot["project_root"] == str(tmp_path.resolve())
-        assert snapshot["output_mode"] == "sqlite"
-        assert snapshot["sqlite_path"] == str(tmp_path / "out.sqlite3")
-        assert snapshot["rows"] == list(app._watch_rows.values())
+        assert snapshot.output_mode == "sqlite"
+        assert snapshot.sqlite_path == str(tmp_path / "out.sqlite3")
+        assert snapshot.device_id == app._selected_device_id()
     finally:
         app.destroy()
 
@@ -167,6 +224,40 @@ def test_test_app_refresh_queue_shows_queue_only_rows(tmp_path, monkeypatch) -> 
         assert row["queue_status"] == "PENDING"
         assert row["source"] == "test-app-auto-watch"
         assert row["action"] == "queued"
+    finally:
+        app.destroy()
+
+
+def test_test_app_pick_manual_files_enqueues_immediately(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "manual.pdf"
+    pdf.write_bytes(b"pdf")
+    enqueue_calls: list[tuple[str, str, str]] = []
+    logs: list[str] = []
+
+    def fake_enqueue(project_root: str, pdf_path: str, source: str = "watchdog") -> dict[str, str]:
+        enqueue_calls.append((project_root, pdf_path, source))
+        return {
+            "job_id": "job1",
+            "pdf_path": pdf_path,
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": source,
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "",
+        }
+
+    monkeypatch.setattr(test_app, "enqueue_pdf_job", fake_enqueue)
+    monkeypatch.setattr(test_app, "list_jobs", lambda _root: [])
+    monkeypatch.setattr(test_app.filedialog, "askopenfilenames", lambda **_kwargs: (str(pdf),))
+    monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.pick_manual_files()
+
+        assert enqueue_calls == [(str(tmp_path.resolve()), str(pdf), "test-app-manual")]
+        assert any("Dateien hinzugefügt: 1 PDF(s), vorgemerkt=1, Fehler=0" in line for line in logs)
     finally:
         app.destroy()
 
@@ -301,43 +392,56 @@ def test_test_app_auto_watch_logs_queue_error_but_stays_active(tmp_path, monkeyp
         app._run_auto_watch_scan()
 
         assert app._auto_watch_active is True
-        assert any("Queue-Fehler" in line for line in logs)
+        assert any("Fehler beim Vormerken" in line for line in logs)
         assert str(pdf.resolve(strict=False)) not in app._auto_watch_suppressed_paths
     finally:
         app.stop_auto_watch(log=False)
         app.destroy()
 
 
-def test_test_app_direct_submit_blocks_queue_rows(tmp_path, monkeypatch) -> None:
-    pdf = tmp_path / "sample.pdf"
-    started: list[int] = []
-    logs: list[str] = []
+def test_test_app_start_extraction_reports_empty_worklist(tmp_path, monkeypatch) -> None:
+    messages: list[tuple[str, str]] = []
 
-    monkeypatch.setattr(test_app.TestApp, "_start_background_action", lambda self, _msg: started.append(1) or True)
-    monkeypatch.setattr(test_app, "messagebox", type("MB", (), {"showinfo": staticmethod(lambda *a, **k: None)})())
-    monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
+    monkeypatch.setattr(test_app, "list_jobs", lambda _root: [])
+    monkeypatch.setattr(test_app, "messagebox", type("MB", (), {"showinfo": staticmethod(lambda title, msg: messages.append((title, msg)))})())
 
     app = _make_test_app(tmp_path)
     try:
-        app._upsert_file_rows(
-            [
-                {
-                    "file": "sample.pdf",
-                    "path": str(pdf),
-                    "source": "manual",
-                    "queue_status": "PENDING",
-                    "job_id": "job1",
-                    "device_id": "",
-                    "last_error": "",
-                    "action": "queued",
-                }
-            ]
-        )
+        app.start_extraction()
 
-        app.start_selected_files()
+        assert messages == [("Extraktion", "Keine wartenden Ergebnisse in der Arbeitsliste.")]
+    finally:
+        app.destroy()
 
-        assert started == []
-        assert any("Queue-Jobs" in line for line in logs)
+
+def test_test_app_process_queue_uses_common_worker(tmp_path, monkeypatch) -> None:
+    calls: list[object] = []
+    logs: list[str] = []
+
+    class Result:
+        processed = True
+        job_id = "job1"
+        pdf_path = str(tmp_path / "sample.pdf")
+        queue_status = "DONE"
+        submit_status = "DONE"
+
+    def fake_process(project_root, snapshot):
+        calls.append((project_root, snapshot))
+        return Result()
+
+    monkeypatch.setattr(test_app, "process_next_pending", fake_process)
+    monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
+    monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: None)
+
+    app = _make_test_app(tmp_path)
+    try:
+        monkeypatch.setattr(app, "after", lambda _delay, callback=None: callback() if callback else None)
+
+        app._process_queue_thread(app._build_worker_config_snapshot(), 1)
+
+        assert len(calls) == 1
+        assert any("sample.pdf -> DONE" in line for line in logs)
+        assert any("Extraktion abgeschlossen: 1 Job(s) verarbeitet." in line for line in logs)
     finally:
         app.destroy()
 
@@ -374,15 +478,28 @@ def test_test_app_auto_watch_passes_recursive_flag_to_scanner(tmp_path, monkeypa
         app.destroy()
 
 
-def test_test_app_manual_watch_scan_recursive_display_only(tmp_path, monkeypatch) -> None:
+def test_test_app_manual_watch_scan_recursive_queues_results(tmp_path, monkeypatch) -> None:
     watch = tmp_path / "watch"
     nested = watch / "2026" / "nested.pdf"
     nested.parent.mkdir(parents=True)
     nested.write_bytes(b"pdf")
-    enqueue_calls: list[str] = []
+    enqueue_calls: list[tuple[str, str, str]] = []
     logs: list[str] = []
 
-    monkeypatch.setattr(test_app, "enqueue_pdf_job", lambda *args, **kwargs: enqueue_calls.append("called"))
+    def fake_enqueue(project_root: str, pdf_path: str, source: str = "watchdog") -> dict[str, str]:
+        enqueue_calls.append((project_root, pdf_path, source))
+        return {
+            "job_id": "job1",
+            "pdf_path": pdf_path,
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": source,
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "",
+        }
+
+    monkeypatch.setattr(test_app, "enqueue_pdf_job", fake_enqueue)
     monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
     monkeypatch.setattr(test_app, "list_jobs", lambda _root: [])
 
@@ -392,11 +509,9 @@ def test_test_app_manual_watch_scan_recursive_display_only(tmp_path, monkeypatch
         app.var_watch_recursive.set(True)
         app.scan_watch_dir()
 
-        key = test_app.normalize_file_row_key(nested)
-        assert key in app._watch_rows
-        assert enqueue_calls == []
+        assert enqueue_calls == [(str(tmp_path.resolve()), str(nested.resolve(strict=False)), "test-app-watch")]
         assert len(logs) == 1
-        assert "Watch-Ordner gescannt: 1 PDF(s), rekursiv=ja" in logs[0]
+        assert "Ergebnisse gesucht: 1 PDF(s), vorgemerkt=1, Fehler=0, rekursiv=ja" in logs[0]
     finally:
         app.destroy()
 
@@ -486,48 +601,15 @@ def test_test_app_auto_watch_retry_enqueue_after_failed_attempt(tmp_path, monkey
         app.destroy()
 
 
-def test_test_app_direct_submit_blocks_mixed_selection(tmp_path, monkeypatch) -> None:
-    queued = tmp_path / "queued.pdf"
-    plain = tmp_path / "plain.pdf"
-    started: list[int] = []
+def test_test_app_start_selected_files_delegates_to_extraction(tmp_path, monkeypatch) -> None:
+    called: list[int] = []
 
-    monkeypatch.setattr(test_app.TestApp, "_start_background_action", lambda self, _msg: started.append(1) or True)
-    monkeypatch.setattr(test_app, "messagebox", type("MB", (), {"showinfo": staticmethod(lambda *a, **k: None)})())
-    monkeypatch.setattr(test_app.TestApp, "_log", lambda self, _message: None)
+    monkeypatch.setattr(test_app.TestApp, "start_extraction", lambda self: called.append(1))
 
     app = _make_test_app(tmp_path)
     try:
-        app._upsert_file_rows(
-            [
-                {
-                    "file": "queued.pdf",
-                    "path": str(queued),
-                    "source": "manual",
-                    "queue_status": "PENDING",
-                    "job_id": "job1",
-                    "device_id": "",
-                    "last_error": "",
-                    "action": "queued",
-                },
-                {
-                    "file": "plain.pdf",
-                    "path": str(plain),
-                    "source": "manual",
-                    "queue_status": "",
-                    "job_id": "",
-                    "device_id": "",
-                    "last_error": "",
-                    "action": "bereit",
-                },
-            ]
-        )
-        app.tree_files.selection_set(
-            test_app.normalize_file_row_key(queued),
-            test_app.normalize_file_row_key(plain),
-        )
-
         app.start_selected_files()
 
-        assert started == []
+        assert called == [1]
     finally:
         app.destroy()

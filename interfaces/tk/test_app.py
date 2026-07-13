@@ -7,10 +7,9 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Any
 
+from interfaces.common.queue_worker import QueueWorkerConfig, process_next_pending
 from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
-from src.jobcontroller.api import submit
 from src.jobqueue.api import enqueue_pdf_job, list_jobs
 from src.ruleresolver.api import validate_rules_integrity
 from src.runtime.api import list_devices, load_runtime_config, resolve_app_root
@@ -19,13 +18,9 @@ from src.testui.api import (
     format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
     format_duplicate_field_comparison,
-    format_enqueue_result,
-    format_job_result_summary,
-    format_submit_row_update,
     format_queue_job_row,
     format_runtime_options_summary,
     format_validation_status,
-    format_watch_file_row,
     merge_file_rows_with_queue,
     normalize_file_row_key,
 )
@@ -33,6 +28,40 @@ from src.testui.api import (
 from .watch_scan import InAppWatchScanner, list_watch_pdf_paths
 
 SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
+
+_SOURCE_LABELS = {
+    "test-app-auto-watch": "Automatisch gefunden",
+    "test-app-watch": "Aus Suchordner",
+    "watch": "Aus Suchordner",
+    "test-app-manual": "Manuell hinzugefügt",
+    "manual": "Manuell hinzugefügt",
+}
+_QUEUE_STATUS_LABELS = {
+    "PENDING": "Wartet",
+    "PROCESSING": "In Arbeit",
+    "DONE": "Fertig",
+    "FAILED": "Fehler",
+}
+_ACTION_LABELS = {
+    "queued": "Wartet auf Extraktion",
+    "bereit": "Bereit",
+}
+
+
+def _format_extractor_file_row(row: dict[str, str]) -> dict[str, str]:
+    source = str(row.get("source", "") or "")
+    queue_status = str(row.get("queue_status", "") or "")
+    action = str(row.get("action", "") or "")
+    return {
+        "file": str(row.get("file", "") or ""),
+        "path": str(row.get("path", "") or ""),
+        "source": _SOURCE_LABELS.get(source, source),
+        "queue_status": _QUEUE_STATUS_LABELS.get(queue_status, queue_status),
+        "job_id": str(row.get("job_id", "") or ""),
+        "device_id": str(row.get("device_id", "") or ""),
+        "last_error": str(row.get("last_error", "") or ""),
+        "action": _ACTION_LABELS.get(action, action),
+    }
 
 
 class TestApp(tk.Tk):
@@ -62,6 +91,13 @@ class TestApp(tk.Tk):
         self.var_technical_status = tk.StringVar(value="idle")
         self._auto_watch_interval_s = max(0.5, float(cfg.scan_interval_s or 3.0))
         self._auto_watch_stable_window_s = float(cfg.watch_stable_window_s)
+        self._queue_processing_ttl_s = float(cfg.queue_processing_ttl_s)
+        self._queue_claim_lock_ttl_s = float(cfg.queue_claim_lock_ttl_s)
+        self._queue_max_attempts = int(cfg.queue_max_attempts)
+        self._pipeline_lock_ttl_s = float(cfg.pipeline_lock_ttl_s)
+        self._sqlite_busy_timeout_ms = int(cfg.sqlite_busy_timeout_ms)
+        self._sqlite_retry_count = int(cfg.sqlite_retry_count)
+        self._sqlite_retry_sleep_s = float(cfg.sqlite_retry_sleep_s)
         self._auto_watch_active = False
         self._auto_watch_after_id: str | None = None
         self._auto_watch_scanner = InAppWatchScanner()
@@ -106,19 +142,17 @@ class TestApp(tk.Tk):
     def _build_extractor_tab(self, parent: tk.Frame) -> None:
         controls = tk.Frame(parent)
         controls.pack(fill="x", padx=8, pady=8)
-        self.btn_scan_watch = tk.Button(controls, text="Watch-Ordner scannen", command=self.scan_watch_dir)
+        self.btn_scan_watch = tk.Button(controls, text="Ergebnisse suchen", command=self.scan_watch_dir)
         self.btn_scan_watch.pack(side="left")
-        self.btn_pick_files = tk.Button(controls, text="Dateien auswaehlen", command=self.pick_manual_files)
+        self.btn_pick_files = tk.Button(controls, text="Dateien hinzufügen", command=self.pick_manual_files)
         self.btn_pick_files.pack(side="left", padx=(6, 0))
-        self.btn_direct_submit = tk.Button(controls, text="Direkt verarbeiten", command=self.start_selected_files)
-        self.btn_direct_submit.pack(side="left", padx=(6, 0))
-        self.btn_enqueue = tk.Button(controls, text="In Queue stellen", command=self.enqueue_selected_files)
-        self.btn_enqueue.pack(side="left", padx=(6, 0))
-        self.btn_refresh_queue = tk.Button(controls, text="Liste aktualisieren", command=self.refresh_queue)
+        self.btn_start_extraction = tk.Button(controls, text="Extraktion starten", command=self.start_extraction)
+        self.btn_start_extraction.pack(side="left", padx=(6, 0))
+        self.btn_refresh_queue = tk.Button(controls, text="Aktualisieren", command=self.refresh_queue)
         self.btn_refresh_queue.pack(side="left", padx=(6, 0))
-        self.btn_auto_watch_start = tk.Button(controls, text="Auto-Suche starten", command=self.start_auto_watch)
+        self.btn_auto_watch_start = tk.Button(controls, text="Automatische Suche starten", command=self.start_auto_watch)
         self.btn_auto_watch_start.pack(side="left", padx=(18, 0))
-        self.btn_auto_watch_stop = tk.Button(controls, text="Auto-Suche stoppen", command=self.stop_auto_watch)
+        self.btn_auto_watch_stop = tk.Button(controls, text="Automatische Suche stoppen", command=self.stop_auto_watch)
         self.btn_auto_watch_stop.pack(side="left", padx=(6, 0))
         tk.Checkbutton(controls, text="Unterordner einbeziehen", variable=self.var_watch_recursive).pack(
             side="left", padx=(12, 0)
@@ -127,8 +161,7 @@ class TestApp(tk.Tk):
             [
                 self.btn_scan_watch,
                 self.btn_pick_files,
-                self.btn_direct_submit,
-                self.btn_enqueue,
+                self.btn_start_extraction,
                 self.btn_refresh_queue,
             ]
         )
@@ -141,19 +174,19 @@ class TestApp(tk.Tk):
 
         self.tree_files = ttk.Treeview(
             parent,
-            columns=("file", "source", "queue_status", "job_id", "device_id", "last_error", "action", "path"),
+            columns=("file", "source", "queue_status", "device_id", "last_error", "action", "path", "job_id"),
             show="headings",
             height=16,
         )
         for col, title, width in (
             ("file", "Datei", 190),
-            ("source", "Quelle", 80),
-            ("queue_status", "Queue", 90),
-            ("job_id", "Job-ID", 140),
+            ("source", "Herkunft", 150),
+            ("queue_status", "Status", 110),
             ("device_id", "Geraet", 120),
             ("last_error", "Letzter Fehler", 200),
-            ("action", "Aktion/Status", 150),
+            ("action", "Verarbeitung", 170),
             ("path", "Pfad", 360),
+            ("job_id", "Job-ID", 140),
         ):
             self.tree_files.heading(col, text=title)
             self.tree_files.column(col, width=width, anchor="w")
@@ -375,9 +408,6 @@ class TestApp(tk.Tk):
         known.update(self._auto_watch_suppressed_paths)
         return known
 
-    def _row_is_queued(self, row: dict[str, str]) -> bool:
-        return bool(row.get("job_id") or row.get("queue_status"))
-
     def _run_auto_watch_scan(self) -> None:
         self._auto_watch_after_id = None
         if not self._auto_watch_active:
@@ -423,10 +453,10 @@ class TestApp(tk.Tk):
                         self._auto_watch_suppressed_paths.add(path)
                         queued_count += 1
                     except Exception as e:
-                        self._log(f"Auto-Suche Queue-Fehler bei {Path(path).name}: {e}")
+                        self._log(f"Auto-Suche Fehler beim Vormerken von {Path(path).name}: {e}")
                 if queued_count:
                     self.refresh_queue()
-                    self._log(f"Auto-Suche: {queued_count} PDF(s) in Queue gestellt.")
+                    self._log(f"Auto-Suche: {queued_count} PDF(s) für Extraktion vorgemerkt.")
         except Exception as e:
             warning = f"auto_watch_error: {e}"
             self.var_auto_watch_status.set("Auto-Suche: Warnung")
@@ -440,18 +470,31 @@ class TestApp(tk.Tk):
     def scan_watch_dir(self) -> None:
         recursive = self.var_watch_recursive.get()
         paths = list_watch_pdf_paths(self.var_watch_dir.get().strip(), recursive=recursive)
-        rows = [format_watch_file_row(path, source="watch") for path in paths]
-        self._upsert_file_rows(rows, replace_source="watch")
+        queued_count, error_count = self._enqueue_paths(paths, source="test-app-watch")
         self.refresh_queue()
         recursive_label = "ja" if recursive else "nein"
-        self._log(f"Watch-Ordner gescannt: {len(rows)} PDF(s), rekursiv={recursive_label}")
+        self._log(
+            f"Ergebnisse gesucht: {len(paths)} PDF(s), vorgemerkt={queued_count}, "
+            f"Fehler={error_count}, rekursiv={recursive_label}"
+        )
 
     def pick_manual_files(self) -> None:
         files = filedialog.askopenfilenames(title="PDFs waehlen", filetypes=[("PDF Dateien", "*.pdf")])
-        rows = [format_watch_file_row(path, source="manual") for path in files]
-        self._upsert_file_rows(rows)
+        queued_count, error_count = self._enqueue_paths(files, source="test-app-manual")
         self.refresh_queue()
-        self._log(f"Manuelle PDFs hinzugefuegt: {len(rows)}")
+        self._log(f"Dateien hinzugefügt: {len(files)} PDF(s), vorgemerkt={queued_count}, Fehler={error_count}")
+
+    def _enqueue_paths(self, paths: list[str] | tuple[str, ...], *, source: str) -> tuple[int, int]:
+        queued_count = 0
+        error_count = 0
+        for path in paths:
+            try:
+                enqueue_pdf_job(str(self.project_root), str(path), source=source)
+                queued_count += 1
+            except Exception as e:
+                error_count += 1
+                self._log(f"Vormerken fehlgeschlagen bei {Path(path).name}: {e}")
+        return queued_count, error_count
 
     def _upsert_file_rows(self, rows: list[dict[str, str]], *, replace_source: str | None = None) -> None:
         if replace_source is not None:
@@ -473,58 +516,49 @@ class TestApp(tk.Tk):
         for item in self.tree_files.get_children():
             self.tree_files.delete(item)
         for key, row in self._watch_rows.items():
+            display = _format_extractor_file_row(row)
             self.tree_files.insert(
                 "",
                 tk.END,
                 iid=key,
                 values=(
-                    row["file"],
-                    row["source"],
-                    row["queue_status"],
-                    row["job_id"],
-                    row["device_id"],
-                    row["last_error"],
-                    row["action"],
-                    row["path"],
+                    display["file"],
+                    display["source"],
+                    display["queue_status"],
+                    display["device_id"],
+                    display["last_error"],
+                    display["action"],
+                    display["path"],
+                    display["job_id"],
                 ),
             )
 
+    def start_extraction(self) -> None:
+        pending_count = sum(1 for job in list_jobs(str(self.project_root)) if job.status == "PENDING")
+        if pending_count == 0:
+            messagebox.showinfo("Extraktion", "Keine wartenden Ergebnisse in der Arbeitsliste.")
+            return
+        if not self._start_background_action("Extraktion laeuft..."):
+            return
+        snapshot = self._build_worker_config_snapshot()
+        threading.Thread(target=self._process_queue_thread, args=(snapshot, pending_count), daemon=True).start()
+
     def start_selected_files(self) -> None:
-        snapshot = self._build_action_snapshot()
-        if not snapshot["rows"]:
-            messagebox.showinfo("Extractor", "Bitte zuerst PDFs suchen oder auswaehlen.")
-            return
-        if any(self._row_is_queued(row) for row in snapshot["rows"]):
-            message = (
-                "Auswahl enthält Queue-Jobs. Bitte Queue-Verarbeitung nutzen "
-                "oder nur nicht-gequeuete Dateien auswählen."
-            )
-            messagebox.showinfo("Extractor", message)
-            self._log(message)
-            return
-        if not self._start_background_action("Direkte Verarbeitung laeuft..."):
-            return
-        threading.Thread(target=self._submit_files_thread, args=(snapshot,), daemon=True).start()
+        self.start_extraction()
 
-    def enqueue_selected_files(self) -> None:
-        snapshot = self._build_action_snapshot()
-        if not snapshot["rows"]:
-            messagebox.showinfo("Queue", "Bitte zuerst PDFs suchen oder auswaehlen.")
-            return
-        if not self._start_background_action("Queue-Einreihung laeuft..."):
-            return
-        threading.Thread(target=self._enqueue_files_thread, args=(snapshot,), daemon=True).start()
-
-    def _build_action_snapshot(self) -> dict[str, Any]:
-        keys = list(self.tree_files.selection()) or list(self._watch_rows)
-        rows = [dict(self._watch_rows[key]) for key in keys if key in self._watch_rows]
-        return {
-            "project_root": str(self.project_root),
-            "output_mode": self.var_output_mode.get(),
-            "sqlite_path": self.var_sqlite_path.get().strip() or None,
-            "device_id": self._selected_device_id(),
-            "rows": rows,
-        }
+    def _build_worker_config_snapshot(self) -> QueueWorkerConfig:
+        return QueueWorkerConfig(
+            output_mode=self.var_output_mode.get(),
+            sqlite_path=self.var_sqlite_path.get().strip() or None,
+            device_id=self._selected_device_id(),
+            queue_processing_ttl_s=self._queue_processing_ttl_s,
+            queue_claim_lock_ttl_s=self._queue_claim_lock_ttl_s,
+            queue_max_attempts=self._queue_max_attempts,
+            pipeline_lock_ttl_s=self._pipeline_lock_ttl_s,
+            sqlite_busy_timeout_ms=self._sqlite_busy_timeout_ms,
+            sqlite_retry_count=self._sqlite_retry_count,
+            sqlite_retry_sleep_s=self._sqlite_retry_sleep_s,
+        )
 
     def _start_background_action(self, message: str) -> bool:
         if self._busy:
@@ -542,79 +576,28 @@ class TestApp(tk.Tk):
         for button in self._action_buttons:
             button.configure(state=state)
 
-    def _submit_files_thread(self, snapshot: dict[str, Any]) -> None:
-        events: list[dict[str, object]] = []
-        for row in snapshot["rows"]:
-            path = str(row.get("path", ""))
-            try:
-                res = submit(
-                    path,
-                    str(snapshot["project_root"]),
-                    output_mode=str(snapshot["output_mode"]),
-                    sqlite_path=snapshot["sqlite_path"],
-                    device_id=snapshot["device_id"],
-                )
-                summary = format_job_result_summary(
-                    pdf_path=res.pdf_path,
-                    job_id=res.job_id,
-                    status=res.status,
-                    details=res.details,
-                )
-                update = format_submit_row_update(res, snapshot["device_id"])
-                events.append({"path": path, "log": summary, "update": update})
-            except Exception as e:
-                events.append(
-                    {
-                        "path": path,
-                        "log": f"Fehler bei {Path(path).name}: {e}",
-                        "update": {"action": "FAIL", "last_error": str(e)},
-                    }
-                )
-        self.after(0, lambda: self._finish_background_action(events))
+    def _process_queue_thread(self, snapshot: QueueWorkerConfig, pending_count: int) -> None:
+        events: list[str] = []
+        processed_count = 0
+        for _ in range(pending_count):
+            result = process_next_pending(self.project_root, snapshot)
+            if not result.processed:
+                break
+            processed_count += 1
+            name = Path(result.pdf_path).name if result.pdf_path else result.job_id
+            events.append(f"Extraktion: {name} -> {result.queue_status or result.submit_status}")
+            if result.queue_status == "PENDING":
+                break
+        if processed_count == 0:
+            events.append("Keine wartenden Ergebnisse in der Arbeitsliste.")
+        else:
+            events.append(f"Extraktion abgeschlossen: {processed_count} Job(s) verarbeitet.")
+        self.after(0, lambda: self._finish_queue_processing(events))
 
-    def _enqueue_files_thread(self, snapshot: dict[str, Any]) -> None:
-        events: list[dict[str, object]] = []
-        for row in snapshot["rows"]:
-            path = str(row.get("path", ""))
-            row_source = str(row.get("source", "manual"))
-            source = "test-app-watch" if row_source == "watch" else "test-app-manual"
-            try:
-                job = enqueue_pdf_job(str(snapshot["project_root"]), path, source=source)
-                queue_row = format_queue_job_row(job)
-                events.append(
-                    {
-                        "path": path,
-                        "log": format_enqueue_result(job),
-                        "update": {
-                            "queue_status": queue_row["status"],
-                            "job_id": queue_row["job_id"],
-                            "last_error": queue_row["last_error"],
-                            "action": "queued",
-                        },
-                    }
-                )
-            except Exception as e:
-                events.append(
-                    {
-                        "path": path,
-                        "log": f"Queue-Fehler bei {Path(path).name}: {e}",
-                        "update": {"action": "FAIL", "last_error": str(e)},
-                    }
-                )
-        self.after(0, lambda: self._finish_background_action(events))
-
-    def _finish_background_action(self, events: list[dict[str, object]]) -> None:
+    def _finish_queue_processing(self, events: list[str]) -> None:
         try:
             for event in events:
-                path = str(event.get("path", ""))
-                key = normalize_file_row_key(path)
-                update = event.get("update")
-                if key in self._watch_rows and isinstance(update, dict):
-                    self._watch_rows[key].update({str(k): str(v) for k, v in update.items()})
-                log = event.get("log")
-                if log:
-                    self._log(str(log))
-            self._render_file_rows()
+                self._log(event)
             self.refresh_queue()
         finally:
             self._busy = False
@@ -646,7 +629,7 @@ class TestApp(tk.Tk):
                 ),
             )
         merged_rows = merge_file_rows_with_queue(
-            list(self._watch_rows.values()),
+            [],
             jobs,
             include_queue_only=True,
         )

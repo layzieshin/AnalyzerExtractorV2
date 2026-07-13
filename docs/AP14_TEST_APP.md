@@ -23,47 +23,51 @@ Hauptbereiche:
 - `DUPLIKATE`
 - `ADMIN`
 
-## Extractor-/Queue-Bedienung
+## Extractor-Bedienung
 
 Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
 
-- `Watch-Ordner scannen` liest vorhandene PDFs aus dem eingestellten Watch-Ordner.
+- `Ergebnisse suchen` liest vorhandene PDFs aus dem eingestellten Watch-Ordner.
   Optional `Unterordner einbeziehen` durchsucht Jahres-/Monatsordner rekursiv.
-  Der manuelle Scan ist nur Sichtprüfung: Er fuellt die Extractor-Liste und queued
-  nie automatisch, auch nicht bei vielen rekursiven Funden.
-- `Dateien auswaehlen` ergaenzt manuell gewaehlte PDFs.
-- `Direkt verarbeiten` ruft `src.jobcontroller.api.submit(...)` fuer die Auswahl auf.
-- `In Queue stellen` ruft `src.jobqueue.api.enqueue_pdf_job(...)` fuer die Auswahl auf.
-- `Liste aktualisieren` merged den Queue-Status aus `src.jobqueue.api.list_jobs(...)`.
-- `Auto-Suche starten` scannt den Watch-Ordner zyklisch, solange die App offen ist.
+  Der manuelle Scan merkt gefundene PDFs direkt in der Arbeitsliste vor.
+- `Dateien hinzufügen` merkt manuell gewaehlte PDFs direkt in der Arbeitsliste vor.
+- `Extraktion starten` verarbeitet wartende Arbeitslisten-Jobs ueber dieselbe
+  Worker-Logik wie der Headless-Worker.
+- `Aktualisieren` merged den internen Verarbeitungsstatus aus
+  `src.jobqueue.api.list_jobs(...)`.
+- `Automatische Suche starten` scannt den Watch-Ordner zyklisch, solange die App offen ist.
   Mit `Unterordner einbeziehen` werden auch Unterordner beruecksichtigt.
-- `Auto-Suche stoppen` beendet den geplanten In-App-Scan.
+- `Automatische Suche stoppen` beendet den geplanten In-App-Scan.
 
-Watch- und manuelle Eintraege teilen dieselbe Arbeitsliste. Gleiche PDFs werden
-ueber normalisierte absolute Pfade dedupliziert. Wenn keine Zeile ausgewaehlt
-ist, arbeiten `Direkt verarbeiten` und `In Queue stellen` auf allen sichtbaren
-Dateizeilen.
+Watch-, Auto-Suche- und manuelle Eintraege teilen dieselbe persistente
+Arbeitsliste. Gleiche PDFs werden ueber den Queue-Job-Hash dedupliziert. Der
+EXTRACTOR zeigt fachliche Spalten wie `Herkunft`, `Status` und `Verarbeitung`.
+Technische Queue-Details bleiben im `ADMIN`-Bereich sichtbar.
+
+Es gibt keinen direkten Submit-Pfad in der GUI. `Extraktion starten` nutzt
+`interfaces.common.queue_worker.process_next_pending(...)`; der Headless-Worker
+nutzt dieselbe Funktion.
 
 Die Auto-Suche ist ein sichtbarer In-App-Watchdog light. Sie erkennt stabile neue
-PDFs im Watch-Ordner (optional rekursiv) und stellt sie per
+PDFs im Watch-Ordner (optional rekursiv) und merkt sie per
 `enqueue_pdf_job(..., source="test-app-auto-watch")` in `jobs/queue/` ein.
-Rekursion dient dem Sammeln fuer die persistente Queue-Aufnahme, nicht der
-automatischen Verarbeitung. Der manuelle `Watch-Ordner scannen` nutzt
-`list_watch_pdf_paths(...)` nur zur Anzeige und veraendert keine Scanner-
-Stabilitaetsbeobachtungen.
+Rekursion dient dem Sammeln fuer die persistente Arbeitsliste, nicht der
+automatischen Verarbeitung. Der manuelle `Ergebnisse suchen` nutzt
+`list_watch_pdf_paths(...)` ohne Scanner-Stabilitaetsbeobachtungen und merkt
+gefundene PDFs direkt vor.
 
 Unterordner mit Namen wie `processed`, `failed`, `duplicates`, `duplicate`,
 `archive` oder `_archive` werden bei rekursiver Suche case-insensitive
 uebersprungen. Symlink-Verzeichnisse werden nicht rekursiv betreten.
 
-Sie startet keinen Worker, ruft kein `submit(...)` auf, schreibt keine Ergebnisse
-und bewegt keine Dateien. Bekannte Pfade kommen aus der Extractor-Liste,
-bestehenden Queue-Jobs und einer kleinen Session-Suppress-Liste (nur Anti-Spam
-innerhalb der laufenden GUI-Session, Eintrag erst nach erfolgreichem Enqueue).
+Die Auto-Suche startet keinen Worker, ruft kein `submit(...)` auf, schreibt keine
+Ergebnisse und bewegt keine Dateien. Bekannte Pfade kommen aus der Arbeitsliste
+und einer kleinen Session-Suppress-Liste (nur Anti-Spam innerhalb der laufenden
+GUI-Session, Eintrag erst nach erfolgreichem Vormerken).
 
-`Liste aktualisieren` und der Queue-Merge zeigen Queue-Jobs auch ohne vorherige
-GUI-Session in der Extractor-Liste an. `Direkt verarbeiten` ist fuer Queue-Zeilen
-blockiert, damit keine Verarbeitung am Ledger vorbei laeuft.
+`Aktualisieren` zeigt vorgemerkte Jobs auch ohne vorherige GUI-Session in der
+Extractor-Liste an. Normale Nutzer muessen dort nicht entscheiden, ob etwas in
+eine Queue gelegt werden muss.
 
 Das Scan-Intervall kommt aus der Runtime-Konfiguration und wird fuer die GUI gegen
 Busy-Loops begrenzt.
@@ -72,8 +76,7 @@ Busy-Loops begrenzt.
 
 - Keine PyQt-Abhaengigkeit in AREV2.
 - Keine dauerhaften Watchdog-/Worker-Prozesse aus der App.
-- `In Queue stellen` startet keinen Worker und keinen Watchdog.
-- `Auto-Suche starten` startet keinen externen Watchdog.
+- `Automatische Suche starten` startet keinen externen Watchdog.
 - Keine destruktiven Admin-Aktionen.
 - Keine Add-/Overwrite-Entscheidungen fuer Duplikate.
 - Keine `rules/*.json`-Aenderungen.
