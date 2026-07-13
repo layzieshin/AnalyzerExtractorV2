@@ -310,6 +310,42 @@ def merge_file_rows_with_queue(
     return merged
 
 
+def format_extractor_file_row(row: Mapping[str, object]) -> Dict[str, str]:
+    queue_status = _string_or_empty(row.get("queue_status"))
+    raw_error = _string_or_empty(row.get("last_error"))
+    return {
+        "file": _string_or_empty(row.get("file")),
+        "path": _string_or_empty(row.get("path")),
+        "source": _extractor_source_label(row.get("source")),
+        "queue_status": _extractor_queue_status_label(queue_status),
+        "job_id": _string_or_empty(row.get("job_id")),
+        "device_id": _string_or_empty(row.get("device_id")),
+        "last_error": format_extractor_error_label(raw_error) if queue_status == "FAILED" else "",
+        "action": _extractor_action_label(row.get("action")),
+    }
+
+
+def format_extractor_error_label(error: object) -> str:
+    err = _string_or_empty(error).strip()
+    if not err:
+        return ""
+    if err == "no_assay_detected":
+        return "Assay nicht erkannt"
+    if err == "validation_failed":
+        return "Validierung fehlgeschlagen"
+    if err == "max_attempts_exceeded":
+        return "Maximale Versuche erreicht"
+    if err.startswith("worker_submit_error:"):
+        return "Technischer Verarbeitungsfehler"
+    if err.startswith("excel_write_failed:"):
+        return "Excel-Schreibfehler"
+    if err.startswith("sqlite_write_failed:"):
+        return "SQLite-Schreibfehler"
+    if "content_split_failed" in err or "split_failed" in err or "split fehl" in err.lower():
+        return "Aufteilung fehlgeschlagen"
+    return "Technischer Fehler"
+
+
 def format_enqueue_result(job: object | Mapping[str, object]) -> str:
     row = format_queue_job_row(job)
     parts = [f"Queue: {row['status'] or '-'}", row["file"] or "?"]
@@ -465,6 +501,35 @@ def _duplicate_status_label(status: object) -> str:
     if value == "deleted":
         return "verworfen"
     return value
+
+
+def _extractor_source_label(source: object) -> str:
+    value = _string_or_empty(source)
+    return {
+        "test-app-auto-watch": "Automatisch gefunden",
+        "test-app-watch": "Aus Suchordner",
+        "watch": "Aus Suchordner",
+        "test-app-manual": "Manuell hinzugefügt",
+        "manual": "Manuell hinzugefügt",
+    }.get(value, value)
+
+
+def _extractor_queue_status_label(status: object) -> str:
+    value = _string_or_empty(status)
+    return {
+        "PENDING": "Wartet",
+        "PROCESSING": "In Arbeit",
+        "DONE": "Fertig",
+        "FAILED": "Fehler",
+    }.get(value, value)
+
+
+def _extractor_action_label(action: object) -> str:
+    value = _string_or_empty(action)
+    return {
+        "queued": "Wartet auf Extraktion",
+        "bereit": "Bereit",
+    }.get(value, value)
 
 
 def _duplicate_meta_lines(data: Mapping[str, Any], *, candidate: bool) -> List[str]:

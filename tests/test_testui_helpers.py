@@ -7,6 +7,8 @@ from src.testui.helpers import (
     format_duplicate_candidate_summary,
     format_duplicate_field_comparison,
     format_enqueue_result,
+    format_extractor_error_label,
+    format_extractor_file_row,
     format_job_result_summary,
     format_partial_writes_note,
     format_queue_job_row,
@@ -275,6 +277,55 @@ def test_test_app_presenters_format_device_queue_options_watch_and_validation():
     assert ok["status"] == "OK"
     assert bad["status"] == "FEHLER"
     assert bad["missing_files"] == "1"
+
+
+def test_format_extractor_file_row_translates_technical_values():
+    row = format_extractor_file_row(
+        {
+            "file": "auto.pdf",
+            "path": "C:/watch/auto.pdf",
+            "source": "test-app-auto-watch",
+            "queue_status": "PENDING",
+            "job_id": "job1",
+            "device_id": "dev1",
+            "last_error": "",
+            "action": "queued",
+        }
+    )
+
+    assert row["source"] == "Automatisch gefunden"
+    assert row["queue_status"] == "Wartet"
+    assert row["action"] == "Wartet auf Extraktion"
+    assert row["job_id"] == "job1"
+
+    manual = format_extractor_file_row({"source": "manual", "queue_status": "FAILED", "action": "bereit"})
+    assert manual["source"] == "Manuell hinzugefügt"
+    assert manual["queue_status"] == "Fehler"
+    assert manual["action"] == "Bereit"
+
+    unknown = format_extractor_file_row({"source": "custom", "queue_status": "PAUSED", "action": "review"})
+    assert unknown["source"] == "custom"
+    assert unknown["queue_status"] == "PAUSED"
+    assert unknown["action"] == "review"
+
+
+def test_format_extractor_error_label_translates_failed_job_errors():
+    assert format_extractor_error_label("no_assay_detected") == "Assay nicht erkannt"
+    assert format_extractor_error_label("validation_failed") == "Validierung fehlgeschlagen"
+    assert format_extractor_error_label("max_attempts_exceeded") == "Maximale Versuche erreicht"
+    assert format_extractor_error_label("worker_submit_error: boom") == "Technischer Verarbeitungsfehler"
+    assert format_extractor_error_label("excel_write_failed:(1):locked") == "Excel-Schreibfehler"
+    assert format_extractor_error_label("sqlite_write_failed:(1):locked") == "SQLite-Schreibfehler"
+    assert format_extractor_error_label("content_split_failed: assay missing") == "Aufteilung fehlgeschlagen"
+    assert format_extractor_error_label("unexpected") == "Technischer Fehler"
+
+
+def test_format_extractor_file_row_shows_friendly_error_only_for_failed_rows():
+    failed = format_extractor_file_row({"queue_status": "FAILED", "last_error": "no_assay_detected"})
+    pending = format_extractor_file_row({"queue_status": "PENDING", "last_error": "retry_requested"})
+
+    assert failed["last_error"] == "Assay nicht erkannt"
+    assert pending["last_error"] == ""
 
 
 def test_file_row_key_normalizes_equivalent_paths(tmp_path):

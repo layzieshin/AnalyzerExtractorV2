@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from interfaces.common.queue_worker import QueueWorkerConfig, process_next_pending
 from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
-from src.jobqueue.api import enqueue_pdf_job, list_jobs
+from src.jobqueue.api import enqueue_pdf_job, list_jobs, retry_failed_job
 from src.ruleresolver.api import validate_rules_integrity
 from src.runtime.api import list_devices, load_runtime_config, resolve_app_root
 from src.testui.api import (
@@ -18,6 +18,7 @@ from src.testui.api import (
     format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
     format_duplicate_field_comparison,
+    format_extractor_file_row,
     format_queue_job_row,
     format_runtime_options_summary,
     format_validation_status,
@@ -28,41 +29,6 @@ from src.testui.api import (
 from .watch_scan import InAppWatchScanner, list_watch_pdf_paths
 
 SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
-
-_SOURCE_LABELS = {
-    "test-app-auto-watch": "Automatisch gefunden",
-    "test-app-watch": "Aus Suchordner",
-    "watch": "Aus Suchordner",
-    "test-app-manual": "Manuell hinzugefügt",
-    "manual": "Manuell hinzugefügt",
-}
-_QUEUE_STATUS_LABELS = {
-    "PENDING": "Wartet",
-    "PROCESSING": "In Arbeit",
-    "DONE": "Fertig",
-    "FAILED": "Fehler",
-}
-_ACTION_LABELS = {
-    "queued": "Wartet auf Extraktion",
-    "bereit": "Bereit",
-}
-
-
-def _format_extractor_file_row(row: dict[str, str]) -> dict[str, str]:
-    source = str(row.get("source", "") or "")
-    queue_status = str(row.get("queue_status", "") or "")
-    action = str(row.get("action", "") or "")
-    return {
-        "file": str(row.get("file", "") or ""),
-        "path": str(row.get("path", "") or ""),
-        "source": _SOURCE_LABELS.get(source, source),
-        "queue_status": _QUEUE_STATUS_LABELS.get(queue_status, queue_status),
-        "job_id": str(row.get("job_id", "") or ""),
-        "device_id": str(row.get("device_id", "") or ""),
-        "last_error": str(row.get("last_error", "") or ""),
-        "action": _ACTION_LABELS.get(action, action),
-    }
-
 
 class TestApp(tk.Tk):
     """Production-shaped test shell; long-running process control is out of scope."""
@@ -157,6 +123,8 @@ class TestApp(tk.Tk):
             state=tk.DISABLED,
         )
         self.btn_stop_extraction.pack(side="left", padx=(6, 0))
+        self.btn_retry_failed = tk.Button(controls, text="Erneut starten", command=self.retry_selected_failed_jobs)
+        self.btn_retry_failed.pack(side="left", padx=(6, 0))
         self.btn_refresh_queue = tk.Button(controls, text="Aktualisieren", command=self.refresh_queue)
         self.btn_refresh_queue.pack(side="left", padx=(6, 0))
         self.btn_auto_watch_start = tk.Button(controls, text="Automatische Suche starten", command=self.start_auto_watch)
@@ -171,6 +139,7 @@ class TestApp(tk.Tk):
                 self.btn_scan_watch,
                 self.btn_pick_files,
                 self.btn_start_extraction,
+                self.btn_retry_failed,
                 self.btn_refresh_queue,
             ]
         )
@@ -479,31 +448,39 @@ class TestApp(tk.Tk):
     def scan_watch_dir(self) -> None:
         recursive = self.var_watch_recursive.get()
         paths = list_watch_pdf_paths(self.var_watch_dir.get().strip(), recursive=recursive)
-        queued_count, error_count = self._enqueue_paths(paths, source="test-app-watch")
+        queued_count, skipped_count, error_count = self._enqueue_paths(paths, source="test-app-watch")
         self.refresh_queue()
         recursive_label = "ja" if recursive else "nein"
         self._log(
             f"Ergebnisse gesucht: {len(paths)} PDF(s), vorgemerkt={queued_count}, "
-            f"Fehler={error_count}, rekursiv={recursive_label}"
+            f"übersprungen={skipped_count}, Fehler={error_count}, rekursiv={recursive_label}"
         )
 
     def pick_manual_files(self) -> None:
         files = filedialog.askopenfilenames(title="PDFs waehlen", filetypes=[("PDF Dateien", "*.pdf")])
-        queued_count, error_count = self._enqueue_paths(files, source="test-app-manual")
+        queued_count, skipped_count, error_count = self._enqueue_paths(files, source="test-app-manual")
         self.refresh_queue()
-        self._log(f"Dateien hinzugefügt: {len(files)} PDF(s), vorgemerkt={queued_count}, Fehler={error_count}")
+        self._log(
+            f"Dateien hinzugefügt: {len(files)} PDF(s), vorgemerkt={queued_count}, "
+            f"übersprungen={skipped_count}, Fehler={error_count}"
+        )
 
-    def _enqueue_paths(self, paths: list[str] | tuple[str, ...], *, source: str) -> tuple[int, int]:
+    def _enqueue_paths(self, paths: list[str] | tuple[str, ...], *, source: str) -> tuple[int, int, int]:
         queued_count = 0
+        skipped_count = 0
         error_count = 0
         for path in paths:
             try:
-                enqueue_pdf_job(str(self.project_root), str(path), source=source)
-                queued_count += 1
+                job = enqueue_pdf_job(str(self.project_root), str(path), source=source)
+                status = str(job.get("status", "") if isinstance(job, dict) else getattr(job, "status", ""))
+                if status == "PENDING":
+                    queued_count += 1
+                else:
+                    skipped_count += 1
             except Exception as e:
                 error_count += 1
                 self._log(f"Vormerken fehlgeschlagen bei {Path(path).name}: {e}")
-        return queued_count, error_count
+        return queued_count, skipped_count, error_count
 
     def _upsert_file_rows(self, rows: list[dict[str, str]], *, replace_source: str | None = None) -> None:
         if replace_source is not None:
@@ -525,7 +502,7 @@ class TestApp(tk.Tk):
         for item in self.tree_files.get_children():
             self.tree_files.delete(item)
         for key, row in self._watch_rows.items():
-            display = _format_extractor_file_row(row)
+            display = format_extractor_file_row(row)
             self.tree_files.insert(
                 "",
                 tk.END,
@@ -557,6 +534,30 @@ class TestApp(tk.Tk):
 
     def start_selected_files(self) -> None:
         self.start_extraction()
+
+    def retry_selected_failed_jobs(self) -> None:
+        selected = list(self.tree_files.selection())
+        if not selected:
+            messagebox.showinfo("Arbeitsliste", "Bitte fehlgeschlagene Ergebnisse auswählen.")
+            return
+        restarted = 0
+        skipped = 0
+        for key in selected:
+            row = self._watch_rows.get(str(key))
+            if not row:
+                skipped += 1
+                continue
+            if row.get("queue_status") != "FAILED" or not row.get("job_id"):
+                skipped += 1
+                continue
+            try:
+                retry_failed_job(str(self.project_root), row["job_id"])
+                restarted += 1
+            except Exception as e:
+                skipped += 1
+                self._log(f"Erneut starten fehlgeschlagen: {row.get('file', row.get('job_id', '?'))} | {e}")
+        self.refresh_queue()
+        self._log(f"Erneut gestartet: {restarted} Ergebnis(se). Übersprungen: {skipped}.")
 
     def stop_extraction(self) -> None:
         if not self._extraction_running:

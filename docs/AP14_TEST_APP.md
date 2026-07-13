@@ -35,6 +35,8 @@ Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
   Worker-Logik wie der Headless-Worker.
 - `Extraktion stoppen` stoppt kooperativ nach dem aktuell laufenden Ergebnis.
   Bereits gestartete PDF-Verarbeitung wird nicht hart abgebrochen.
+- `Erneut starten` setzt ausgewaehlte fehlgeschlagene Ergebnisse kontrolliert
+  wieder auf `Wartet`; fertige oder bereits wartende Ergebnisse werden uebersprungen.
 - `Aktualisieren` merged den internen Verarbeitungsstatus aus
   `src.jobqueue.api.list_jobs(...)`.
 - `Automatische Suche starten` scannt den Watch-Ordner zyklisch, solange die App offen ist.
@@ -53,6 +55,10 @@ nutzt dieselbe Funktion.
 Die Arbeitsliste wird waehrend der Verarbeitung nach jedem Ergebnis aktualisiert.
 Status und Log zeigen den aktuellen Zaehler, die Datei und den neuen Job-Status.
 Dadurch bleiben grosse Arbeitslisten sichtbar kontrollierbar.
+
+Fehlgeschlagene Jobs bleiben fehlgeschlagen, bis der Nutzer sie explizit erneut
+startet. Erneutes Suchen, Hinzufuegen oder die Auto-Suche reaktiviert FAILED-Jobs
+nicht automatisch.
 
 Die Auto-Suche ist ein sichtbarer In-App-Watchdog light. Sie erkennt stabile neue
 PDFs im Watch-Ordner (optional rekursiv) und merkt sie per

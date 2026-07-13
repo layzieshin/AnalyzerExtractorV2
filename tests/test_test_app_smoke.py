@@ -32,13 +32,15 @@ def test_test_app_extractor_uses_friendly_controls_and_columns(tmp_path) -> None
             app.btn_scan_watch.cget("text"),
             app.btn_pick_files.cget("text"),
             app.btn_start_extraction.cget("text"),
+            app.btn_retry_failed.cget("text"),
             app.btn_refresh_queue.cget("text"),
             app.btn_auto_watch_start.cget("text"),
             app.btn_auto_watch_stop.cget("text"),
         }
         assert "Ergebnisse suchen" in button_texts
-        assert "Dateien hinzufügen" in button_texts
+        assert app.btn_pick_files.cget("text").startswith("Dateien")
         assert "Extraktion starten" in button_texts
+        assert "Erneut starten" in button_texts
         assert app.btn_stop_extraction.cget("text") == "Extraktion stoppen"
         assert app.btn_stop_extraction.cget("state") == tk.DISABLED
         assert "Aktualisieren" in button_texts
@@ -259,7 +261,32 @@ def test_test_app_pick_manual_files_enqueues_immediately(tmp_path, monkeypatch) 
         app.pick_manual_files()
 
         assert enqueue_calls == [(str(tmp_path.resolve()), str(pdf), "test-app-manual")]
-        assert any("Dateien hinzugefügt: 1 PDF(s), vorgemerkt=1, Fehler=0" in line for line in logs)
+        assert any("Dateien hinzugefügt: 1 PDF(s), vorgemerkt=1, übersprungen=0, Fehler=0" in line for line in logs)
+    finally:
+        app.destroy()
+
+
+def test_test_app_enqueue_paths_counts_existing_failed_as_skipped(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    pdf.write_bytes(b"pdf")
+
+    def fake_enqueue(project_root: str, pdf_path: str, source: str = "watchdog") -> dict[str, str]:
+        return {
+            "job_id": "job1",
+            "pdf_path": pdf_path,
+            "status": "FAILED",
+            "updated_at": "u",
+            "source": source,
+            "worker_id": "",
+            "attempts": 1,
+            "last_error": "no_assay_detected",
+        }
+
+    monkeypatch.setattr(test_app, "enqueue_pdf_job", fake_enqueue)
+
+    app = _make_test_app(tmp_path)
+    try:
+        assert app._enqueue_paths((str(pdf),), source="test-app-manual") == (0, 1, 0)
     finally:
         app.destroy()
 
@@ -416,6 +443,75 @@ def test_test_app_start_extraction_reports_empty_worklist(tmp_path, monkeypatch)
         app.destroy()
 
 
+def test_test_app_retry_failed_requires_selection(tmp_path, monkeypatch) -> None:
+    messages: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(test_app, "messagebox", type("MB", (), {"showinfo": staticmethod(lambda title, msg: messages.append((title, msg)))})())
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.retry_selected_failed_jobs()
+
+        assert messages == [("Arbeitsliste", "Bitte fehlgeschlagene Ergebnisse auswählen.")]
+    finally:
+        app.destroy()
+
+
+def test_test_app_retry_failed_jobs_retries_only_failed_selection(tmp_path, monkeypatch) -> None:
+    failed = tmp_path / "failed.pdf"
+    done = tmp_path / "done.pdf"
+    calls: list[tuple[str, str]] = []
+    logs: list[str] = []
+    refresh_calls: list[int] = []
+
+    def fake_retry(project_root: str, job_id: str):
+        calls.append((project_root, job_id))
+
+    monkeypatch.setattr(test_app, "retry_failed_job", fake_retry)
+    monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
+    monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: refresh_calls.append(1))
+
+    app = _make_test_app(tmp_path)
+    try:
+        refresh_calls.clear()
+        app._upsert_file_rows(
+            [
+                {
+                    "file": "failed.pdf",
+                    "path": str(failed),
+                    "source": "test-app-manual",
+                    "queue_status": "FAILED",
+                    "job_id": "failed1",
+                    "device_id": "",
+                    "last_error": "no_assay_detected",
+                    "action": "queued",
+                },
+                {
+                    "file": "done.pdf",
+                    "path": str(done),
+                    "source": "test-app-manual",
+                    "queue_status": "DONE",
+                    "job_id": "done1",
+                    "device_id": "",
+                    "last_error": "",
+                    "action": "queued",
+                },
+            ]
+        )
+        app.tree_files.selection_set(
+            test_app.normalize_file_row_key(failed),
+            test_app.normalize_file_row_key(done),
+        )
+
+        app.retry_selected_failed_jobs()
+
+        assert calls == [(str(tmp_path.resolve()), "failed1")]
+        assert refresh_calls == [1]
+        assert any("Erneut gestartet: 1 Ergebnis(se). Übersprungen: 1." in line for line in logs)
+    finally:
+        app.destroy()
+
+
 def test_test_app_process_queue_uses_common_worker(tmp_path, monkeypatch) -> None:
     calls: list[object] = []
     logs: list[str] = []
@@ -567,7 +663,7 @@ def test_test_app_manual_watch_scan_recursive_queues_results(tmp_path, monkeypat
 
         assert enqueue_calls == [(str(tmp_path.resolve()), str(nested.resolve(strict=False)), "test-app-watch")]
         assert len(logs) == 1
-        assert "Ergebnisse gesucht: 1 PDF(s), vorgemerkt=1, Fehler=0, rekursiv=ja" in logs[0]
+        assert "Ergebnisse gesucht: 1 PDF(s), vorgemerkt=1, übersprungen=0, Fehler=0, rekursiv=ja" in logs[0]
     finally:
         app.destroy()
 
