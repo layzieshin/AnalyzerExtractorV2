@@ -4,7 +4,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 
-from src.rulesuite.api import create_draft, delete_ruleset, list_rulesets
+from src.rulesuite.api import adopt_candidate_fields, create_draft, delete_ruleset, list_rulesets
 
 from .wizard import NewRulesetWizard
 
@@ -46,6 +46,56 @@ class ManageMixin:
         if not sel:
             return None
         return str(self.tree_rulesets.item(sel[0], "values")[0]).strip()
+
+    def _selected_ruleset_row(self) -> dict[str, object] | None:
+        key = self._selected_ruleset_key()
+        if not key:
+            return None
+        try:
+            for row in list_rulesets(self.var_root.get().strip()):
+                if str(row.get("assay_key", "")).strip() == key:
+                    return row
+        except Exception:
+            return None
+        return None
+
+    def on_adopt_fields_from_ruleset(self) -> None:
+        if not self.current_draft_path:
+            self._set_hint("Bitte zuerst einen Draft laden.")
+            return
+        source_row = self._selected_ruleset_row()
+        if source_row is None:
+            self._set_hint("Bitte zuerst ein Quell-Regelwerk in der Verwaltungsliste auswaehlen.")
+            return
+
+        source_key = str(source_row.get("assay_key", "")).strip()
+        source_name = str(source_row.get("assay_name", "")).strip() or source_key
+        candidate_source = {"source_assay_key": source_key}
+        try:
+            result = adopt_candidate_fields(
+                self.var_root.get().strip(),
+                self.current_draft_path,
+                candidate_source,
+            )
+        except Exception as exc:
+            messagebox.showerror("Felder uebernehmen", str(exc))
+            return
+
+        self.on_load_draft_into_editor()
+        summary = (
+            f"Felder aus Regelwerk uebernommen.\n"
+            f"Quelle: {source_key} / {source_name}\n"
+            f"Ziel: {result.get('draft_path', self.current_draft_path)}\n"
+            f"uebernommen: {len(result.get('adopted', []))}\n"
+            f"uebersprungen (vorhanden): {len(result.get('skipped_existing', []))}\n"
+            f"fehlend: {len(result.get('missing', []))}"
+        )
+        self._log(summary.replace("\n", " | "))
+        self._set_hint(
+            f"Felder uebernommen: {len(result.get('adopted', []))}; "
+            f"uebersprungen: {len(result.get('skipped_existing', []))}."
+        )
+        messagebox.showinfo("Felder uebernehmen", summary)
 
     def on_open_wizard(self) -> None:
         NewRulesetWizard(

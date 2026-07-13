@@ -126,6 +126,11 @@ class UiBuilderMixin:
         tk.Button(manage_btns, text="Ansehen/Bearbeiten", command=self.on_manage_edit_selected).pack(side="left", padx=(6, 0))
         tk.Button(manage_btns, text="Loeschen...", command=self.on_manage_delete_selected).pack(side="left", padx=(6, 0))
         tk.Button(manage_btns, text="Aktualisieren", command=self._refresh_ruleset_overview).pack(side="left", padx=(6, 0))
+        tk.Button(
+            manage_btns,
+            text="Felder aus Regelwerk uebernehmen",
+            command=self.on_adopt_fields_from_ruleset,
+        ).pack(side="left", padx=(6, 0))
 
         self.tree_rulesets = ttk.Treeview(
             manage,
