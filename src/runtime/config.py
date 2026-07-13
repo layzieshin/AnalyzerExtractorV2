@@ -13,7 +13,9 @@ class RuntimeConfig:
     output_mode: str = "both"
     sqlite_path: str | None = None
     watch_dir: str | None = None
+    device_id: str | None = None
     scan_interval_s: float = 3.0
+    watch_stable_window_s: float = 1.0
     worker_poll_interval_s: float = 2.0
     queue_processing_ttl_s: float = 300.0
     queue_claim_lock_ttl_s: float = 120.0
@@ -40,8 +42,10 @@ def load_runtime_config(project_root: str | Path) -> RuntimeConfig:
 
     sqlite_path = os.getenv("ARE_SQLITE_PATH", "").strip() or str(root / "output" / "final" / "results.sqlite3")
     watch_dir = os.getenv("ARE_WATCH_DIR", "").strip() or str(root / "input" / "watch")
+    device_id = os.getenv("ARE_DEVICE_ID", "").strip() or None
 
     scan_interval = _read_float_env("ARE_SCAN_INTERVAL_S", 3.0)
+    watch_stable_window = _read_float_env("ARE_WATCH_STABLE_WINDOW_S", 1.0)
     worker_poll_interval = _read_float_env("ARE_WORKER_POLL_INTERVAL_S", 2.0)
     queue_processing_ttl = _read_float_env("ARE_QUEUE_PROCESSING_TTL_S", 300.0)
     queue_claim_lock_ttl = _read_float_env("ARE_QUEUE_CLAIM_LOCK_TTL_S", 120.0)
@@ -54,7 +58,9 @@ def load_runtime_config(project_root: str | Path) -> RuntimeConfig:
         output_mode=output_mode,
         sqlite_path=sqlite_path,
         watch_dir=watch_dir,
+        device_id=device_id,
         scan_interval_s=scan_interval,
+        watch_stable_window_s=watch_stable_window,
         worker_poll_interval_s=worker_poll_interval,
         queue_processing_ttl_s=queue_processing_ttl,
         queue_claim_lock_ttl_s=queue_claim_lock_ttl,
