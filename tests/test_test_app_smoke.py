@@ -81,6 +81,44 @@ def test_main_passes_project_root_to_test_app(tmp_path, monkeypatch) -> None:
     assert captured["mainloop"] is True
 
 
+def test_open_rule_editor_uses_same_exe_in_frozen_mode(tmp_path, monkeypatch) -> None:
+    try:
+        app = test_app.TestApp(project_root=tmp_path)
+    except tk.TclError as e:
+        pytest.skip(f"Tk not available: {e}")
+
+    calls: list[dict[str, object]] = []
+
+    def fake_popen(command, cwd=None, env=None):
+        calls.append({"command": command, "cwd": cwd, "env": env})
+
+        class _Proc:
+            pass
+
+        return _Proc()
+
+    try:
+        monkeypatch.setattr(test_app.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(test_app.sys, "executable", str(tmp_path / "AnalyzerResultExtractorV2.exe"))
+        monkeypatch.setattr(test_app.subprocess, "Popen", fake_popen)
+
+        app.open_rule_editor()
+
+        assert calls == [
+            {
+                "command": [str(tmp_path / "AnalyzerResultExtractorV2.exe")],
+                "cwd": str(tmp_path.resolve()),
+                "env": calls[0]["env"],
+            }
+        ]
+        env = calls[0]["env"]
+        assert isinstance(env, dict)
+        assert env["ARE_HOME"] == str(tmp_path.resolve())
+        assert env["ARE_START_RULE_EDITOR"] == "1"
+    finally:
+        app.destroy()
+
+
 def test_test_app_default_root_uses_are_home(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("ARE_HOME", str(tmp_path))
     try:

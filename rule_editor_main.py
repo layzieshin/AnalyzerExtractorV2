@@ -11,6 +11,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
+from src.runtime.api import resolve_app_root
+
 from rule_editor.draft_actions import DraftMixin
 from rule_editor.field_actions import FieldsMixin
 from rule_editor.guide import GuideMixin
@@ -38,12 +40,12 @@ class RuleEditorWindow(
     ManageMixin,
     tk.Tk,
 ):
-    def __init__(self) -> None:
+    def __init__(self, project_root: str | Path | None = None) -> None:
         super().__init__()
         self.title("AnalyzerResultExtractorV2 - Visual Rule Editor")
         self.geometry("1520x940")
 
-        self.project_root = Path(__file__).resolve().parent
+        self.project_root = Path(project_root) if project_root is not None else resolve_app_root(Path(__file__))
         self.current_draft_path: str | None = None
         self.assay_block_text: str = ""
 

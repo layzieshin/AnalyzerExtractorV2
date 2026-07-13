@@ -28,6 +28,7 @@ REQUIRED_IMPORTS = [
     "openpyxl",
     "tkinter",
     "interfaces.tk.test_app",
+    "rule_editor_main",
     "src.parser.api",
     "src.normalizer.api",
     "src.assaychooser.api",
@@ -126,6 +127,8 @@ def _run_pyinstaller() -> None:
         "pymupdf",
         "--hidden-import",
         "openpyxl",
+        "--hidden-import",
+        "rule_editor_main",
     ]
 
     for package_name in ("fitz", "pymupdf", "openpyxl"):

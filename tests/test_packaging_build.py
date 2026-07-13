@@ -23,6 +23,7 @@ def test_build_onedir_required_imports_include_test_app_modules() -> None:
     build = _load_build_onedir()
     required = set(build.REQUIRED_IMPORTS)
     assert "interfaces.tk.test_app" in required
+    assert "rule_editor_main" in required
     assert "src.assaycandidate.api" in required
     assert "src.jobqueue.api" in required
     assert "src.testui.api" in required

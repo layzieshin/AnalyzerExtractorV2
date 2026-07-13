@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -807,6 +808,14 @@ class TestApp(tk.Tk):
         self._log(f"Rules validiert: {status['summary']}")
 
     def open_rule_editor(self) -> None:
+        if getattr(sys, "frozen", False):
+            env = os.environ.copy()
+            env["ARE_HOME"] = str(self.project_root)
+            env["ARE_START_RULE_EDITOR"] = "1"
+            subprocess.Popen([sys.executable], cwd=str(self.project_root), env=env)
+            self._log("Rule Editor gestartet.")
+            return
+
         script = self.project_root / "rule_editor_main.py"
         if not script.exists():
             messagebox.showerror("Rule Editor", f"Nicht gefunden:\n{script}")
