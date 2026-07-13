@@ -32,17 +32,25 @@ Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
 - `Direkt verarbeiten` ruft `src.jobcontroller.api.submit(...)` fuer die Auswahl auf.
 - `In Queue stellen` ruft `src.jobqueue.api.enqueue_pdf_job(...)` fuer die Auswahl auf.
 - `Liste aktualisieren` merged den Queue-Status aus `src.jobqueue.api.list_jobs(...)`.
+- `Auto-Suche starten` scannt den Watch-Ordner zyklisch, solange die App offen ist.
+- `Auto-Suche stoppen` beendet den geplanten In-App-Scan.
 
 Watch- und manuelle Eintraege teilen dieselbe Arbeitsliste. Gleiche PDFs werden
 ueber normalisierte absolute Pfade dedupliziert. Wenn keine Zeile ausgewaehlt
 ist, arbeiten `Direkt verarbeiten` und `In Queue stellen` auf allen sichtbaren
 Dateizeilen.
 
+Die Auto-Suche ist ein sichtbarer In-App-Watchdog light. Sie nimmt nur stabile
+PDFs in die Liste auf. Sie startet keinen Worker, schreibt nichts in die Queue,
+ruft keine Extraktion auf und bewegt keine Dateien. Das Scan-Intervall kommt aus
+der Runtime-Konfiguration und wird fuer die GUI gegen Busy-Loops begrenzt.
+
 ## Grenzen
 
 - Keine PyQt-Abhaengigkeit in AREV2.
 - Keine dauerhaften Watchdog-/Worker-Prozesse aus der App.
 - `In Queue stellen` startet keinen Worker und keinen Watchdog.
+- `Auto-Suche starten` startet keinen externen Watchdog.
 - Keine destruktiven Admin-Aktionen.
 - Keine Add-/Overwrite-Entscheidungen fuer Duplikate.
 - Keine `rules/*.json`-Aenderungen.

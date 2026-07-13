@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -29,6 +30,8 @@ from src.testui.api import (
     normalize_file_row_key,
 )
 
+from .watch_scan import InAppWatchScanner
+
 SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
 
 
@@ -51,8 +54,17 @@ class TestApp(tk.Tk):
         self.var_watch_mode = tk.StringVar(value="Ueberwachter Ordner")
         self.var_device_choice = tk.StringVar(value="")
         self.var_duplicate_status = tk.StringVar(value="pending")
+        self.var_auto_watch_status = tk.StringVar(value="Auto-Suche: inaktiv")
+        self.var_auto_watch_last_scan = tk.StringVar(value="Letzter Scan: -")
+        self.var_auto_watch_found = tk.StringVar(value="Neue PDFs: -")
         self.var_status = tk.StringVar(value="Bereit.")
         self.var_technical_status = tk.StringVar(value="idle")
+        self._auto_watch_interval_s = max(0.5, float(cfg.scan_interval_s or 3.0))
+        self._auto_watch_stable_window_s = float(cfg.watch_stable_window_s)
+        self._auto_watch_active = False
+        self._auto_watch_after_id: str | None = None
+        self._auto_watch_scanner = InAppWatchScanner()
+        self._auto_watch_last_warning = ""
         self._device_choice_to_id: dict[str, str] = {}
         self._watch_rows: dict[str, dict[str, str]] = {}
         self._duplicate_details: dict[int, dict[str, object]] = {}
@@ -63,6 +75,7 @@ class TestApp(tk.Tk):
         self._refresh_devices()
         self._refresh_options_summary()
         self.refresh_queue()
+        self.protocol("WM_DELETE_WINDOW", self.close_app)
 
     def _build_ui(self) -> None:
         self.notebook = ttk.Notebook(self)
@@ -101,6 +114,10 @@ class TestApp(tk.Tk):
         self.btn_enqueue.pack(side="left", padx=(6, 0))
         self.btn_refresh_queue = tk.Button(controls, text="Liste aktualisieren", command=self.refresh_queue)
         self.btn_refresh_queue.pack(side="left", padx=(6, 0))
+        self.btn_auto_watch_start = tk.Button(controls, text="Auto-Suche starten", command=self.start_auto_watch)
+        self.btn_auto_watch_start.pack(side="left", padx=(18, 0))
+        self.btn_auto_watch_stop = tk.Button(controls, text="Auto-Suche stoppen", command=self.stop_auto_watch)
+        self.btn_auto_watch_stop.pack(side="left", padx=(6, 0))
         self._action_buttons.extend(
             [
                 self.btn_scan_watch,
@@ -110,6 +127,12 @@ class TestApp(tk.Tk):
                 self.btn_refresh_queue,
             ]
         )
+
+        auto_status = tk.Frame(parent)
+        auto_status.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(auto_status, textvariable=self.var_auto_watch_status, anchor="w", width=26).pack(side="left")
+        tk.Label(auto_status, textvariable=self.var_auto_watch_last_scan, anchor="w", width=26).pack(side="left")
+        tk.Label(auto_status, textvariable=self.var_auto_watch_found, anchor="w").pack(side="left", fill="x", expand=True)
 
         self.tree_files = ttk.Treeview(
             parent,
@@ -309,6 +332,84 @@ class TestApp(tk.Tk):
         if selected:
             self.var_watch_dir.set(selected)
             self._refresh_options_summary()
+
+    def start_auto_watch(self) -> None:
+        if self._auto_watch_active:
+            return
+        self._auto_watch_active = True
+        self._auto_watch_last_warning = ""
+        self.var_auto_watch_status.set("Auto-Suche: aktiv")
+        self._log("Auto-Suche gestartet.")
+        self._schedule_auto_watch(delay_ms=0)
+
+    def stop_auto_watch(self, *, log: bool = True) -> None:
+        was_active = self._auto_watch_active
+        self._auto_watch_active = False
+        if self._auto_watch_after_id is not None:
+            try:
+                self.after_cancel(self._auto_watch_after_id)
+            except tk.TclError:
+                pass
+            self._auto_watch_after_id = None
+        self.var_auto_watch_status.set("Auto-Suche: inaktiv")
+        if log and was_active:
+            self._log("Auto-Suche gestoppt.")
+
+    def _schedule_auto_watch(self, *, delay_ms: int | None = None) -> None:
+        if not self._auto_watch_active:
+            return
+        delay = int(self._auto_watch_interval_s * 1000) if delay_ms is None else max(0, delay_ms)
+        self._auto_watch_after_id = self.after(delay, self._run_auto_watch_scan)
+
+    def _run_auto_watch_scan(self) -> None:
+        self._auto_watch_after_id = None
+        if not self._auto_watch_active:
+            return
+        try:
+            if self._busy:
+                self.var_auto_watch_status.set("Auto-Suche: aktiv")
+                return
+
+            known_paths = {row.get("path", "") for row in self._watch_rows.values()}
+            result = self._auto_watch_scanner.scan(
+                self.var_watch_dir.get().strip(),
+                known_paths,
+                self._auto_watch_stable_window_s,
+            )
+            self.var_auto_watch_last_scan.set(f"Letzter Scan: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            self.var_auto_watch_found.set(
+                f"Neue PDFs: {len(result.stable_new_paths)} | Beobachtet: {result.observed_count}"
+            )
+
+            if result.warning:
+                self.var_auto_watch_status.set("Auto-Suche: Warnung")
+                if result.warning != self._auto_watch_last_warning:
+                    self._log(f"Auto-Suche Warnung: {result.warning}")
+                self._auto_watch_last_warning = result.warning
+                return
+
+            self.var_auto_watch_status.set("Auto-Suche: aktiv")
+            if self._auto_watch_last_warning:
+                self._log("Auto-Suche wieder OK.")
+                self._auto_watch_last_warning = ""
+
+            if result.stable_new_paths:
+                rows = [format_watch_file_row(path, source="watch") for path in result.stable_new_paths]
+                self._upsert_file_rows(rows)
+                self.refresh_queue()
+                self._log(
+                    f"Auto-Suche: {len(result.stable_new_paths)} neue PDF(s) aufgenommen "
+                    f"aus {self.var_watch_dir.get().strip()}"
+                )
+        except Exception as e:
+            warning = f"auto_watch_error: {e}"
+            self.var_auto_watch_status.set("Auto-Suche: Warnung")
+            if warning != self._auto_watch_last_warning:
+                self._log(f"Auto-Suche Warnung: {warning}")
+            self._auto_watch_last_warning = warning
+        finally:
+            if self._auto_watch_active:
+                self._schedule_auto_watch()
 
     def scan_watch_dir(self) -> None:
         watch = Path(self.var_watch_dir.get().strip())
@@ -599,6 +700,15 @@ class TestApp(tk.Tk):
         discard_duplicate_candidate(str(self._sqlite_path()), candidate_id, decided_by="test-app")
         self._log(f"Duplicate-Kandidat verworfen: {candidate_id}")
         self.refresh_duplicates()
+
+    def close_app(self) -> None:
+        self.stop_auto_watch(log=False)
+        self.destroy()
+
+    def destroy(self) -> None:
+        if getattr(self, "_auto_watch_active", False) or getattr(self, "_auto_watch_after_id", None):
+            self.stop_auto_watch(log=False)
+        super().destroy()
 
 
 def main() -> None:

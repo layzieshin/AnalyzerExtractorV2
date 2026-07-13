@@ -57,3 +57,47 @@ def test_test_app_action_snapshot_contains_plain_values(tmp_path) -> None:
         assert snapshot["rows"] == list(app._watch_rows.values())
     finally:
         app.destroy()
+
+
+def test_test_app_auto_watch_start_stop_controls_after_callback(tmp_path) -> None:
+    try:
+        app = test_app.TestApp(project_root=tmp_path)
+    except tk.TclError as e:
+        pytest.skip(f"Tk not available: {e}")
+    try:
+        app.start_auto_watch()
+
+        assert app._auto_watch_active is True
+        assert app._auto_watch_after_id is not None
+
+        app.stop_auto_watch()
+
+        assert app._auto_watch_active is False
+        assert app._auto_watch_after_id is None
+        assert app.var_auto_watch_status.get() == "Auto-Suche: inaktiv"
+    finally:
+        app.destroy()
+
+
+def test_test_app_auto_watch_skips_scan_while_busy(tmp_path) -> None:
+    try:
+        app = test_app.TestApp(project_root=tmp_path)
+    except tk.TclError as e:
+        pytest.skip(f"Tk not available: {e}")
+    try:
+        watch = tmp_path / "watch"
+        watch.mkdir()
+        (watch / "sample.pdf").write_bytes(b"a")
+        app.var_watch_dir.set(str(watch))
+        app._auto_watch_stable_window_s = 0
+        app._auto_watch_active = True
+        app._busy = True
+
+        app._run_auto_watch_scan()
+
+        assert app._watch_rows == {}
+        assert app._auto_watch_after_id is not None
+    finally:
+        app._busy = False
+        app.stop_auto_watch(log=False)
+        app.destroy()
