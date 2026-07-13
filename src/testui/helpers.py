@@ -422,11 +422,12 @@ def format_rework_item_detail(item: Mapping[str, object]) -> str:
     lines = [
         f"Datei: {_string_or_empty(item.get('file'))}",
         f"Job-ID: {_string_or_empty(item.get('job_id'))}",
-        f"PDF: {_string_or_empty(item.get('pdf_path'))}",
+        f"PDF-Pfad: {_string_or_empty(item.get('pdf_path'))}",
         f"Status: {_extractor_queue_status_label(item.get('queue_status'))}",
-        f"Fehler: {_string_or_empty(item.get('error_label'))}",
+        f"Fehlerklasse: {_string_or_empty(item.get('error_label'))}",
         f"Queue-Fehler: {_string_or_empty(item.get('queue_error')) or '-'}",
         f"State-Fehler: {_string_or_empty(item.get('state_error')) or '-'}",
+        f"Root-Cause: {_string_or_empty(item.get('root_error')) or '-'}",
         f"Kontext: {_string_or_empty(item.get('context_label')) or '-'}",
         f"Job-State: {_string_or_empty(item.get('state_path')) or '-'}",
     ]
@@ -447,6 +448,97 @@ def format_rework_item_detail(item: Mapping[str, object]) -> str:
     else:
         lines.append("Block dumps: -")
     return "\n".join(lines)
+
+
+REWORK_FILTER_LABELS = (
+    "Alle",
+    "Assay nicht erkannt",
+    "Regelset unvollständig",
+    "Aufteilung fehlgeschlagen",
+)
+
+
+def filter_rework_items(
+    items: List[Mapping[str, object]],
+    error_label: str = "Alle",
+) -> List[Dict[str, Any]]:
+    if error_label in ("", "Alle"):
+        return [dict(item) for item in items]
+    if error_label not in REWORK_FILTER_LABELS:
+        return []
+    return [
+        dict(item)
+        for item in items
+        if _string_or_empty(item.get("error_label")) == error_label
+    ]
+
+
+def resolve_rework_context_source(item: Mapping[str, object]) -> tuple[str, str]:
+    path = _string_or_empty(item.get("normalized_dump"))
+    label = "Normalisierter Text"
+    if path and Path(path).exists():
+        return label, path
+
+    block_dumps = item.get("block_dumps")
+    if isinstance(block_dumps, Mapping):
+        for key in sorted(block_dumps.keys(), key=lambda value: str(value).casefold()):
+            candidate = _string_or_empty(block_dumps[key])
+            if candidate and Path(candidate).exists():
+                return f"Assay-Block {key}", candidate
+        if block_dumps:
+            first = sorted(block_dumps.keys(), key=lambda value: str(value).casefold())[0]
+            candidate = _string_or_empty(block_dumps[first])
+            if candidate:
+                return f"Assay-Block {first}", candidate
+
+    if path:
+        return "Normalisierter Text (fehlend)", path
+    return "", ""
+
+
+def format_rework_context_text(
+    item: Mapping[str, object],
+    content: str | None,
+    context_label: str,
+    context_path: str,
+) -> str:
+    header = [
+        f"Kontexttyp: {context_label or '-'}",
+        f"PDF-Pfad: {_string_or_empty(item.get('pdf_path')) or '-'}",
+        f"Dump-Pfad: {context_path or '-'}",
+        f"Fehlerklasse: {_string_or_empty(item.get('error_label')) or '-'}",
+        f"Queue-Fehler: {_string_or_empty(item.get('queue_error')) or '-'}",
+        f"State-Fehler: {_string_or_empty(item.get('state_error')) or '-'}",
+        f"Root-Cause: {_string_or_empty(item.get('root_error')) or '-'}",
+    ]
+    if content is not None:
+        body = _format_numbered_lines(content)
+    elif not context_path:
+        body = "Kontext: nicht vorhanden"
+    elif not Path(context_path).exists():
+        body = f"Dump-Datei nicht vorhanden:\n{context_path}"
+    else:
+        body = f"Dump-Datei konnte nicht gelesen werden:\n{context_path}"
+    return "\n".join(header) + "\n\n--- Inhalt ---\n" + body
+
+
+def preferred_rework_dump_path(item: Mapping[str, object]) -> str:
+    normalized_dump = _string_or_empty(item.get("normalized_dump"))
+    if normalized_dump:
+        return normalized_dump
+    block_dumps = item.get("block_dumps")
+    if isinstance(block_dumps, Mapping) and block_dumps:
+        first = sorted(block_dumps.keys(), key=lambda value: str(value).casefold())[0]
+        return _string_or_empty(block_dumps[first])
+    return ""
+
+
+def _format_numbered_lines(content: str) -> str:
+    lines = content.splitlines()
+    if not lines:
+        return "0001 |"
+    width = max(4, len(str(len(lines))))
+    return "\n".join(f"{index:0{width}d} | {line}" for index, line in enumerate(lines, start=1))
 
 
 def _is_ignored_rework_error(error: str) -> bool:

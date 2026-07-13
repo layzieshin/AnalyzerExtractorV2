@@ -14,19 +14,24 @@ from src.jobqueue.api import enqueue_pdf_job, list_jobs, retry_failed_job
 from src.ruleresolver.api import validate_rules_integrity
 from src.runtime.api import list_devices, load_runtime_config, resolve_app_root
 from src.testui.api import (
+    REWORK_FILTER_LABELS,
     build_rework_items,
+    filter_rework_items,
     format_device_choice,
     format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
     format_duplicate_field_comparison,
     format_extractor_file_row,
     format_queue_job_row,
+    format_rework_context_text,
     format_rework_item_detail,
     format_rework_item_summary,
     format_runtime_options_summary,
     format_validation_status,
     merge_file_rows_with_queue,
     normalize_file_row_key,
+    preferred_rework_dump_path,
+    resolve_rework_context_source,
 )
 
 from .watch_scan import InAppWatchScanner, list_watch_pdf_paths
@@ -76,6 +81,8 @@ class TestApp(tk.Tk):
         self._watch_rows: dict[str, dict[str, str]] = {}
         self._duplicate_details: dict[int, dict[str, object]] = {}
         self._rework_items: dict[str, dict[str, object]] = {}
+        self._rework_items_all: list[dict[str, object]] = []
+        self.var_rework_filter = tk.StringVar(value="Alle")
         self._busy = False
         self._extraction_running = False
         self._stop_extraction_event = threading.Event()
@@ -222,6 +229,16 @@ class TestApp(tk.Tk):
         tk.Button(controls, text="Rule Editor oeffnen", command=self.open_rule_editor_from_rework).pack(side="left", padx=(6, 0))
         tk.Button(controls, text="Erneut starten", command=self.retry_selected_rework_items).pack(side="left", padx=(6, 0))
         tk.Button(controls, text="Rules validieren", command=self.validate_rules).pack(side="left", padx=(6, 0))
+        tk.Label(controls, text="Filter").pack(side="left", padx=(12, 4))
+        self.cmb_rework_filter = ttk.Combobox(
+            controls,
+            textvariable=self.var_rework_filter,
+            values=list(REWORK_FILTER_LABELS),
+            state="readonly",
+            width=24,
+        )
+        self.cmb_rework_filter.pack(side="left")
+        self.cmb_rework_filter.bind("<<ComboboxSelected>>", self._on_rework_filter_changed)
         self.lbl_validation = tk.Label(parent, text="Noch keine Validierung.", anchor="w")
         self.lbl_validation.pack(fill="x", padx=8, pady=(0, 8))
 
@@ -750,11 +767,24 @@ class TestApp(tk.Tk):
         self._log("Rule Editor gestartet.")
 
     def refresh_rework_items(self) -> None:
-        for item in self.tree_rework.get_children():
-            self.tree_rework.delete(item)
         self._set_text(self.txt_rework_detail, "")
         jobs = list_jobs(str(self.project_root))
-        items = build_rework_items(str(self.project_root), jobs)
+        self._rework_items_all = build_rework_items(str(self.project_root), jobs)
+        filtered = filter_rework_items(self._rework_items_all, self.var_rework_filter.get())
+        self._render_rework_table(filtered)
+        self._log(
+            f"Nacharbeit aktualisiert: {len(self._rework_items_all)} geladen, "
+            f"{len(filtered)} angezeigt."
+        )
+
+    def _on_rework_filter_changed(self, _event: object = None) -> None:
+        filtered = filter_rework_items(self._rework_items_all, self.var_rework_filter.get())
+        self._set_text(self.txt_rework_detail, "")
+        self._render_rework_table(filtered)
+
+    def _render_rework_table(self, items: list[dict[str, object]]) -> None:
+        for item in self.tree_rework.get_children():
+            self.tree_rework.delete(item)
         self._rework_items = {str(item["item_id"]): item for item in items}
         for item in items:
             summary = format_rework_item_summary(item)
@@ -771,7 +801,6 @@ class TestApp(tk.Tk):
                     summary["context_label"],
                 ),
             )
-        self._log(f"Nacharbeit aktualisiert: {len(items)} Eintrag/Eintraege.")
 
     def on_rework_selected(self, _event: object = None) -> None:
         selection = self.tree_rework.selection()
@@ -790,41 +819,24 @@ class TestApp(tk.Tk):
         if not item:
             return
         detail = format_rework_item_detail(item)
-        path = str(item.get("normalized_dump", "") or "")
-        label = "Normalisierter Text"
-        if not path or not Path(path).exists():
-            block_dumps = item.get("block_dumps")
-            path = ""
-            if isinstance(block_dumps, dict):
-                for key in sorted(block_dumps.keys(), key=lambda value: str(value).casefold()):
-                    candidate = str(block_dumps[key] or "")
-                    if candidate and Path(candidate).exists():
-                        path = candidate
-                        label = f"Assay-Block {key}"
-                        break
-                if not path and block_dumps:
-                    first = sorted(block_dumps.keys(), key=lambda value: str(value).casefold())[0]
-                    path = str(block_dumps.get(first, "") or "")
-                    label = f"Assay-Block {first}"
-        if not path:
-            self._set_text(self.txt_rework_detail, detail + "\n\nKontext: nicht vorhanden")
-            return
-        if not Path(path).exists():
-            self._set_text(self.txt_rework_detail, detail + f"\n\nKontext ({label}): Datei nicht vorhanden\n{path}")
-            return
-        try:
-            content = Path(path).read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
-            self._set_text(self.txt_rework_detail, detail + f"\n\nKontext konnte nicht gelesen werden: {e}")
-            return
-        self._set_text(self.txt_rework_detail, detail + f"\n\n--- Kontext: {label} ---\n{path}\n\n{content}")
+        label, path = resolve_rework_context_source(item)
+        content: str | None = None
+        if path and Path(path).exists():
+            try:
+                content = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = None
+        context_text = format_rework_context_text(item, content, label, path)
+        self._set_text(self.txt_rework_detail, detail + "\n\n" + context_text)
 
     def open_rule_editor_from_rework(self) -> None:
         selection = self.tree_rework.selection()
         if selection:
             item = self._rework_items.get(str(selection[0]))
             if item:
-                self._log(f"Rule Editor fuer Nacharbeit: {item.get('file', item.get('pdf_path', '?'))}")
+                pdf_path = str(item.get("pdf_path", "") or item.get("file", "?"))
+                dump_path = preferred_rework_dump_path(item) or "-"
+                self._log(f"Rule Editor fuer Nacharbeit: PDF={pdf_path}, Dump={dump_path}")
         self.open_rule_editor()
 
     def retry_selected_rework_items(self) -> None:

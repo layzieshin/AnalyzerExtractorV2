@@ -1,6 +1,7 @@
 from src.testui.helpers import (
     build_rework_items,
     classify_job_outcome,
+    filter_rework_items,
     format_assay_data_detail,
     format_assay_overview_rows,
     format_device_choice,
@@ -13,6 +14,7 @@ from src.testui.helpers import (
     format_job_result_summary,
     format_partial_writes_note,
     format_queue_job_row,
+    format_rework_context_text,
     format_rework_item_detail,
     format_rework_item_summary,
     format_rules_report,
@@ -623,3 +625,109 @@ def test_format_rework_item_summary_and_detail_are_readable(tmp_path):
     assert summary["queue_status"] == "Fehler"
     assert "Assay nicht erkannt" in detail
     assert "Normalized dump:" in detail
+
+
+def _sample_rework_item(**overrides):
+    item = {
+        "item_id": "job1",
+        "job_id": "job1",
+        "file": "sample.pdf",
+        "pdf_path": "/tmp/sample.pdf",
+        "queue_status": "FAILED",
+        "error_label": "Assay nicht erkannt",
+        "queue_error": "no_assay_detected",
+        "state_error": "no_assay_detected",
+        "root_error": "no_assay_detected",
+        "context_label": "Normalisierter Text",
+        "state_path": "/tmp/jobs/job1.json",
+        "normalized_dump": "/tmp/jobs/job1_normalized.txt",
+        "block_dumps": {},
+    }
+    item.update(overrides)
+    return item
+
+
+def test_filter_rework_items_all_returns_every_item():
+    items = [
+        _sample_rework_item(item_id="job1", error_label="Assay nicht erkannt"),
+        _sample_rework_item(item_id="job2", error_label="Regelset unvollständig"),
+    ]
+
+    filtered = filter_rework_items(items, "Alle")
+
+    assert len(filtered) == 2
+
+
+def test_filter_rework_items_by_error_label():
+    items = [
+        _sample_rework_item(item_id="job1", job_id="job1", error_label="Assay nicht erkannt"),
+        _sample_rework_item(item_id="job2", job_id="job2", error_label="Regelset unvollständig"),
+        _sample_rework_item(item_id="job3", job_id="job3", error_label="Aufteilung fehlgeschlagen"),
+    ]
+
+    filtered = filter_rework_items(items, "Regelset unvollständig")
+
+    assert [item["job_id"] for item in filtered] == ["job2"]
+
+
+def test_filter_rework_items_unknown_label_returns_empty_list():
+    items = [_sample_rework_item()]
+
+    assert filter_rework_items(items, "Unbekannt") == []
+
+
+def test_format_rework_context_text_includes_header_and_line_numbers(tmp_path):
+    dump = tmp_path / "job1_normalized.txt"
+    dump.write_text("line one\nline two", encoding="utf-8")
+    item = _sample_rework_item(
+        pdf_path=str(tmp_path / "sample.pdf"),
+        normalized_dump=str(dump),
+    )
+
+    text = format_rework_context_text(item, "line one\nline two", "Normalisierter Text", str(dump))
+
+    assert "Kontexttyp: Normalisierter Text" in text
+    assert "PDF-Pfad:" in text
+    assert "Dump-Pfad:" in text
+    assert "Fehlerklasse: Assay nicht erkannt" in text
+    assert "Queue-Fehler: no_assay_detected" in text
+    assert "State-Fehler: no_assay_detected" in text
+    assert "Root-Cause: no_assay_detected" in text
+    assert "0001 | line one" in text
+    assert "0002 | line two" in text
+
+
+def test_format_rework_context_text_missing_dump_is_readable(tmp_path):
+    missing = tmp_path / "missing.txt"
+    item = _sample_rework_item(normalized_dump=str(missing))
+
+    text = format_rework_context_text(
+        item,
+        None,
+        "Normalisierter Text (fehlend)",
+        str(missing),
+    )
+
+    assert "Dump-Datei nicht vorhanden" in text
+    assert str(missing) in text
+
+
+def test_format_rework_item_detail_contains_paths_and_root_cause(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    dump = tmp_path / "jobs" / "job12_normalized.txt"
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text("text", encoding="utf-8")
+    _write_job_state(
+        tmp_path,
+        "job12",
+        error="no_assay_detected",
+        steps=[{"step": "debug", "normalized_dump": str(dump)}],
+    )
+    item = build_rework_items(tmp_path, [_failed_queue_job("job12", str(pdf), "no_assay_detected")])[0]
+    detail = format_rework_item_detail(item)
+
+    assert f"PDF-Pfad: {pdf}" in detail
+    assert "Root-Cause:" in detail
+    assert "Queue-Fehler:" in detail
+    assert "State-Fehler:" in detail
+    assert str(dump) in detail

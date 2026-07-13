@@ -3,6 +3,7 @@ from __future__ import annotations
 from .helpers import (
     build_rework_items,
     classify_job_outcome,
+    filter_rework_items,
     format_assay_data_detail,
     format_assay_overview_rows,
     format_device_choice,
@@ -15,6 +16,7 @@ from .helpers import (
     format_job_result_summary,
     format_partial_writes_note,
     format_queue_job_row,
+    format_rework_context_text,
     format_rework_item_detail,
     format_rework_item_summary,
     format_rules_report,
@@ -28,6 +30,9 @@ from .helpers import (
     load_job_state,
     merge_file_rows_with_queue,
     normalize_file_row_key,
+    preferred_rework_dump_path,
+    resolve_rework_context_source,
+    REWORK_FILTER_LABELS,
 )
 
 __all__ = [
@@ -39,12 +44,14 @@ __all__ = [
     "format_duplicate_candidate_detail",
     "format_duplicate_candidate_summary",
     "format_duplicate_field_comparison",
+    "filter_rework_items",
     "format_enqueue_result",
     "format_extractor_error_label",
     "format_extractor_file_row",
     "format_job_result_summary",
     "format_partial_writes_note",
     "format_queue_job_row",
+    "format_rework_context_text",
     "format_rework_item_detail",
     "format_rework_item_summary",
     "format_rules_report",
@@ -58,4 +65,7 @@ __all__ = [
     "load_job_state",
     "merge_file_rows_with_queue",
     "normalize_file_row_key",
+    "preferred_rework_dump_path",
+    "resolve_rework_context_source",
+    "REWORK_FILTER_LABELS",
 ]

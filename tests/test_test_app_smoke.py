@@ -772,6 +772,8 @@ def test_test_app_rework_section_controls_exist(tmp_path) -> None:
     try:
         assert hasattr(app, "tree_rework")
         assert hasattr(app, "txt_rework_detail")
+        assert hasattr(app, "cmb_rework_filter")
+        assert app.var_rework_filter.get() == "Alle"
         headings = [app.tree_rework.heading(col)["text"] for col in app.tree_rework["columns"]]
         assert "Datei" in headings
         assert "Fehler" in headings
@@ -799,8 +801,59 @@ def test_test_app_refresh_rework_items_renders_failed_jobs(tmp_path, monkeypatch
         app.refresh_rework_items()
 
         assert "job1" in app._rework_items
+        assert len(app._rework_items_all) == 1
         assert app.tree_rework.get_children()
         assert app.tree_rework.item("job1", "values")[1] == "Assay nicht erkannt"
+        assert "1 geladen, 1 angezeigt" in app.txt_logs.get("1.0", tk.END)
+    finally:
+        app.destroy()
+
+
+def test_test_app_rework_filter_change_rerenders_without_reload(tmp_path, monkeypatch) -> None:
+    pdf = tmp_path / "failed.pdf"
+    queue_jobs = [
+        {
+            "job_id": "job1",
+            "pdf_path": str(pdf),
+            "status": "FAILED",
+            "updated_at": "u",
+            "source": "test-app-manual",
+            "worker_id": "",
+            "attempts": 1,
+            "last_error": "no_assay_detected",
+        },
+        {
+            "job_id": "job2",
+            "pdf_path": str(pdf),
+            "status": "FAILED",
+            "updated_at": "u",
+            "source": "test-app-manual",
+            "worker_id": "",
+            "attempts": 1,
+            "last_error": "ruleset missing assay_name for (6bd7)",
+        },
+    ]
+    list_jobs_calls: list[int] = []
+
+    def counting_list_jobs(_root):
+        list_jobs_calls.append(1)
+        return queue_jobs
+
+    monkeypatch.setattr(test_app, "list_jobs", counting_list_jobs)
+
+    app = _make_test_app(tmp_path)
+    try:
+        app.refresh_rework_items()
+        assert len(app._rework_items_all) == 2
+        assert len(app.tree_rework.get_children()) == 2
+        calls_after_refresh = len(list_jobs_calls)
+
+        app.var_rework_filter.set("Regelset unvollständig")
+        app._on_rework_filter_changed()
+
+        assert len(app._rework_items_all) == 2
+        assert len(list_jobs_calls) == calls_after_refresh
+        assert [app.tree_rework.item(iid, "values")[3] for iid in app.tree_rework.get_children()] == ["job2"]
     finally:
         app.destroy()
 
@@ -877,6 +930,9 @@ def test_test_app_show_rework_context_loads_dump_or_reports_missing(tmp_path, mo
         app.show_rework_context()
         detail = app.txt_rework_detail.get("1.0", tk.END)
         assert "normalized" in detail
+        assert "0001 | normalized" in detail
+        assert "PDF-Pfad:" in detail
+        assert "Dump-Pfad:" in detail
 
         dump.unlink()
         app.show_rework_context()
@@ -965,6 +1021,7 @@ def test_test_app_rework_rule_editor_uses_existing_start_path(tmp_path, monkeypa
         app.open_rule_editor_from_rework()
 
         assert started == [1]
-        assert any("Rule Editor fuer Nacharbeit" in line for line in logs)
+        assert any("Rule Editor fuer Nacharbeit: PDF=" in line for line in logs)
+        assert any("Dump=" in line for line in logs)
     finally:
         app.destroy()
