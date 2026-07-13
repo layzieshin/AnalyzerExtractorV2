@@ -103,6 +103,8 @@ class RuleEditorWindow(
         self.btn_toggle_markings: tk.Button | None = None
         self.var_marking_selection = tk.StringVar(value="(keine Auswahl)")
         self.tree_rulesets: ttk.Treeview | None = None
+        self.var_inventory_filter = tk.StringVar(value="Alle")
+        self._inventory_by_iid: dict[str, dict[str, object]] = {}
         self.var_field_guidance = tk.StringVar(value="")
 
         self._build_ui()

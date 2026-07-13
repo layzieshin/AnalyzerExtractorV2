@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
-from src.rulesuite.api import create_draft, create_draft_from_template, derive_draft, load_draft
+from src.rulesuite.api import create_draft, create_draft_from_template, load_draft
 
 
 class DraftMixin:
@@ -97,22 +97,7 @@ class DraftMixin:
             messagebox.showerror("Fehler", str(e))
 
     def on_derive(self) -> None:
-        source_key = self._selected_assay_key()
-        target_key = self.var_new_assay_key.get().strip()
-        target_name = self.var_new_assay_name.get().strip()
-        if not source_key:
-            self._set_hint("Bitte zuerst ein Quell-Assay auswählen.")
-            return
-        if not target_key or not target_name:
-            self._set_hint("neuer assay_key und assay_name sind erforderlich.")
-            return
-        try:
-            path = derive_draft(self.var_root.get().strip(), source_key, target_key, target_name)
-            self.var_draft_path.set(path)
-            self.on_load_draft_into_editor()
-            self._log(f"Draft abgeleitet: {path}")
-        except Exception as e:
-            messagebox.showerror("Fehler", str(e))
+        self.on_open_clone_ruleset_dialog()
 
     def on_load_draft_into_editor(self) -> None:
         path = self.var_draft_path.get().strip()

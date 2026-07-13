@@ -110,7 +110,9 @@ class UiBuilderMixin:
         tk.Label(row2, text="Neuer Assay-Name").pack(side="left")
         tk.Entry(row2, textvariable=self.var_new_assay_name, width=42).pack(side="left", padx=(4, 8))
         tk.Button(row2, text="Neues Draft mit Headern", command=self.on_create_blank).pack(side="left")
-        tk.Button(row2, text="Aus aktivem ableiten", command=self.on_derive).pack(side="left", padx=(6, 0))
+        tk.Button(row2, text="Regelwerk als Basis verwenden...", command=self.on_open_clone_ruleset_dialog).pack(
+            side="left", padx=(6, 0)
+        )
 
         row3 = tk.Frame(control)
         row3.pack(fill="x", padx=6, pady=(0, 6))
@@ -118,7 +120,7 @@ class UiBuilderMixin:
         tk.Entry(row3, textvariable=self.var_draft_path).pack(side="left", fill="x", expand=True, padx=(4, 8))
         tk.Button(row3, text="Draft laden in Editor", command=self.on_load_draft_into_editor).pack(side="left")
 
-        manage = tk.LabelFrame(container, text="Regelset-Verwaltung")
+        manage = tk.LabelFrame(container, text="RuleSuite-Inventar")
         manage.pack(fill="both", expand=True, pady=(10, 0))
         manage_btns = tk.Frame(manage)
         manage_btns.pack(fill="x", padx=6, pady=(6, 4))
@@ -128,27 +130,45 @@ class UiBuilderMixin:
         tk.Button(manage_btns, text="Aktualisieren", command=self._refresh_ruleset_overview).pack(side="left", padx=(6, 0))
         tk.Button(
             manage_btns,
+            text="Regelwerk als Basis verwenden...",
+            command=self.on_open_clone_ruleset_dialog,
+        ).pack(side="left", padx=(6, 0))
+        tk.Button(
+            manage_btns,
             text="Felder aus Regelwerk uebernehmen",
             command=self.on_adopt_fields_from_ruleset,
         ).pack(side="left", padx=(6, 0))
+        tk.Label(manage_btns, text="Filter").pack(side="left", padx=(12, 4))
+        self.cmb_inventory_filter = ttk.Combobox(
+            manage_btns,
+            textvariable=self.var_inventory_filter,
+            values=["Alle", "Aktiv", "Drafts"],
+            state="readonly",
+            width=10,
+        )
+        self.cmb_inventory_filter.pack(side="left")
+        self.cmb_inventory_filter.bind("<<ComboboxSelected>>", self._on_inventory_filter_changed)
 
         self.tree_rulesets = ttk.Treeview(
             manage,
-            columns=("key", "name", "file", "fields", "status"),
+            columns=("type", "key", "name", "file", "fields", "status"),
             show="headings",
             height=8,
         )
+        self.tree_rulesets.heading("type", text="Typ")
         self.tree_rulesets.heading("key", text="Assay-Key")
         self.tree_rulesets.heading("name", text="Name")
         self.tree_rulesets.heading("file", text="Datei")
         self.tree_rulesets.heading("fields", text="Felder")
         self.tree_rulesets.heading("status", text="Status")
+        self.tree_rulesets.column("type", width=70, anchor="w")
         self.tree_rulesets.column("key", width=110, anchor="w")
-        self.tree_rulesets.column("name", width=300, anchor="w")
-        self.tree_rulesets.column("file", width=300, anchor="w")
+        self.tree_rulesets.column("name", width=220, anchor="w")
+        self.tree_rulesets.column("file", width=260, anchor="w")
         self.tree_rulesets.column("fields", width=70, anchor="center")
         self.tree_rulesets.column("status", width=160, anchor="w")
         self.tree_rulesets.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.tree_rulesets.bind("<Button-3>", self._show_inventory_context_menu)
 
     def _build_pdf_tab(self, parent: tk.Frame) -> None:
         container = tk.Frame(parent)

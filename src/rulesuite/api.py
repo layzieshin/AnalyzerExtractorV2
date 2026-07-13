@@ -26,6 +26,7 @@ __all__ = [
     "check_authoring_readiness",
     "check_candidates",
     "check_required_fields",
+    "clone_ruleset_to_draft",
     "create_blank_draft",
     "create_draft",
     "create_draft_from_ruleset",
@@ -38,6 +39,7 @@ __all__ = [
     "get_assay_text",
     "list_fields",
     "list_rulesets",
+    "list_rulesuite_inventory",
     "load_draft",
     "locate_fields",
     "read_candidate_fields",
@@ -378,3 +380,29 @@ def delete_ruleset(project_root: str, assay_key: str) -> Dict[str, Any]:
     from .manage import delete_ruleset as _impl
 
     return _impl(project_root, assay_key)
+
+
+def list_rulesuite_inventory(project_root: str, kind: str = "all") -> List[Dict[str, Any]]:
+    from .inventory import list_rulesuite_inventory as _impl
+
+    return _impl(project_root, kind=kind)
+
+
+def clone_ruleset_to_draft(
+    project_root: str,
+    source_assay_key: str,
+    target_assay_key: str,
+    target_assay_name: str,
+    overwrite: bool = False,
+    include_fields: bool = True,
+) -> Dict[str, Any]:
+    from .clone import clone_ruleset_to_draft as _impl
+
+    return _impl(
+        project_root,
+        source_assay_key,
+        target_assay_key,
+        target_assay_name,
+        overwrite=overwrite,
+        include_fields=include_fields,
+    )

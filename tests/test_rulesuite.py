@@ -13,6 +13,7 @@ from src.rulesuite.api import (
     check_authoring_readiness,
     check_candidates,
     check_required_fields,
+    clone_ruleset_to_draft,
     create_blank_draft,
     create_draft,
     create_draft_from_ruleset,
@@ -25,6 +26,7 @@ from src.rulesuite.api import (
     derive_draft,
     list_fields,
     list_rulesets,
+    list_rulesuite_inventory,
     load_draft,
     locate_fields,
     move_field,
@@ -1238,3 +1240,114 @@ def test_adopt_candidate_fields_skipped_existing_leaves_field_and_mapping_unchan
     after_pcq = next(field for field in after["extract_rules"]["fields"] if field["key"] == "PCQ1")
     assert after_pcq == before_pcq
     assert after["excel_rules"]["column_mapping"]["PCQ1"] == "Custom PCQ1 Header"
+
+
+def test_list_rulesuite_inventory_lists_active_and_drafts(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    draft = create_draft_from_template(str(root), "(9996)", "Draft Assay")
+    save_draft(draft, load_draft(draft))
+
+    rows = list_rulesuite_inventory(str(root), kind="all")
+    kinds = {(row["kind"], row["assay_key"]) for row in rows}
+
+    assert ("active", "(1111)") in kinds
+    assert ("active", "(2222)") in kinds
+    assert ("draft", "(9996)") in kinds
+
+
+def test_list_rulesuite_inventory_filters_and_tolerates_broken_draft(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft_dir = root / "rules" / "drafts"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    (draft_dir / "broken.draft.json").write_text("{not-json", encoding="utf-8")
+
+    active_rows = list_rulesuite_inventory(str(root), kind="active")
+    draft_rows = list_rulesuite_inventory(str(root), kind="draft")
+
+    assert all(row["kind"] == "active" for row in active_rows)
+    assert len(draft_rows) == 1
+    assert draft_rows[0]["valid"] is False
+    assert draft_rows[0]["error"]
+
+
+def _write_clone_source_ruleset(root: Path) -> None:
+    ruleset = {
+        "assay_name": "Source Assay",
+        "assay_key": "(1111)",
+        "lot_rule": {"regex": r"Lot:\s*(\S+)"},
+        "extract_rules": {
+            "fields": [
+                {"key": "DATUM", "regex": r"Datum:\s*(\S+)", "required": True},
+                {"key": "PCQ1", "regex": r"PCQ1\s+(\d+)", "required": True, "search_from": {"line": 2}},
+            ],
+            "dedupe_fields": [],
+        },
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {"DATUM": "DATUM", "PCQ1": "PCQ1 Column"},
+        },
+    }
+    (root / "rules" / "AssayA.json").write_text(json.dumps(ruleset), encoding="utf-8")
+
+
+def test_clone_ruleset_to_draft_created_and_exists_without_overwrite(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    _write_clone_source_ruleset(root)
+    index_before = (root / "rules" / "index.json").read_text(encoding="utf-8")
+
+    created = clone_ruleset_to_draft(str(root), "(1111)", "(abcd)", "Clone Target", include_fields=True)
+    assert created["status"] == "created"
+    assert Path(created["draft_path"]).exists()
+    data = load_draft(created["draft_path"])
+    assert data["assay_key"] == "(abcd)"
+    assert data["assay_name"] == "Clone Target"
+    assert "PCQ1" in {field["key"] for field in data["extract_rules"]["fields"]}
+    assert data["excel_rules"]["column_mapping"]["PCQ1"] == "PCQ1 Column"
+    assert (root / "rules" / "index.json").read_text(encoding="utf-8") == index_before
+
+    Path(created["draft_path"]).write_text('{"marker": true}', encoding="utf-8")
+    exists = clone_ruleset_to_draft(str(root), "(1111)", "(abcd)", "Clone Target", overwrite=False)
+    assert exists["status"] == "exists"
+    assert json.loads(Path(exists["draft_path"]).read_text(encoding="utf-8")) == {"marker": True}
+
+
+def test_clone_ruleset_to_draft_overwrite_and_include_fields_toggle(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    _write_clone_source_ruleset(root)
+    target = Path(draft_path_for_assay(str(root), "(abcd)"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"marker": true}', encoding="utf-8")
+
+    overwritten = clone_ruleset_to_draft(
+        str(root),
+        "(1111)",
+        "(abcd)",
+        "Target Name",
+        overwrite=True,
+        include_fields=True,
+    )
+    assert overwritten["status"] == "overwritten"
+    full = load_draft(overwritten["draft_path"])
+    assert full["assay_name"] == "Target Name"
+    assert "PCQ1" in {field["key"] for field in full["extract_rules"]["fields"]}
+
+    headers_only = clone_ruleset_to_draft(
+        str(root),
+        "(1111)",
+        "(abce)",
+        "Headers Only",
+        overwrite=False,
+        include_fields=False,
+    )
+    assert headers_only["status"] == "created"
+    header_data = load_draft(headers_only["draft_path"])
+    extra_keys = {
+        field["key"]
+        for field in header_data["extract_rules"]["fields"]
+        if field["key"] not in REQUIRED_HEADER_FIELD_KEYS
+    }
+    assert extra_keys == set()
