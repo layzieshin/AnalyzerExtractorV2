@@ -320,7 +320,87 @@ def test_merge_file_rows_with_queue_is_non_mutating(tmp_path):
     assert merged[0]["last_error"] == "old"
 
 
-def test_enqueue_and_submit_presenters_are_compact():
+def test_merge_file_rows_with_queue_include_queue_only_creates_row(tmp_path):
+    queued_pdf = tmp_path / "queued-only.pdf"
+    queue_rows = [
+        {
+            "job_id": "job1",
+            "pdf_path": str(queued_pdf),
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": "test-app-auto-watch",
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "",
+        }
+    ]
+
+    merged = merge_file_rows_with_queue([], queue_rows, include_queue_only=True)
+
+    assert len(merged) == 1
+    assert merged[0]["file"] == "queued-only.pdf"
+    assert merged[0]["path"] == str(queued_pdf)
+    assert merged[0]["source"] == "test-app-auto-watch"
+    assert merged[0]["queue_status"] == "PENDING"
+    assert merged[0]["job_id"] == "job1"
+    assert merged[0]["action"] == "queued"
+
+
+def test_merge_file_rows_with_queue_default_ignores_queue_only_rows(tmp_path):
+    queued_pdf = tmp_path / "queued-only.pdf"
+    queue_rows = [
+        {
+            "job_id": "job1",
+            "pdf_path": str(queued_pdf),
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": "test-app-auto-watch",
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "",
+        }
+    ]
+
+    merged = merge_file_rows_with_queue([], queue_rows)
+
+    assert merged == []
+
+
+def test_merge_file_rows_with_queue_updates_existing_row(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    file_rows = [
+        {
+            "file": "sample.pdf",
+            "path": str(pdf),
+            "source": "manual",
+            "queue_status": "",
+            "job_id": "",
+            "device_id": "",
+            "last_error": "",
+            "action": "bereit",
+        }
+    ]
+    queue_rows = [
+        {
+            "job_id": "abc",
+            "pdf_path": str(tmp_path / "." / "sample.pdf"),
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": "test-app-manual",
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "old",
+        }
+    ]
+
+    merged = merge_file_rows_with_queue(file_rows, queue_rows, include_queue_only=True)
+
+    assert len(merged) == 1
+    assert merged[0]["source"] == "manual"
+    assert merged[0]["queue_status"] == "PENDING"
+    assert merged[0]["job_id"] == "abc"
+    assert merged[0]["last_error"] == "old"
+    assert merged[0]["action"] == "bereit"
     enqueue = format_enqueue_result(
         {
             "job_id": "abc",

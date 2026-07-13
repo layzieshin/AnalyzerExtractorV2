@@ -40,10 +40,19 @@ ueber normalisierte absolute Pfade dedupliziert. Wenn keine Zeile ausgewaehlt
 ist, arbeiten `Direkt verarbeiten` und `In Queue stellen` auf allen sichtbaren
 Dateizeilen.
 
-Die Auto-Suche ist ein sichtbarer In-App-Watchdog light. Sie nimmt nur stabile
-PDFs in die Liste auf. Sie startet keinen Worker, schreibt nichts in die Queue,
-ruft keine Extraktion auf und bewegt keine Dateien. Das Scan-Intervall kommt aus
-der Runtime-Konfiguration und wird fuer die GUI gegen Busy-Loops begrenzt.
+Die Auto-Suche ist ein sichtbarer In-App-Watchdog light. Sie erkennt stabile neue
+PDFs im Watch-Ordner und stellt sie per `enqueue_pdf_job(..., source="test-app-auto-watch")`
+in `jobs/queue/` ein. Sie startet keinen Worker, ruft kein `submit(...)` auf,
+schreibt keine Ergebnisse und bewegt keine Dateien. Bekannte Pfade kommen aus der
+Extractor-Liste, bestehenden Queue-Jobs und einer kleinen Session-Suppress-Liste
+(nur Anti-Spam innerhalb der laufenden GUI-Session).
+
+`Liste aktualisieren` und der Queue-Merge zeigen Queue-Jobs auch ohne vorherige
+GUI-Session in der Extractor-Liste an. `Direkt verarbeiten` ist fuer Queue-Zeilen
+blockiert, damit keine Verarbeitung am Ledger vorbei laeuft.
+
+Das Scan-Intervall kommt aus der Runtime-Konfiguration und wird fuer die GUI gegen
+Busy-Loops begrenzt.
 
 ## Grenzen
 

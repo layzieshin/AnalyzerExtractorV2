@@ -65,6 +65,7 @@ class TestApp(tk.Tk):
         self._auto_watch_after_id: str | None = None
         self._auto_watch_scanner = InAppWatchScanner()
         self._auto_watch_last_warning = ""
+        self._auto_watch_suppressed_paths: set[str] = set()
         self._device_choice_to_id: dict[str, str] = {}
         self._watch_rows: dict[str, dict[str, str]] = {}
         self._duplicate_details: dict[int, dict[str, object]] = {}
@@ -361,6 +362,18 @@ class TestApp(tk.Tk):
         delay = int(self._auto_watch_interval_s * 1000) if delay_ms is None else max(0, delay_ms)
         self._auto_watch_after_id = self.after(delay, self._run_auto_watch_scan)
 
+    def _build_known_paths_for_scanner(self) -> set[str]:
+        known = {row.get("path", "") for row in self._watch_rows.values() if row.get("path")}
+        for job in list_jobs(str(self.project_root)):
+            queue_row = format_queue_job_row(job)
+            if queue_row.get("path"):
+                known.add(queue_row["path"])
+        known.update(self._auto_watch_suppressed_paths)
+        return known
+
+    def _row_is_queued(self, row: dict[str, str]) -> bool:
+        return bool(row.get("job_id") or row.get("queue_status"))
+
     def _run_auto_watch_scan(self) -> None:
         self._auto_watch_after_id = None
         if not self._auto_watch_active:
@@ -370,7 +383,7 @@ class TestApp(tk.Tk):
                 self.var_auto_watch_status.set("Auto-Suche: aktiv")
                 return
 
-            known_paths = {row.get("path", "") for row in self._watch_rows.values()}
+            known_paths = self._build_known_paths_for_scanner()
             result = self._auto_watch_scanner.scan(
                 self.var_watch_dir.get().strip(),
                 known_paths,
@@ -394,13 +407,21 @@ class TestApp(tk.Tk):
                 self._auto_watch_last_warning = ""
 
             if result.stable_new_paths:
-                rows = [format_watch_file_row(path, source="watch") for path in result.stable_new_paths]
-                self._upsert_file_rows(rows)
-                self.refresh_queue()
-                self._log(
-                    f"Auto-Suche: {len(result.stable_new_paths)} neue PDF(s) aufgenommen "
-                    f"aus {self.var_watch_dir.get().strip()}"
-                )
+                queued_count = 0
+                for path in result.stable_new_paths:
+                    self._auto_watch_suppressed_paths.add(path)
+                    try:
+                        enqueue_pdf_job(
+                            str(self.project_root),
+                            path,
+                            source="test-app-auto-watch",
+                        )
+                        queued_count += 1
+                    except Exception as e:
+                        self._log(f"Auto-Suche Queue-Fehler bei {Path(path).name}: {e}")
+                if queued_count:
+                    self.refresh_queue()
+                    self._log(f"Auto-Suche: {queued_count} PDF(s) in Queue gestellt.")
         except Exception as e:
             warning = f"auto_watch_error: {e}"
             self.var_auto_watch_status.set("Auto-Suche: Warnung")
@@ -467,6 +488,14 @@ class TestApp(tk.Tk):
         snapshot = self._build_action_snapshot()
         if not snapshot["rows"]:
             messagebox.showinfo("Extractor", "Bitte zuerst PDFs suchen oder auswaehlen.")
+            return
+        if any(self._row_is_queued(row) for row in snapshot["rows"]):
+            message = (
+                "Auswahl enthält Queue-Jobs. Bitte Queue-Verarbeitung nutzen "
+                "oder nur nicht-gequeuete Dateien auswählen."
+            )
+            messagebox.showinfo("Extractor", message)
+            self._log(message)
             return
         if not self._start_background_action("Direkte Verarbeitung laeuft..."):
             return
@@ -590,7 +619,8 @@ class TestApp(tk.Tk):
             self._set_action_buttons_state(tk.NORMAL)
 
     def refresh_queue(self) -> None:
-        rows = [format_queue_job_row(job) for job in list_jobs(str(self.project_root))]
+        jobs = list_jobs(str(self.project_root))
+        rows = [format_queue_job_row(job) for job in jobs]
         for item in self.tree_queue.get_children():
             self.tree_queue.delete(item)
         for row in rows:
@@ -610,14 +640,17 @@ class TestApp(tk.Tk):
                     row["path"],
                 ),
             )
-        merged_rows = merge_file_rows_with_queue(list(self._watch_rows.values()), rows)
+        merged_rows = merge_file_rows_with_queue(
+            list(self._watch_rows.values()),
+            jobs,
+            include_queue_only=True,
+        )
         self._watch_rows = {
             normalize_file_row_key(row.get("path", "")): row
             for row in merged_rows
             if normalize_file_row_key(row.get("path", ""))
         }
-        if self._watch_rows:
-            self._render_file_rows()
+        self._render_file_rows()
 
     def validate_rules(self) -> None:
         report = validate_rules_integrity(

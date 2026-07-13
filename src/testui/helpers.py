@@ -267,6 +267,8 @@ def normalize_file_row_key(path: str | Path) -> str:
 def merge_file_rows_with_queue(
     file_rows: List[Mapping[str, object]],
     queue_rows: List[object | Mapping[str, object]],
+    *,
+    include_queue_only: bool = False,
 ) -> List[Dict[str, str]]:
     queue_by_path: Dict[str, Dict[str, str]] = {}
     for queue in queue_rows:
@@ -276,14 +278,35 @@ def merge_file_rows_with_queue(
             queue_by_path[key] = row
 
     merged: List[Dict[str, str]] = []
+    seen_keys: set[str] = set()
     for item in file_rows:
         row = {str(key): _string_or_empty(value) for key, value in item.items()}
-        queue = queue_by_path.get(normalize_file_row_key(row.get("path", "")))
+        key = normalize_file_row_key(row.get("path", ""))
+        queue = queue_by_path.get(key)
         if queue:
             row["queue_status"] = queue["status"]
             row["job_id"] = queue["job_id"]
             row["last_error"] = queue["last_error"]
+        if key:
+            seen_keys.add(key)
         merged.append(row)
+
+    if include_queue_only:
+        for key, queue in queue_by_path.items():
+            if key in seen_keys:
+                continue
+            merged.append(
+                {
+                    "file": queue["file"],
+                    "path": queue["path"],
+                    "source": queue["source"],
+                    "queue_status": queue["status"],
+                    "job_id": queue["job_id"],
+                    "device_id": "",
+                    "last_error": queue["last_error"],
+                    "action": "queued",
+                }
+            )
     return merged
 
 
