@@ -107,6 +107,8 @@ class TestApp(tk.Tk):
         self._watch_rows: dict[str, dict[str, str]] = {}
         self._duplicate_details: dict[int, dict[str, object]] = {}
         self._busy = False
+        self._extraction_running = False
+        self._stop_extraction_event = threading.Event()
         self._action_buttons: list[tk.Button] = []
 
         self._build_ui()
@@ -148,6 +150,13 @@ class TestApp(tk.Tk):
         self.btn_pick_files.pack(side="left", padx=(6, 0))
         self.btn_start_extraction = tk.Button(controls, text="Extraktion starten", command=self.start_extraction)
         self.btn_start_extraction.pack(side="left", padx=(6, 0))
+        self.btn_stop_extraction = tk.Button(
+            controls,
+            text="Extraktion stoppen",
+            command=self.stop_extraction,
+            state=tk.DISABLED,
+        )
+        self.btn_stop_extraction.pack(side="left", padx=(6, 0))
         self.btn_refresh_queue = tk.Button(controls, text="Aktualisieren", command=self.refresh_queue)
         self.btn_refresh_queue.pack(side="left", padx=(6, 0))
         self.btn_auto_watch_start = tk.Button(controls, text="Automatische Suche starten", command=self.start_auto_watch)
@@ -540,11 +549,21 @@ class TestApp(tk.Tk):
             return
         if not self._start_background_action("Extraktion laeuft..."):
             return
+        self._extraction_running = True
+        self._stop_extraction_event.clear()
+        self.btn_stop_extraction.configure(state=tk.NORMAL)
         snapshot = self._build_worker_config_snapshot()
         threading.Thread(target=self._process_queue_thread, args=(snapshot, pending_count), daemon=True).start()
 
     def start_selected_files(self) -> None:
         self.start_extraction()
+
+    def stop_extraction(self) -> None:
+        if not self._extraction_running:
+            return
+        self._stop_extraction_event.set()
+        self.var_status.set("Extraktion wird nach aktuellem Ergebnis gestoppt...")
+        self.btn_stop_extraction.configure(state=tk.DISABLED)
 
     def _build_worker_config_snapshot(self) -> QueueWorkerConfig:
         return QueueWorkerConfig(
@@ -577,33 +596,74 @@ class TestApp(tk.Tk):
             button.configure(state=state)
 
     def _process_queue_thread(self, snapshot: QueueWorkerConfig, pending_count: int) -> None:
-        events: list[str] = []
         processed_count = 0
-        for _ in range(pending_count):
-            result = process_next_pending(self.project_root, snapshot)
-            if not result.processed:
-                break
-            processed_count += 1
-            name = Path(result.pdf_path).name if result.pdf_path else result.job_id
-            events.append(f"Extraktion: {name} -> {result.queue_status or result.submit_status}")
-            if result.queue_status == "PENDING":
-                break
-        if processed_count == 0:
-            events.append("Keine wartenden Ergebnisse in der Arbeitsliste.")
-        else:
-            events.append(f"Extraktion abgeschlossen: {processed_count} Job(s) verarbeitet.")
-        self.after(0, lambda: self._finish_queue_processing(events))
-
-    def _finish_queue_processing(self, events: list[str]) -> None:
+        stopped = False
+        final_error = ""
         try:
-            for event in events:
-                self._log(event)
+            for _ in range(pending_count):
+                if self._stop_extraction_event.is_set():
+                    stopped = True
+                    break
+                result = process_next_pending(self.project_root, snapshot)
+                if not result.processed:
+                    break
+                processed_count += 1
+                self.after(
+                    0,
+                    lambda r=result, count=processed_count: self._handle_extraction_progress(
+                        r,
+                        count,
+                        pending_count,
+                    ),
+                )
+                if result.queue_status == "PENDING":
+                    break
+                if self._stop_extraction_event.is_set():
+                    stopped = True
+                    break
+        except Exception as e:
+            final_error = f"Extraktion abgebrochen: {e}"
+        self.after(
+            0,
+            lambda: self._finish_queue_processing(
+                processed_count,
+                pending_count,
+                stopped or self._stop_extraction_event.is_set(),
+                final_error,
+            ),
+        )
+
+    def _handle_extraction_progress(self, result, processed_count: int, pending_count: int) -> None:
+        name = Path(result.pdf_path).name if result.pdf_path else result.job_id
+        status = result.queue_status or result.submit_status or "unbekannt"
+        self._log(f"Extraktion: {processed_count}/{pending_count} {name} -> {status}")
+        self.refresh_queue()
+
+    def _finish_queue_processing(
+        self,
+        processed_count: int,
+        pending_count: int,
+        stopped: bool,
+        final_error: str = "",
+    ) -> None:
+        try:
+            if final_error:
+                self._log(final_error)
+            elif processed_count == 0:
+                self._log("Keine wartenden Ergebnisse in der Arbeitsliste.")
+            elif stopped:
+                self._log(f"Extraktion nach aktuellem Ergebnis gestoppt: {processed_count}/{pending_count} Job(s).")
+            else:
+                self._log(f"Extraktion abgeschlossen: {processed_count} Job(s) verarbeitet.")
             self.refresh_queue()
         finally:
             self._busy = False
+            self._extraction_running = False
+            self._stop_extraction_event.clear()
             self.progress.stop()
             self.progress.configure(mode="determinate", value=0)
             self.var_technical_status.set("idle")
+            self.btn_stop_extraction.configure(state=tk.DISABLED)
             self._set_action_buttons_state(tk.NORMAL)
 
     def refresh_queue(self) -> None:

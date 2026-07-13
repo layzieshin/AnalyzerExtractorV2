@@ -33,6 +33,8 @@ Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
 - `Dateien hinzufügen` merkt manuell gewaehlte PDFs direkt in der Arbeitsliste vor.
 - `Extraktion starten` verarbeitet wartende Arbeitslisten-Jobs ueber dieselbe
   Worker-Logik wie der Headless-Worker.
+- `Extraktion stoppen` stoppt kooperativ nach dem aktuell laufenden Ergebnis.
+  Bereits gestartete PDF-Verarbeitung wird nicht hart abgebrochen.
 - `Aktualisieren` merged den internen Verarbeitungsstatus aus
   `src.jobqueue.api.list_jobs(...)`.
 - `Automatische Suche starten` scannt den Watch-Ordner zyklisch, solange die App offen ist.
@@ -47,6 +49,10 @@ Technische Queue-Details bleiben im `ADMIN`-Bereich sichtbar.
 Es gibt keinen direkten Submit-Pfad in der GUI. `Extraktion starten` nutzt
 `interfaces.common.queue_worker.process_next_pending(...)`; der Headless-Worker
 nutzt dieselbe Funktion.
+
+Die Arbeitsliste wird waehrend der Verarbeitung nach jedem Ergebnis aktualisiert.
+Status und Log zeigen den aktuellen Zaehler, die Datei und den neuen Job-Status.
+Dadurch bleiben grosse Arbeitslisten sichtbar kontrollierbar.
 
 Die Auto-Suche ist ein sichtbarer In-App-Watchdog light. Sie erkennt stabile neue
 PDFs im Watch-Ordner (optional rekursiv) und merkt sie per

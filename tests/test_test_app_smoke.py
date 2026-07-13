@@ -39,6 +39,8 @@ def test_test_app_extractor_uses_friendly_controls_and_columns(tmp_path) -> None
         assert "Ergebnisse suchen" in button_texts
         assert "Dateien hinzufügen" in button_texts
         assert "Extraktion starten" in button_texts
+        assert app.btn_stop_extraction.cget("text") == "Extraktion stoppen"
+        assert app.btn_stop_extraction.cget("state") == tk.DISABLED
         assert "Aktualisieren" in button_texts
         assert "Automatische Suche starten" in button_texts
         assert "Automatische Suche stoppen" in button_texts
@@ -417,6 +419,7 @@ def test_test_app_start_extraction_reports_empty_worklist(tmp_path, monkeypatch)
 def test_test_app_process_queue_uses_common_worker(tmp_path, monkeypatch) -> None:
     calls: list[object] = []
     logs: list[str] = []
+    refresh_calls: list[int] = []
 
     class Result:
         processed = True
@@ -431,7 +434,7 @@ def test_test_app_process_queue_uses_common_worker(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr(test_app, "process_next_pending", fake_process)
     monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
-    monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: None)
+    monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: refresh_calls.append(1))
 
     app = _make_test_app(tmp_path)
     try:
@@ -440,8 +443,61 @@ def test_test_app_process_queue_uses_common_worker(tmp_path, monkeypatch) -> Non
         app._process_queue_thread(app._build_worker_config_snapshot(), 1)
 
         assert len(calls) == 1
-        assert any("sample.pdf -> DONE" in line for line in logs)
+        assert any("1/1 sample.pdf -> DONE" in line for line in logs)
         assert any("Extraktion abgeschlossen: 1 Job(s) verarbeitet." in line for line in logs)
+        assert len(refresh_calls) >= 2
+    finally:
+        app.destroy()
+
+
+def test_test_app_stop_extraction_sets_cooperative_flag(tmp_path) -> None:
+    app = _make_test_app(tmp_path)
+    try:
+        app._extraction_running = True
+        app.btn_stop_extraction.configure(state=tk.NORMAL)
+
+        app.stop_extraction()
+
+        assert app._stop_extraction_event.is_set()
+        assert app.btn_stop_extraction.cget("state") == tk.DISABLED
+        assert "gestoppt" in app.var_status.get()
+    finally:
+        app.destroy()
+
+
+def test_test_app_process_queue_respects_stop_before_next_job(tmp_path, monkeypatch) -> None:
+    calls: list[int] = []
+    logs: list[str] = []
+
+    class Result:
+        processed = True
+        job_id = "job1"
+        pdf_path = str(tmp_path / "sample.pdf")
+        queue_status = "DONE"
+        submit_status = "DONE"
+
+    def fake_process(project_root, snapshot):
+        calls.append(1)
+        return Result()
+
+    def fake_progress(self, result, processed_count, pending_count):
+        logs.append(f"progress:{processed_count}/{pending_count}")
+        self._stop_extraction_event.set()
+
+    monkeypatch.setattr(test_app, "process_next_pending", fake_process)
+    monkeypatch.setattr(test_app.TestApp, "_handle_extraction_progress", fake_progress)
+    monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
+    monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: None)
+
+    app = _make_test_app(tmp_path)
+    try:
+        monkeypatch.setattr(app, "after", lambda _delay, callback=None: callback() if callback else None)
+
+        app._process_queue_thread(app._build_worker_config_snapshot(), 2)
+
+        assert len(calls) == 1
+        assert "progress:1/2" in logs
+        assert any("gestoppt" in line for line in logs)
     finally:
         app.destroy()
 
