@@ -6,16 +6,20 @@ from src.testui.helpers import (
     format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
     format_duplicate_field_comparison,
+    format_enqueue_result,
     format_job_result_summary,
     format_partial_writes_note,
     format_queue_job_row,
     format_rules_report,
     format_runtime_options_summary,
+    format_submit_row_update,
     format_validation_status,
     format_watch_file_row,
     format_write_outputs,
     format_write_status_lines,
     humanize_job_error,
+    merge_file_rows_with_queue,
+    normalize_file_row_key,
 )
 
 
@@ -271,3 +275,79 @@ def test_test_app_presenters_format_device_queue_options_watch_and_validation():
     assert ok["status"] == "OK"
     assert bad["status"] == "FEHLER"
     assert bad["missing_files"] == "1"
+
+
+def test_file_row_key_normalizes_equivalent_paths(tmp_path):
+    pdf = tmp_path / "watch" / "sample.pdf"
+    key_direct = normalize_file_row_key(pdf)
+    key_relative = normalize_file_row_key(tmp_path / "watch" / "." / "sample.pdf")
+    assert key_direct
+    assert key_direct == key_relative
+
+
+def test_merge_file_rows_with_queue_is_non_mutating(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    file_rows = [
+        {
+            "file": "sample.pdf",
+            "path": str(pdf),
+            "source": "manual",
+            "queue_status": "",
+            "job_id": "",
+            "device_id": "",
+            "last_error": "",
+            "action": "bereit",
+        }
+    ]
+    queue_rows = [
+        {
+            "job_id": "abc",
+            "pdf_path": str(tmp_path / "." / "sample.pdf"),
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": "test-app-manual",
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "old",
+        }
+    ]
+
+    merged = merge_file_rows_with_queue(file_rows, queue_rows)
+
+    assert file_rows[0]["queue_status"] == ""
+    assert merged[0]["queue_status"] == "PENDING"
+    assert merged[0]["job_id"] == "abc"
+    assert merged[0]["last_error"] == "old"
+
+
+def test_enqueue_and_submit_presenters_are_compact():
+    enqueue = format_enqueue_result(
+        {
+            "job_id": "abc",
+            "pdf_path": "C:/in/sample.pdf",
+            "status": "PENDING",
+            "updated_at": "u",
+            "source": "test-app-manual",
+            "worker_id": "",
+            "attempts": 0,
+            "last_error": "",
+        }
+    )
+    assert "Queue: PENDING" in enqueue
+    assert "sample.pdf" in enqueue
+    assert "job_id=abc" in enqueue
+
+    update = format_submit_row_update(
+        {
+            "job_id": "done1",
+            "status": "SKIPPED",
+            "details": {"reason": "already_done"},
+        },
+        "dev1",
+    )
+    assert update == {
+        "job_id": "done1",
+        "device_id": "dev1",
+        "action": "PASS",
+        "last_error": "Bereits verarbeitet (Job-State DONE). Force rerun moeglich.",
+    }

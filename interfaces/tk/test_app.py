@@ -6,23 +6,27 @@ import threading
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from typing import Any
 
 from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
 from src.jobcontroller.api import submit
-from src.jobqueue.api import list_jobs
+from src.jobqueue.api import enqueue_pdf_job, list_jobs
 from src.ruleresolver.api import validate_rules_integrity
 from src.runtime.api import list_devices, load_runtime_config, resolve_app_root
 from src.testui.api import (
-    classify_job_outcome,
     format_device_choice,
     format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
     format_duplicate_field_comparison,
+    format_enqueue_result,
     format_job_result_summary,
+    format_submit_row_update,
     format_queue_job_row,
     format_runtime_options_summary,
     format_validation_status,
     format_watch_file_row,
+    merge_file_rows_with_queue,
+    normalize_file_row_key,
 )
 
 SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
@@ -52,6 +56,8 @@ class TestApp(tk.Tk):
         self._device_choice_to_id: dict[str, str] = {}
         self._watch_rows: dict[str, dict[str, str]] = {}
         self._duplicate_details: dict[int, dict[str, object]] = {}
+        self._busy = False
+        self._action_buttons: list[tk.Button] = []
 
         self._build_ui()
         self._refresh_devices()
@@ -85,10 +91,25 @@ class TestApp(tk.Tk):
     def _build_extractor_tab(self, parent: tk.Frame) -> None:
         controls = tk.Frame(parent)
         controls.pack(fill="x", padx=8, pady=8)
-        tk.Button(controls, text="Suchen", command=self.scan_watch_dir).pack(side="left")
-        tk.Button(controls, text="Dateien auswaehlen", command=self.pick_manual_files).pack(side="left", padx=(6, 0))
-        tk.Button(controls, text="Starten", command=self.start_selected_files).pack(side="left", padx=(6, 0))
-        tk.Button(controls, text="Liste aktualisieren", command=self.refresh_queue).pack(side="left", padx=(6, 0))
+        self.btn_scan_watch = tk.Button(controls, text="Watch-Ordner scannen", command=self.scan_watch_dir)
+        self.btn_scan_watch.pack(side="left")
+        self.btn_pick_files = tk.Button(controls, text="Dateien auswaehlen", command=self.pick_manual_files)
+        self.btn_pick_files.pack(side="left", padx=(6, 0))
+        self.btn_direct_submit = tk.Button(controls, text="Direkt verarbeiten", command=self.start_selected_files)
+        self.btn_direct_submit.pack(side="left", padx=(6, 0))
+        self.btn_enqueue = tk.Button(controls, text="In Queue stellen", command=self.enqueue_selected_files)
+        self.btn_enqueue.pack(side="left", padx=(6, 0))
+        self.btn_refresh_queue = tk.Button(controls, text="Liste aktualisieren", command=self.refresh_queue)
+        self.btn_refresh_queue.pack(side="left", padx=(6, 0))
+        self._action_buttons.extend(
+            [
+                self.btn_scan_watch,
+                self.btn_pick_files,
+                self.btn_direct_submit,
+                self.btn_enqueue,
+                self.btn_refresh_queue,
+            ]
+        )
 
         self.tree_files = ttk.Treeview(
             parent,
@@ -294,30 +315,41 @@ class TestApp(tk.Tk):
         rows = []
         if watch.exists():
             rows = [format_watch_file_row(path, source="watch") for path in sorted(watch.glob("*.pdf"))]
-        self._replace_file_rows(rows)
+        self._upsert_file_rows(rows, replace_source="watch")
         self.refresh_queue()
         self._log(f"Watch-Ordner gescannt: {len(rows)} PDF(s)")
 
     def pick_manual_files(self) -> None:
         files = filedialog.askopenfilenames(title="PDFs waehlen", filetypes=[("PDF Dateien", "*.pdf")])
         rows = [format_watch_file_row(path, source="manual") for path in files]
-        self._replace_file_rows(rows, append=True)
+        self._upsert_file_rows(rows)
+        self.refresh_queue()
         self._log(f"Manuelle PDFs hinzugefuegt: {len(rows)}")
 
-    def _replace_file_rows(self, rows: list[dict[str, str]], *, append: bool = False) -> None:
-        if not append:
-            self._watch_rows = {}
-            for item in self.tree_files.get_children():
-                self.tree_files.delete(item)
+    def _upsert_file_rows(self, rows: list[dict[str, str]], *, replace_source: str | None = None) -> None:
+        if replace_source is not None:
+            self._watch_rows = {
+                key: row
+                for key, row in self._watch_rows.items()
+                if row.get("source") != replace_source
+            }
         for row in rows:
-            path = row["path"]
-            self._watch_rows[path] = row
-            if self.tree_files.exists(path):
-                self.tree_files.delete(path)
+            key = normalize_file_row_key(row.get("path", ""))
+            if not key:
+                continue
+            current = dict(self._watch_rows.get(key, {}))
+            current.update(row)
+            self._watch_rows[key] = current
+        self._render_file_rows()
+
+    def _render_file_rows(self) -> None:
+        for item in self.tree_files.get_children():
+            self.tree_files.delete(item)
+        for key, row in self._watch_rows.items():
             self.tree_files.insert(
                 "",
                 tk.END,
-                iid=path,
+                iid=key,
                 values=(
                     row["file"],
                     row["source"],
@@ -331,43 +363,130 @@ class TestApp(tk.Tk):
             )
 
     def start_selected_files(self) -> None:
-        selection = list(self.tree_files.selection()) or list(self._watch_rows)
-        if not selection:
+        snapshot = self._build_action_snapshot()
+        if not snapshot["rows"]:
             messagebox.showinfo("Extractor", "Bitte zuerst PDFs suchen oder auswaehlen.")
             return
-        threading.Thread(target=self._submit_files_thread, args=(selection,), daemon=True).start()
+        if not self._start_background_action("Direkte Verarbeitung laeuft..."):
+            return
+        threading.Thread(target=self._submit_files_thread, args=(snapshot,), daemon=True).start()
 
-    def _submit_files_thread(self, paths: list[str]) -> None:
-        self.after(0, lambda: self.var_technical_status.set("running"))
-        for path in paths:
+    def enqueue_selected_files(self) -> None:
+        snapshot = self._build_action_snapshot()
+        if not snapshot["rows"]:
+            messagebox.showinfo("Queue", "Bitte zuerst PDFs suchen oder auswaehlen.")
+            return
+        if not self._start_background_action("Queue-Einreihung laeuft..."):
+            return
+        threading.Thread(target=self._enqueue_files_thread, args=(snapshot,), daemon=True).start()
+
+    def _build_action_snapshot(self) -> dict[str, Any]:
+        keys = list(self.tree_files.selection()) or list(self._watch_rows)
+        rows = [dict(self._watch_rows[key]) for key in keys if key in self._watch_rows]
+        return {
+            "project_root": str(self.project_root),
+            "output_mode": self.var_output_mode.get(),
+            "sqlite_path": self.var_sqlite_path.get().strip() or None,
+            "device_id": self._selected_device_id(),
+            "rows": rows,
+        }
+
+    def _start_background_action(self, message: str) -> bool:
+        if self._busy:
+            self._log("Aktion laeuft bereits.")
+            return False
+        self._busy = True
+        self.var_technical_status.set("running")
+        self.var_status.set(message)
+        self.progress.configure(mode="indeterminate")
+        self.progress.start(10)
+        self._set_action_buttons_state(tk.DISABLED)
+        return True
+
+    def _set_action_buttons_state(self, state: str) -> None:
+        for button in self._action_buttons:
+            button.configure(state=state)
+
+    def _submit_files_thread(self, snapshot: dict[str, Any]) -> None:
+        events: list[dict[str, object]] = []
+        for row in snapshot["rows"]:
+            path = str(row.get("path", ""))
             try:
                 res = submit(
                     path,
-                    str(self.project_root),
-                    output_mode=self.var_output_mode.get(),
-                    sqlite_path=self.var_sqlite_path.get().strip() or None,
-                    device_id=self._selected_device_id(),
+                    str(snapshot["project_root"]),
+                    output_mode=str(snapshot["output_mode"]),
+                    sqlite_path=snapshot["sqlite_path"],
+                    device_id=snapshot["device_id"],
                 )
-                outcome = classify_job_outcome(res.status, res.details)
                 summary = format_job_result_summary(
                     pdf_path=res.pdf_path,
                     job_id=res.job_id,
                     status=res.status,
                     details=res.details,
-                    outcome=outcome,
                 )
-                self.after(0, lambda msg=summary: self._log(msg))
-                if path in self._watch_rows:
-                    self._watch_rows[path]["action"] = outcome
-                    self._watch_rows[path]["job_id"] = res.job_id
-                    self._watch_rows[path]["device_id"] = self._selected_device_id() or ""
+                update = format_submit_row_update(res, snapshot["device_id"])
+                events.append({"path": path, "log": summary, "update": update})
             except Exception as e:
-                self.after(0, lambda msg=f"Fehler bei {Path(path).name}: {e}": self._log(msg))
-        self.after(0, self._finish_submit_thread)
+                events.append(
+                    {
+                        "path": path,
+                        "log": f"Fehler bei {Path(path).name}: {e}",
+                        "update": {"action": "FAIL", "last_error": str(e)},
+                    }
+                )
+        self.after(0, lambda: self._finish_background_action(events))
 
-    def _finish_submit_thread(self) -> None:
-        self.var_technical_status.set("idle")
-        self.refresh_queue()
+    def _enqueue_files_thread(self, snapshot: dict[str, Any]) -> None:
+        events: list[dict[str, object]] = []
+        for row in snapshot["rows"]:
+            path = str(row.get("path", ""))
+            row_source = str(row.get("source", "manual"))
+            source = "test-app-watch" if row_source == "watch" else "test-app-manual"
+            try:
+                job = enqueue_pdf_job(str(snapshot["project_root"]), path, source=source)
+                queue_row = format_queue_job_row(job)
+                events.append(
+                    {
+                        "path": path,
+                        "log": format_enqueue_result(job),
+                        "update": {
+                            "queue_status": queue_row["status"],
+                            "job_id": queue_row["job_id"],
+                            "last_error": queue_row["last_error"],
+                            "action": "queued",
+                        },
+                    }
+                )
+            except Exception as e:
+                events.append(
+                    {
+                        "path": path,
+                        "log": f"Queue-Fehler bei {Path(path).name}: {e}",
+                        "update": {"action": "FAIL", "last_error": str(e)},
+                    }
+                )
+        self.after(0, lambda: self._finish_background_action(events))
+
+    def _finish_background_action(self, events: list[dict[str, object]]) -> None:
+        try:
+            for event in events:
+                path = str(event.get("path", ""))
+                key = normalize_file_row_key(path)
+                update = event.get("update")
+                if key in self._watch_rows and isinstance(update, dict):
+                    self._watch_rows[key].update({str(k): str(v) for k, v in update.items()})
+                log = event.get("log")
+                if log:
+                    self._log(str(log))
+            self._render_file_rows()
+            self.refresh_queue()
+        finally:
+            self._busy = False
+            self.progress.stop()
+            self.progress.configure(mode="determinate", value=0)
+            self.var_technical_status.set("idle")
+            self._set_action_buttons_state(tk.NORMAL)
 
     def refresh_queue(self) -> None:
         rows = [format_queue_job_row(job) for job in list_jobs(str(self.project_root))]
@@ -390,14 +509,14 @@ class TestApp(tk.Tk):
                     row["path"],
                 ),
             )
-        for path, file_row in list(self._watch_rows.items()):
-            match = next((row for row in rows if row["path"] == path), None)
-            if match:
-                file_row["queue_status"] = match["status"]
-                file_row["job_id"] = match["job_id"]
-                file_row["last_error"] = match["last_error"]
+        merged_rows = merge_file_rows_with_queue(list(self._watch_rows.values()), rows)
+        self._watch_rows = {
+            normalize_file_row_key(row.get("path", "")): row
+            for row in merged_rows
+            if normalize_file_row_key(row.get("path", ""))
+        }
         if self._watch_rows:
-            self._replace_file_rows(list(self._watch_rows.values()))
+            self._render_file_rows()
 
     def validate_rules(self) -> None:
         report = validate_rules_integrity(

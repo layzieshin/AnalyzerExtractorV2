@@ -23,10 +23,26 @@ Hauptbereiche:
 - `DUPLIKATE`
 - `ADMIN`
 
+## Extractor-/Queue-Bedienung
+
+Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
+
+- `Watch-Ordner scannen` liest vorhandene PDFs aus dem eingestellten Watch-Ordner.
+- `Dateien auswaehlen` ergaenzt manuell gewaehlte PDFs.
+- `Direkt verarbeiten` ruft `src.jobcontroller.api.submit(...)` fuer die Auswahl auf.
+- `In Queue stellen` ruft `src.jobqueue.api.enqueue_pdf_job(...)` fuer die Auswahl auf.
+- `Liste aktualisieren` merged den Queue-Status aus `src.jobqueue.api.list_jobs(...)`.
+
+Watch- und manuelle Eintraege teilen dieselbe Arbeitsliste. Gleiche PDFs werden
+ueber normalisierte absolute Pfade dedupliziert. Wenn keine Zeile ausgewaehlt
+ist, arbeiten `Direkt verarbeiten` und `In Queue stellen` auf allen sichtbaren
+Dateizeilen.
+
 ## Grenzen
 
 - Keine PyQt-Abhaengigkeit in AREV2.
 - Keine dauerhaften Watchdog-/Worker-Prozesse aus der App.
+- `In Queue stellen` startet keinen Worker und keinen Watchdog.
 - Keine destruktiven Admin-Aktionen.
 - Keine Add-/Overwrite-Entscheidungen fuer Duplikate.
 - Keine `rules/*.json`-Aenderungen.

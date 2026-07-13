@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
@@ -252,6 +253,79 @@ def format_queue_job_row(job: object | Mapping[str, object]) -> Dict[str, str]:
     }
 
 
+def normalize_file_row_key(path: str | Path) -> str:
+    value = str(path or "").strip()
+    if not value:
+        return ""
+    try:
+        resolved = Path(value).expanduser().resolve(strict=False)
+    except Exception:
+        resolved = Path(value).expanduser().absolute()
+    return os.path.normcase(str(resolved))
+
+
+def merge_file_rows_with_queue(
+    file_rows: List[Mapping[str, object]],
+    queue_rows: List[object | Mapping[str, object]],
+) -> List[Dict[str, str]]:
+    queue_by_path: Dict[str, Dict[str, str]] = {}
+    for queue in queue_rows:
+        row = format_queue_job_row(queue)
+        key = normalize_file_row_key(row.get("path", ""))
+        if key:
+            queue_by_path[key] = row
+
+    merged: List[Dict[str, str]] = []
+    for item in file_rows:
+        row = {str(key): _string_or_empty(value) for key, value in item.items()}
+        queue = queue_by_path.get(normalize_file_row_key(row.get("path", "")))
+        if queue:
+            row["queue_status"] = queue["status"]
+            row["job_id"] = queue["job_id"]
+            row["last_error"] = queue["last_error"]
+        merged.append(row)
+    return merged
+
+
+def format_enqueue_result(job: object | Mapping[str, object]) -> str:
+    row = format_queue_job_row(job)
+    parts = [f"Queue: {row['status'] or '-'}", row["file"] or "?"]
+    if row["job_id"]:
+        parts.append(f"job_id={row['job_id']}")
+    if row["source"]:
+        parts.append(f"source={row['source']}")
+    if row["last_error"]:
+        parts.append(row["last_error"])
+    return " | ".join(parts)
+
+
+def format_submit_row_update(
+    result: object | Mapping[str, object],
+    device_id: str | None,
+) -> Dict[str, str]:
+    if isinstance(result, Mapping):
+        status = _string_or_empty(result.get("status"))
+        job_id = _string_or_empty(result.get("job_id"))
+        details = result.get("details")
+    else:
+        status = _string_or_empty(getattr(result, "status", ""))
+        job_id = _string_or_empty(getattr(result, "job_id", ""))
+        details = getattr(result, "details", None)
+
+    detail_map = details if isinstance(details, dict) else {}
+    reason = detail_map.get("reason")
+    error = detail_map.get("error")
+    return {
+        "job_id": job_id,
+        "device_id": _string_or_empty(device_id),
+        "action": classify_job_outcome(status, detail_map),
+        "last_error": humanize_job_error(
+            _string_or_empty(error),
+            _string_or_empty(reason) if reason else None,
+        ),
+    }
+
+
 def format_runtime_options_summary(options: Mapping[str, object]) -> List[str]:
     lines = [
         f"Output: {_string_or_empty(options.get('output_mode')) or '-'}",
@@ -265,9 +339,13 @@ def format_runtime_options_summary(options: Mapping[str, object]) -> List[str]:
 
 def format_watch_file_row(path: str | Path, *, source: str = "watch") -> Dict[str, str]:
     p = Path(path)
+    try:
+        display_path = str(p.expanduser().resolve(strict=False))
+    except Exception:
+        display_path = str(p)
     return {
         "file": p.name,
-        "path": str(p),
+        "path": display_path,
         "source": source,
         "queue_status": "",
         "job_id": "",
