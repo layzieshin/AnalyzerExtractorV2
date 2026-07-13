@@ -2,11 +2,11 @@
 
 Dieses Runbook beschreibt den stabilen Betrieb ohne GUI.
 
-## Abgrenzung zur Test-UI
+## Abgrenzung zur Test-App
 
-- Die Test-UI (`gui_min_ext.py`) nutzt absichtlich den Direktmodus (`submit`, RuleSuite, Rules-Validator).
-- Watchdog/Worker/Queue sind dort nicht enthalten.
-- Dieses Runbook gilt nur fuer den Headless-Dauerbetrieb mit Watchdog + Worker.
+- Die **neue Test-App** (`test_app_main.py`) nutzt Queue und Arbeitsliste (`jobs/queue/*`) und verarbeitet Jobs ueber dieselbe Worker-Logik wie der Headless-Betrieb (`interfaces/common/queue_worker.py`).
+- **Legacy Direktmodus** (`gui_min_ext.py` / `gui_min.py`) umgeht die Queue und ruft `submit` direkt auf.
+- Dieses Runbook gilt fuer den **Headless-Dauerbetrieb** mit separaten Watchdog- und Worker-Prozessen.
 
 ## 1) Startreihenfolge
 
@@ -65,7 +65,10 @@ Watchdog-Verhalten:
 ### A2) Max-Versuche erreicht (`max_attempts_exceeded`)
 - Ursache: Job wurde mehrfach geclaimt und ist wiederholt fehlgeschlagen.
 - Mechanismus: Nach `ARE_QUEUE_MAX_ATTEMPTS` (Default 5) bleibt der Queue-Job auf `FAILED`; Watchdog requeued ihn nicht mehr.
-- Maßnahme: Fehlerursache beheben, Queue-Eintrag manuell löschen oder `attempts` zurücksetzen.
+- Maßnahme: Fehlerursache beheben, dann explizit reaktivieren:
+  - Headless/API: `src.jobqueue.api.retry_failed_job(...)`
+  - Test-App: **Erneut starten** in der Arbeitsliste
+  - Alternativ: Queue-Eintrag manuell loeschen oder `attempts` zuruecksetzen (nur mit Bedacht)
 
 ### B) Pipeline-Lock blockiert Job (`reason=locked`)
 - Ursache: verwaiste `locks/<job_id>.lock`.
@@ -78,9 +81,13 @@ Watchdog-Verhalten:
 
 ## 5) Retry- und Fehlerstrategie
 
-- `FAILED` Queue-Jobs werden bei erneutem Watchdog-Enqueue auf `PENDING` zurückgesetzt, solange `attempts < ARE_QUEUE_MAX_ATTEMPTS`.
-- `SKIPPED:locked` wird im Worker als `PENDING` mit `deferred:*` zurückgestellt.
-- `SKIPPED:already_done` wird als `DONE` übernommen.
+- `FAILED` Queue-Jobs werden **nicht** durch erneutes Enqueue (Watchdog-Scan, erneutes Vormerken) automatisch reaktiviert.
+- Explizite Reaktivierung nur ueber:
+  - `src.jobqueue.api.retry_failed_job(...)` (API)
+  - Test-App: **Erneut starten** fuer ausgewaehlte fehlgeschlagene Jobs
+- Stale `PROCESSING` wird nach TTL wieder auf `PENDING` gesetzt (Recovery, kein manueller Retry).
+- `SKIPPED:locked` wird im Worker als `PENDING` mit `deferred:*` zurueckgestellt.
+- `SKIPPED:already_done` wird als `DONE` uebernommen.
 
 ## 6) Release-Gate (minimal)
 

@@ -82,8 +82,9 @@ status of `skipped_duplicate_pending`.
 Known ledger-first recovery case: if SQLite returns `inserted` but the following
 Excel write fails, the run is already present in the SQLite ledger. A later
 rerun can therefore be reported as `duplicate_pending` and will not
-automatically backfill Excel. Until AP-12B.2, inspect the run/candidate manually;
-the review list will provide the explicit recovery decision.
+automatically backfill Excel. Inspect the run/candidate manually in the
+**Duplikate** tab; explicit Add/Overwrite/Excel-recovery semantics remain
+follow-up work (see Follow-Up below).
 
 In `output_mode=excel`, behavior stays Excel-only. No SQLite duplicate queue is
 created in that mode.
@@ -116,5 +117,16 @@ should rely on the V2 default once the header contract fields are confirmed.
 
 ## Follow-Up
 
-AP-12B should add a duplicate review queue. AP-12A only keeps the previous skip behavior
-for duplicates in Excel/SQLite and makes the dedupe basis visible.
+AP-12B.1 and AP-12B.2 are done:
+
+- SQLite duplicate candidates are recorded when the uniqueness guard triggers.
+- The Test-App **Duplikate** tab lists candidates and supports manual discard.
+
+Still open (future packages):
+
+- **Add** — accept candidate as additional entry with audit trail
+- **Overwrite** — replace existing run/Excel row with explicit semantics
+- **Excel recovery** — backfill Excel after ledger-first insert + Excel write failure
+
+AP-12A established the visible dedupe basis and legacy skip behavior for duplicates
+in Excel/SQLite.
