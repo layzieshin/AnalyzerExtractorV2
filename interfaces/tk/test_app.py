@@ -42,6 +42,7 @@ from src.testui.api import (
     resolve_rework_context_source,
 )
 
+from .scroll_helpers import TreeviewSorter, create_scrollable_treeview
 from .watch_scan import InAppWatchScanner, list_watch_pdf_paths
 
 SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
@@ -175,12 +176,22 @@ class TestApp(tk.Tk):
         tk.Label(auto_status, textvariable=self.var_auto_watch_last_scan, anchor="w", width=26).pack(side="left")
         tk.Label(auto_status, textvariable=self.var_auto_watch_found, anchor="w").pack(side="left", fill="x", expand=True)
 
-        self.tree_files = ttk.Treeview(
+        self.tree_files, files_frame = create_scrollable_treeview(
             parent,
             columns=("file", "source", "queue_status", "device_id", "last_error", "action", "path", "job_id"),
             show="headings",
             height=16,
         )
+        file_headings = {
+            "file": "Datei",
+            "source": "Herkunft",
+            "queue_status": "Status",
+            "device_id": "Geraet",
+            "last_error": "Letzter Fehler",
+            "action": "Verarbeitung",
+            "path": "Pfad",
+            "job_id": "Job-ID",
+        }
         for col, title, width in (
             ("file", "Datei", 190),
             ("source", "Herkunft", 150),
@@ -191,9 +202,10 @@ class TestApp(tk.Tk):
             ("path", "Pfad", 360),
             ("job_id", "Job-ID", 140),
         ):
-            self.tree_files.heading(col, text=title)
             self.tree_files.column(col, width=width, anchor="w")
-        self.tree_files.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._tree_files_sorter = TreeviewSorter(self.tree_files)
+        self._tree_files_sorter.attach(file_headings)
+        files_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
     def _build_options_tab(self, parent: tk.Frame) -> None:
         form = tk.LabelFrame(parent, text="Testkonfiguration")
@@ -261,12 +273,19 @@ class TestApp(tk.Tk):
 
         rework_frame = tk.LabelFrame(parent, text="Nacharbeit aus fehlgeschlagenen Arbeitslisten-Jobs")
         rework_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.tree_rework = ttk.Treeview(
+        self.tree_rework, rework_tree_frame = create_scrollable_treeview(
             rework_frame,
             columns=("file", "error_label", "queue_status", "job_id", "context_label"),
             show="headings",
             height=8,
         )
+        rework_headings = {
+            "file": "Datei",
+            "error_label": "Fehler",
+            "queue_status": "Status",
+            "job_id": "Job-ID",
+            "context_label": "Kontext",
+        }
         for col, title, width in (
             ("file", "Datei", 190),
             ("error_label", "Fehler", 180),
@@ -274,9 +293,10 @@ class TestApp(tk.Tk):
             ("job_id", "Job-ID", 140),
             ("context_label", "Kontext", 180),
         ):
-            self.tree_rework.heading(col, text=title)
             self.tree_rework.column(col, width=width, anchor="w")
-        self.tree_rework.pack(fill="x", padx=8, pady=8)
+        self._tree_rework_sorter = TreeviewSorter(self.tree_rework)
+        self._tree_rework_sorter.attach(rework_headings)
+        rework_tree_frame.pack(fill="both", expand=True, padx=8, pady=8)
         self.tree_rework.bind("<<TreeviewSelect>>", self.on_rework_selected)
 
         candidate_frame = tk.LabelFrame(rework_frame, text="Assay-Kandidaten")
@@ -287,7 +307,7 @@ class TestApp(tk.Tk):
             anchor="w",
         )
         self.lbl_rework_candidates.pack(fill="x", padx=8, pady=(8, 4))
-        self.tree_rework_candidates = ttk.Treeview(
+        self.tree_rework_candidates, candidates_frame = create_scrollable_treeview(
             candidate_frame,
             columns=("assay_key", "name", "file", "line_no", "status", "confidence", "reason"),
             show="headings",
@@ -304,7 +324,7 @@ class TestApp(tk.Tk):
         ):
             self.tree_rework_candidates.heading(col, text=title)
             self.tree_rework_candidates.column(col, width=width, anchor="w")
-        self.tree_rework_candidates.pack(fill="x", padx=8, pady=(0, 8))
+        candidates_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         tk.Button(
             candidate_frame,
             text="Draft aus Kandidat erstellen",
@@ -333,7 +353,7 @@ class TestApp(tk.Tk):
         tk.Button(controls, text="Aktualisieren", command=self.refresh_duplicates).pack(side="left")
         tk.Button(controls, text="Kandidat verwerfen", command=self.discard_selected_duplicate).pack(side="left", padx=(6, 0))
 
-        self.tree_duplicates = ttk.Treeview(
+        self.tree_duplicates, duplicates_frame = create_scrollable_treeview(
             parent,
             columns=("id", "status", "assay", "device", "detected", "existing", "dedupe"),
             show="headings",
@@ -350,12 +370,12 @@ class TestApp(tk.Tk):
         ):
             self.tree_duplicates.heading(col, text=title)
             self.tree_duplicates.column(col, width=width, anchor="w")
-        self.tree_duplicates.pack(fill="x", padx=8, pady=(0, 8))
+        duplicates_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.tree_duplicates.bind("<<TreeviewSelect>>", self.on_duplicate_selected)
 
         self.txt_duplicate_detail = tk.Text(parent, height=8, wrap="word")
         self.txt_duplicate_detail.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.tree_duplicate_fields = ttk.Treeview(
+        self.tree_duplicate_fields, duplicate_fields_frame = create_scrollable_treeview(
             parent,
             columns=("field", "existing", "candidate", "same"),
             show="headings",
@@ -369,18 +389,28 @@ class TestApp(tk.Tk):
         ):
             self.tree_duplicate_fields.heading(col, text=title)
             self.tree_duplicate_fields.column(col, width=width, anchor="w")
-        self.tree_duplicate_fields.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        duplicate_fields_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
     def _build_admin_tab(self, parent: tk.Frame) -> None:
         controls = tk.Frame(parent)
         controls.pack(fill="x", padx=8, pady=8)
         tk.Button(controls, text="Queue aktualisieren", command=self.refresh_queue).pack(side="left")
-        self.tree_queue = ttk.Treeview(
+        self.tree_queue, queue_frame = create_scrollable_treeview(
             parent,
             columns=("job_id", "file", "status", "source", "attempts", "last_error", "updated_at", "path"),
             show="headings",
             height=12,
         )
+        queue_headings = {
+            "job_id": "Job-ID",
+            "file": "Datei",
+            "status": "Status",
+            "source": "Quelle",
+            "attempts": "Versuche",
+            "last_error": "Letzter Fehler",
+            "updated_at": "Aktualisiert",
+            "path": "Pfad",
+        }
         for col, title, width in (
             ("job_id", "Job-ID", 140),
             ("file", "Datei", 180),
@@ -391,9 +421,14 @@ class TestApp(tk.Tk):
             ("updated_at", "Aktualisiert", 170),
             ("path", "Pfad", 360),
         ):
-            self.tree_queue.heading(col, text=title)
             self.tree_queue.column(col, width=width, anchor="w")
-        self.tree_queue.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._tree_queue_sorter = TreeviewSorter(
+            self.tree_queue,
+            numeric_columns=("attempts",),
+            date_columns=("updated_at",),
+        )
+        self._tree_queue_sorter.attach(queue_headings)
+        queue_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
     def _selected_device_id(self) -> str | None:
         return self._device_choice_to_id.get(self.var_device_choice.get())
@@ -615,6 +650,7 @@ class TestApp(tk.Tk):
                     display["job_id"],
                 ),
             )
+        self._tree_files_sorter.resort()
 
     def start_extraction(self) -> None:
         pending_count = sum(1 for job in list_jobs(str(self.project_root)) if job.status == "PENDING")
@@ -786,6 +822,7 @@ class TestApp(tk.Tk):
                     row["path"],
                 ),
             )
+        self._tree_queue_sorter.resort()
         merged_rows = merge_file_rows_with_queue(
             [],
             jobs,
@@ -860,6 +897,7 @@ class TestApp(tk.Tk):
                     summary["context_label"],
                 ),
             )
+        self._tree_rework_sorter.resort()
 
     def on_rework_selected(self, _event: object = None) -> None:
         selection = self.tree_rework.selection()
@@ -1153,3 +1191,15 @@ def run_startup_smoke_check(project_root: str | Path | None = None) -> None:
     if any(bool(v) for v in report.values()):
         raise RuntimeError(f"rules_integrity_failed: {json.dumps(report, ensure_ascii=False)}")
     _ = load_runtime_config(root)
+
+
+def run_entry(module_file: str | Path) -> None:
+    app_root = resolve_app_root(Path(module_file))
+    if os.getenv("ARE_SMOKE_EXIT", "").strip() == "1":
+        run_startup_smoke_check(app_root)
+    elif os.getenv("ARE_START_RULE_EDITOR", "").strip() == "1":
+        from rule_editor_main import RuleEditorWindow
+
+        RuleEditorWindow(project_root=app_root).mainloop()
+    else:
+        main(project_root=app_root)

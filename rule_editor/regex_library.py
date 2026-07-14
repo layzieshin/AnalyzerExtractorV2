@@ -4,6 +4,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
+from interfaces.tk.scroll_helpers import create_scrollable_treeview
+
 REGEX_LIBRARY: list[dict[str, str]] = [
     {
         "name": "Zahl (ganz)",
@@ -155,12 +157,14 @@ class RegexLibraryPopup(tk.Toplevel):
         body = tk.Frame(self)
         body.pack(fill="both", expand=True, padx=10, pady=(0, 6))
 
-        self.tree = ttk.Treeview(body, columns=("pattern",), show="tree headings", height=10)
+        self.tree, tree_frame = create_scrollable_treeview(
+            body, columns=("pattern",), show="tree headings", height=10
+        )
         self.tree.heading("#0", text="Baustein")
         self.tree.heading("pattern", text="Muster")
         self.tree.column("#0", width=210, anchor="w")
         self.tree.column("pattern", width=200, anchor="w")
-        self.tree.pack(side="left", fill="both", expand=True)
+        tree_frame.pack(side="left", fill="both", expand=True)
         for idx, row in enumerate(REGEX_LIBRARY):
             self.tree.insert("", tk.END, iid=str(idx), text=row["name"], values=(row["pattern"],))
         self.tree.bind("<<TreeviewSelect>>", self._on_select)

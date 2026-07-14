@@ -59,6 +59,7 @@ def test_test_app_extractor_uses_friendly_controls_and_columns(tmp_path) -> None
         assert "Verarbeitung" in headings
         assert "Queue" not in headings
         assert headings[-1] == "Job-ID"
+        assert app.tree_files.cget("yscrollcommand")
     finally:
         app.destroy()
 

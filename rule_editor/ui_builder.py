@@ -4,6 +4,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
+from interfaces.tk.scroll_helpers import TreeviewSorter, create_scrollable_listbox, create_scrollable_treeview
+
 from .constants import HELP_TEXTS
 
 
@@ -150,25 +152,29 @@ class UiBuilderMixin:
         self.cmb_inventory_filter.pack(side="left")
         self.cmb_inventory_filter.bind("<<ComboboxSelected>>", self._on_inventory_filter_changed)
 
-        self.tree_rulesets = ttk.Treeview(
+        self.tree_rulesets, rulesets_frame = create_scrollable_treeview(
             manage,
             columns=("type", "key", "name", "file", "fields", "status"),
             show="headings",
             height=8,
         )
-        self.tree_rulesets.heading("type", text="Typ")
-        self.tree_rulesets.heading("key", text="Assay-Key")
-        self.tree_rulesets.heading("name", text="Name")
-        self.tree_rulesets.heading("file", text="Datei")
-        self.tree_rulesets.heading("fields", text="Felder")
-        self.tree_rulesets.heading("status", text="Status")
+        ruleset_headings = {
+            "type": "Typ",
+            "key": "Assay-Key",
+            "name": "Name",
+            "file": "Datei",
+            "fields": "Felder",
+            "status": "Status",
+        }
         self.tree_rulesets.column("type", width=70, anchor="w")
         self.tree_rulesets.column("key", width=110, anchor="w")
         self.tree_rulesets.column("name", width=220, anchor="w")
         self.tree_rulesets.column("file", width=260, anchor="w")
         self.tree_rulesets.column("fields", width=70, anchor="center")
         self.tree_rulesets.column("status", width=160, anchor="w")
-        self.tree_rulesets.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self._tree_rulesets_sorter = TreeviewSorter(self.tree_rulesets, numeric_columns=("fields",))
+        self._tree_rulesets_sorter.attach(ruleset_headings)
+        rulesets_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         self.tree_rulesets.bind("<Button-3>", self._show_inventory_context_menu)
 
     def _build_pdf_tab(self, parent: tk.Frame) -> None:
@@ -279,7 +285,7 @@ class UiBuilderMixin:
 
         legend_frame = tk.LabelFrame(marking_list, text="Felder und Treffer")
         legend_frame.pack(fill="both", expand=True)
-        self.tree_marking_legend = ttk.Treeview(
+        self.tree_marking_legend, marking_legend_frame = create_scrollable_treeview(
             legend_frame,
             columns=("status", "visible", "value"),
             show="tree headings",
@@ -293,7 +299,7 @@ class UiBuilderMixin:
         self.tree_marking_legend.column("status", width=82, anchor="center")
         self.tree_marking_legend.column("visible", width=58, anchor="center")
         self.tree_marking_legend.column("value", width=120, anchor="w")
-        self.tree_marking_legend.pack(fill="both", expand=True, padx=6, pady=6)
+        marking_legend_frame.pack(fill="both", expand=True, padx=6, pady=6)
         self.tree_marking_legend.bind("<<TreeviewSelect>>", self.on_marking_legend_selected)
 
         param_frame = tk.LabelFrame(marking_controls, text="Feld bearbeiten")
@@ -357,21 +363,25 @@ class UiBuilderMixin:
             wraplength=1200,
         )
 
-        self.tree_fields = ttk.Treeview(
+        self.tree_fields, fields_frame = create_scrollable_treeview(
             container,
             columns=("key", "regex", "required", "search_from"),
             show="headings",
             height=14,
         )
-        self.tree_fields.heading("key", text="Feld")
-        self.tree_fields.heading("regex", text="regex")
-        self.tree_fields.heading("required", text="Pflicht")
-        self.tree_fields.heading("search_from", text="search_from")
+        field_headings = {
+            "key": "Feld",
+            "regex": "regex",
+            "required": "Pflicht",
+            "search_from": "search_from",
+        }
         self.tree_fields.column("key", width=160, anchor="w")
         self.tree_fields.column("regex", width=560, anchor="w")
         self.tree_fields.column("required", width=90, anchor="center")
         self.tree_fields.column("search_from", width=180, anchor="w")
-        self.tree_fields.pack(fill="both", expand=True, pady=(8, 6))
+        self._tree_fields_sorter = TreeviewSorter(self.tree_fields)
+        self._tree_fields_sorter.attach(field_headings)
+        fields_frame.pack(fill="both", expand=True, pady=(8, 6))
         self.tree_fields.bind("<<TreeviewSelect>>", self.on_field_selected)
 
         edit = tk.LabelFrame(container, text="Feld-Editor")
@@ -437,7 +447,7 @@ class UiBuilderMixin:
 
         result_frame = tk.LabelFrame(container, text="Regex-Ergebnisse (pro Testlauf)")
         result_frame.pack(fill="both", expand=True, pady=(8, 6))
-        self.tree_regex_results = ttk.Treeview(
+        self.tree_regex_results, regex_results_frame = create_scrollable_treeview(
             result_frame,
             columns=("field_name", "status", "regex", "result", "context"),
             show="headings",
@@ -453,7 +463,7 @@ class UiBuilderMixin:
         self.tree_regex_results.column("regex", width=260, anchor="w")
         self.tree_regex_results.column("result", width=200, anchor="w")
         self.tree_regex_results.column("context", width=520, anchor="w")
-        self.tree_regex_results.pack(fill="both", expand=True, padx=6, pady=6)
+        regex_results_frame.pack(fill="both", expand=True, padx=6, pady=6)
         self.tree_regex_results.bind("<<TreeviewSelect>>", self.on_regex_result_selected)
 
         preview_frame = tk.LabelFrame(container, text="Regex-Treffer (direkt im Felder-Tab)")
@@ -495,12 +505,14 @@ class UiBuilderMixin:
         form.columnconfigure(1, weight=1)
 
         tk.Label(container, text="Spaltenzuordnung (column_mapping)").pack(anchor="w", padx=2)
-        self.tree_cols = ttk.Treeview(container, columns=("key", "column"), show="headings", height=10)
+        self.tree_cols, cols_frame = create_scrollable_treeview(
+            container, columns=("key", "column"), show="headings", height=10
+        )
         self.tree_cols.heading("key", text="Feldname")
         self.tree_cols.heading("column", text="Excel-Spalte")
         self.tree_cols.column("key", width=220, anchor="w")
         self.tree_cols.column("column", width=320, anchor="w")
-        self.tree_cols.pack(fill="both", expand=True, pady=(2, 6))
+        cols_frame.pack(fill="both", expand=True, pady=(2, 6))
         self.tree_cols.bind("<<TreeviewSelect>>", self.on_col_selected)
 
         col_edit = tk.Frame(container)
@@ -547,8 +559,8 @@ class UiBuilderMixin:
 
         val_frame = tk.LabelFrame(container, text="Validierung")
         val_frame.pack(fill="both", expand=True)
-        self.list_validation = tk.Listbox(val_frame, height=12)
-        self.list_validation.pack(fill="both", expand=True, padx=6, pady=6)
+        self.list_validation, validation_frame = create_scrollable_listbox(val_frame, height=12)
+        validation_frame.pack(fill="both", expand=True, padx=6, pady=6)
 
     def _build_log_tab(self, parent: tk.Frame) -> None:
         container = tk.Frame(parent)

@@ -68,6 +68,7 @@ class ManageMixin:
                     status,
                 ),
             )
+        self._tree_rulesets_sorter.resort()
 
     def _selected_inventory_row(self) -> dict[str, object] | None:
         if self.tree_rulesets is None:

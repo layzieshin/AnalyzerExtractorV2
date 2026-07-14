@@ -4,6 +4,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
+from interfaces.tk.scroll_helpers import create_scrollable_listbox, create_scrollable_treeview
+
 from .regex_library import RegexLibraryPopup
 
 _REQUIRED_STATUS_LABELS = {
@@ -134,16 +136,18 @@ class WizardUiMixin:
             wraplength=1000,
             fg="#444",
         ).pack(fill="x", padx=6, pady=(8, 4))
-        self.list_required = tk.Listbox(req, height=6, exportselection=False)
-        self.list_required.pack(fill="x", padx=6, pady=(0, 8))
+        self.list_required, required_frame = create_scrollable_listbox(req, height=6, exportselection=False)
+        required_frame.pack(fill="both", expand=True, padx=6, pady=(0, 8))
         self.list_required.bind("<<ListboxSelect>>", self._on_required_field_selected)
 
         cand = tk.LabelFrame(card, text="Kandidaten (Vorschau)")
         cand.pack(fill="x", pady=(8, 0))
         self.lbl_candidates_summary = tk.Label(cand, text="", anchor="w", fg="#444", wraplength=1000)
         self.lbl_candidates_summary.pack(fill="x", padx=6, pady=(8, 4))
-        self.list_candidates_preview = tk.Listbox(cand, height=4, exportselection=False)
-        self.list_candidates_preview.pack(fill="x", padx=6, pady=(0, 8))
+        self.list_candidates_preview, candidates_preview_frame = create_scrollable_listbox(
+            cand, height=4, exportselection=False
+        )
+        candidates_preview_frame.pack(fill="both", expand=True, padx=6, pady=(0, 8))
 
     def _build_confirm_card(self, card: tk.Frame) -> None:
         form = tk.LabelFrame(card, text="Pflichtfeld pruefen")
@@ -194,8 +198,8 @@ class WizardUiMixin:
             fg="#444",
             wraplength=1000,
         ).pack(fill="x", padx=6, pady=(8, 4))
-        self.list_candidates = tk.Listbox(cand, height=5, exportselection=False)
-        self.list_candidates.pack(fill="x", padx=6, pady=(0, 4))
+        self.list_candidates, candidates_frame = create_scrollable_listbox(cand, height=5, exportselection=False)
+        candidates_frame.pack(fill="both", expand=True, padx=6, pady=(0, 4))
         self.list_candidates.bind("<<ListboxSelect>>", self._on_candidate_selected)
         cand_btns = tk.Frame(cand)
         cand_btns.pack(fill="x", padx=6, pady=(0, 8))
@@ -253,8 +257,8 @@ class WizardUiMixin:
     def _build_finish_card(self, card: tk.Frame) -> None:
         form = tk.LabelFrame(card, text="Zusammenfassung")
         form.pack(fill="x")
-        self.list_summary = tk.Listbox(form, height=7)
-        self.list_summary.pack(fill="x", padx=6, pady=(8, 6))
+        self.list_summary, summary_frame = create_scrollable_listbox(form, height=7)
+        summary_frame.pack(fill="both", expand=True, padx=6, pady=(8, 6))
         tk.Radiobutton(
             form,
             text="Draft im Editor oeffnen (empfohlen: dort weiter pruefen und kontrolliert aktivieren)",

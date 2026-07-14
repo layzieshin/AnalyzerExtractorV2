@@ -33,6 +33,7 @@ class FieldsMixin:
             self.tree_fields.selection_set(selected_item)
             self.tree_fields.focus(selected_item)
             self.tree_fields.see(selected_item)
+        self._tree_fields_sorter.resort()
 
     def _render_search_from(self, search_from: object) -> str:
         if not isinstance(search_from, dict):
