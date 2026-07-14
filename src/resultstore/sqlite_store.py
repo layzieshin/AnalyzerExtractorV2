@@ -184,7 +184,31 @@ def _resolve_path(store_spec: dict[str, Any]) -> Path:
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    if not path.is_file():
+        raise sqlite3.OperationalError(f"unable to open database file: {path}")
+
+    if _is_unc_or_network_path(path):
+        return _connect_direct_readonly(path)
+
+    try:
+        return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        if "invalid uri authority" in str(exc).lower():
+            return _connect_direct_readonly(path)
+        raise
+
+
+def _is_unc_or_network_path(path: Path) -> bool:
+    text = str(path)
+    if text.startswith("\\\\"):
+        return True
+    return path.as_posix().startswith("//")
+
+
+def _connect_direct_readonly(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA query_only = ON")
+    return conn
 
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
