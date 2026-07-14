@@ -9,6 +9,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from src.ruleresolver.api import RuleSet
 from src.extractor.api import AssayRecord
+from .excel_table import sync_worksheet_table
 from .model import WriteResult
 
 
@@ -68,6 +69,7 @@ class Writer:
         # Dedupe prüfen
         existing = self._existing_dedupe_keys(ws, headers)
         if record.dedupe_key in existing:
+            sync_worksheet_table(ws, wb, headers, sheet_name)
             wb.save(excel_path)
             return "skipped"
 
@@ -95,6 +97,7 @@ class Writer:
 
         ws.append(row_values)
 
+        sync_worksheet_table(ws, wb, headers, sheet_name)
         wb.save(excel_path)
         return status_base
 
