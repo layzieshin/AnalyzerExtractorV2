@@ -80,7 +80,15 @@ DTO/Error exports:
 
 ### Test UI Helpers
 
-- `src.testui.api.*` (Presenter fuer Test-App: Arbeitsliste, Nacharbeit, Duplikate, Formatierung)
+- `src.testui.api.*` (Presenter fuer Test-App: Arbeitsliste, Nacharbeit, Duplikate, DB-Viewer, Formatierung)
+
+### Result Store (read-only)
+
+- `src.resultstore.api.get_result_store_status`
+- `src.resultstore.api.list_result_assays`
+- `src.resultstore.api.list_result_charges`
+- `src.resultstore.api.list_result_runs`
+- `src.resultstore.api.get_result_run`
 
 ## Nicht-Public
 

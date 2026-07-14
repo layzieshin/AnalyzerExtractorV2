@@ -731,3 +731,30 @@ def test_format_rework_item_detail_contains_paths_and_root_cause(tmp_path):
     assert "Queue-Fehler:" in detail
     assert "State-Fehler:" in detail
     assert str(dump) in detail
+
+
+def test_default_result_columns_and_row_formatting():
+    from src.testui.helpers import (
+        build_result_column_catalog,
+        default_result_columns,
+        format_result_run_row,
+        normalize_visible_result_columns,
+    )
+
+    run = {
+        "id": 1,
+        "assay_key": "(1111)",
+        "lot_id": "LOT-A",
+        "device_id": "dev1",
+        "pdf_path": "/tmp/a.pdf",
+        "result_date": "2026-01-01",
+        "payload": {"TEST": "1.2"},
+    }
+    catalog = build_result_column_catalog([run])
+    visible = normalize_visible_result_columns(default_result_columns(), catalog)
+    row = format_result_run_row(run, visible)
+    assert row[0] == "2026-01-01"
+    assert row[1] == "(1111)"
+    assert row[2] == "LOT-A"
+    assert "payload:TEST" in catalog
+    assert "payload:TEST" not in visible

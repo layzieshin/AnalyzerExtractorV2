@@ -21,9 +21,17 @@ from src.jobqueue.api import enqueue_pdf_job, list_jobs, retry_failed_job
 from src.ruleresolver.api import validate_rules_integrity
 from src.rulesuite.api import create_draft_from_template_if_missing
 from src.runtime.api import list_devices, load_runtime_config, resolve_app_root
+from src.resultstore.api import (
+    get_result_store_status,
+    list_result_assays,
+    list_result_charges,
+    list_result_runs,
+)
 from src.testui.api import (
     REWORK_FILTER_LABELS,
     build_rework_items,
+    build_result_column_catalog,
+    default_result_columns,
     filter_rework_items,
     format_device_choice,
     format_duplicate_candidate_detail,
@@ -31,6 +39,8 @@ from src.testui.api import (
     format_duplicate_field_comparison,
     format_extractor_file_row,
     format_queue_job_row,
+    format_result_run_detail,
+    format_result_run_row,
     format_rework_context_text,
     format_rework_item_detail,
     format_rework_item_summary,
@@ -38,6 +48,7 @@ from src.testui.api import (
     format_validation_status,
     merge_file_rows_with_queue,
     normalize_file_row_key,
+    normalize_visible_result_columns,
     preferred_rework_dump_path,
     resolve_rework_context_source,
 )
@@ -45,7 +56,7 @@ from src.testui.api import (
 from .scroll_helpers import TreeviewSorter, create_scrollable_treeview
 from .watch_scan import InAppWatchScanner, list_watch_pdf_paths
 
-SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
+SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "DATENBANK", "ADMIN")
 REWORK_CANDIDATE_STATUS_LABELS = {
     "known": "bekannt",
     "unknown": "unbekannt",
@@ -98,6 +109,14 @@ class TestApp(tk.Tk):
         self._rework_items_all: list[dict[str, object]] = []
         self._rework_candidates_by_id: dict[str, dict[str, str]] = {}
         self.var_rework_filter = tk.StringVar(value="Alle")
+        self.var_db_assay = tk.StringVar(value="")
+        self.var_db_charge = tk.StringVar(value="")
+        self.var_db_status = tk.StringVar(value="Datenbank noch nicht geladen.")
+        self._db_runs: list[dict[str, object]] = []
+        self._db_runs_by_id: dict[str, dict[str, object]] = {}
+        self._db_visible_columns: list[str] = default_result_columns()
+        self._db_column_catalog: dict[str, str] = {}
+        self._tree_db_sorter: TreeviewSorter | None = None
         self._busy = False
         self._extraction_running = False
         self._stop_extraction_event = threading.Event()
@@ -124,6 +143,7 @@ class TestApp(tk.Tk):
         self._build_rule_suite_tab(self._tabs["RULE SUITE"])
         self._build_logs_tab(self._tabs["LOGS"])
         self._build_duplicates_tab(self._tabs["DUPLIKATE"])
+        self._build_database_tab(self._tabs["DATENBANK"])
         self._build_admin_tab(self._tabs["ADMIN"])
 
         status = tk.Frame(self)
@@ -390,6 +410,179 @@ class TestApp(tk.Tk):
             self.tree_duplicate_fields.heading(col, text=title)
             self.tree_duplicate_fields.column(col, width=width, anchor="w")
         duplicate_fields_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _build_database_tab(self, parent: tk.Frame) -> None:
+        controls = tk.Frame(parent)
+        controls.pack(fill="x", padx=8, pady=8)
+        tk.Button(controls, text="Datenbank laden", command=self.refresh_database).pack(side="left")
+        tk.Label(controls, text="Assay").pack(side="left", padx=(12, 4))
+        self.cmb_db_assay = ttk.Combobox(controls, textvariable=self.var_db_assay, state="readonly", width=18)
+        self.cmb_db_assay.pack(side="left")
+        self.cmb_db_assay.bind("<<ComboboxSelected>>", self.on_db_assay_selected)
+        tk.Label(controls, text="CHARGE").pack(side="left", padx=(12, 4))
+        self.cmb_db_charge = ttk.Combobox(controls, textvariable=self.var_db_charge, state="readonly", width=18)
+        self.cmb_db_charge.pack(side="left")
+        tk.Button(controls, text="Einträge anzeigen", command=self.show_database_runs).pack(side="left", padx=(12, 0))
+        tk.Button(controls, text="Spalten ein-/ausblenden...", command=self.configure_database_columns).pack(
+            side="left", padx=(6, 0)
+        )
+
+        status = tk.Frame(parent)
+        status.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(status, textvariable=self.var_db_status, anchor="w").pack(side="left", fill="x", expand=True)
+
+        self.tree_db_runs, db_runs_frame = create_scrollable_treeview(
+            parent,
+            columns=tuple(self._db_visible_columns),
+            show="headings",
+            height=14,
+            horizontal=True,
+        )
+        self._apply_result_columns(self._db_visible_columns, self._db_runs)
+        db_runs_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.tree_db_runs.bind("<<TreeviewSelect>>", self.on_database_run_selected)
+
+        self.txt_db_detail = tk.Text(parent, height=10, wrap="word")
+        self.txt_db_detail.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._set_text(self.txt_db_detail, "")
+
+    def _database_store_spec(self) -> dict[str, str]:
+        return {"driver": "sqlite", "path": str(self._sqlite_path())}
+
+    def refresh_database(self) -> None:
+        status = get_result_store_status(self._database_store_spec())
+        self.var_db_status.set(str(status.get("message") or "Unbekannter Status."))
+        if not status.get("available"):
+            self.cmb_db_assay.configure(values=[])
+            self.cmb_db_charge.configure(values=[])
+            self.var_db_assay.set("")
+            self.var_db_charge.set("")
+            self._db_runs = []
+            self._db_runs_by_id = {}
+            self._apply_result_columns(self._db_visible_columns, self._db_runs)
+            self._set_text(self.txt_db_detail, "")
+            self._log(f"Datenbank: {status.get('message', 'nicht verfügbar')}")
+            return
+
+        assays = [row["assay_key"] for row in list_result_assays(self._database_store_spec())]
+        self.cmb_db_assay.configure(values=assays)
+        if assays and self.var_db_assay.get() not in assays:
+            self.var_db_assay.set(assays[0])
+        elif not assays:
+            self.var_db_assay.set("")
+        self.on_db_assay_selected()
+        warnings = status.get("schema_warnings") or []
+        if warnings:
+            self.var_db_status.set(f"{status.get('message', '')} | {'; '.join(warnings)}")
+        self._log(f"Datenbank geladen: {len(assays)} Assay(s).")
+
+    def on_db_assay_selected(self, _event: object = None) -> None:
+        assay_key = self.var_db_assay.get().strip()
+        if not assay_key:
+            self.cmb_db_charge.configure(values=[""])
+            self.var_db_charge.set("")
+            return
+        charges = [""] + [row["lot_id"] for row in list_result_charges(self._database_store_spec(), assay_key)]
+        self.cmb_db_charge.configure(values=charges)
+        if self.var_db_charge.get() not in charges:
+            self.var_db_charge.set("")
+
+    def show_database_runs(self) -> None:
+        assay_key = self.var_db_assay.get().strip()
+        if not assay_key:
+            messagebox.showinfo("Datenbank", "Bitte Assay wählen.")
+            return
+        charge = self.var_db_charge.get().strip() or None
+        result = list_result_runs(
+            self._database_store_spec(),
+            assay_key=assay_key,
+            charge=charge,
+        )
+        self._db_runs = list(result.get("runs") or [])
+        self._db_runs_by_id = {str(run.get("id")): run for run in self._db_runs if run.get("id") is not None}
+        self._db_column_catalog = build_result_column_catalog(self._db_runs)
+        visible = normalize_visible_result_columns(self._db_visible_columns, self._db_column_catalog)
+        self._apply_result_columns(visible, self._db_runs)
+        status_parts = [f"{result.get('total_returned', 0)} Eintrag/Einträge"]
+        if result.get("truncated"):
+            status_parts.append("Anzeige auf 500 Einträge begrenzt")
+        self.var_db_status.set(" | ".join(status_parts))
+        self._set_text(self.txt_db_detail, "")
+        self._log(f"Datenbank-Einträge geladen: {result.get('total_returned', 0)}.")
+
+    def configure_database_columns(self) -> None:
+        if not self._db_column_catalog:
+            self._db_column_catalog = build_result_column_catalog(self._db_runs)
+        if not self._db_column_catalog:
+            messagebox.showinfo("Datenbank", "Bitte zuerst Einträge laden.")
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Spalten ein-/ausblenden")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        vars_by_id: dict[str, tk.BooleanVar] = {}
+        frame = tk.Frame(dialog)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        for col_id in sorted(self._db_column_catalog.keys(), key=lambda key: self._db_column_catalog[key].lower()):
+            var = tk.BooleanVar(value=col_id in self._db_visible_columns)
+            vars_by_id[col_id] = var
+            tk.Checkbutton(frame, text=self._db_column_catalog[col_id], variable=var).pack(anchor="w")
+
+        buttons = tk.Frame(dialog)
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+
+        def apply_columns() -> None:
+            selected = [col_id for col_id, var in vars_by_id.items() if var.get()]
+            self._db_visible_columns = normalize_visible_result_columns(selected, self._db_column_catalog)
+            self._apply_result_columns(self._db_visible_columns, self._db_runs)
+            dialog.destroy()
+
+        tk.Button(buttons, text="Übernehmen", command=apply_columns).pack(side="right")
+        tk.Button(buttons, text="Abbrechen", command=dialog.destroy).pack(side="right", padx=(0, 6))
+
+    def _apply_result_columns(self, visible_columns: list[str], runs: list[dict[str, object]]) -> None:
+        if not self._db_column_catalog:
+            self._db_column_catalog = build_result_column_catalog(runs)
+        self._db_visible_columns = list(visible_columns)
+        for item in self.tree_db_runs.get_children():
+            self.tree_db_runs.delete(item)
+
+        headings = {
+            col_id: self._db_column_catalog.get(col_id, col_id)
+            for col_id in visible_columns
+        }
+        self.tree_db_runs["columns"] = tuple(visible_columns)
+        for col_id in visible_columns:
+            title = headings.get(col_id, col_id)
+            self.tree_db_runs.heading(col_id, text=title)
+            width = 360 if col_id == "meta:pdf_path" else 140
+            self.tree_db_runs.column(col_id, width=width, anchor="w")
+
+        for run in runs:
+            run_id = run.get("id")
+            if run_id is None:
+                continue
+            iid = str(run_id)
+            self.tree_db_runs.insert(
+                "",
+                tk.END,
+                iid=iid,
+                values=format_result_run_row(run, visible_columns),
+            )
+
+        self._tree_db_sorter = TreeviewSorter(self.tree_db_runs)
+        self._tree_db_sorter.attach(headings)
+
+    def on_database_run_selected(self, _event: object = None) -> None:
+        sel = self.tree_db_runs.selection()
+        if not sel:
+            return
+        run = self._db_runs_by_id.get(str(sel[0]))
+        if not run:
+            return
+        self._set_text(self.txt_db_detail, format_result_run_detail(run))
 
     def _build_admin_tab(self, parent: tk.Frame) -> None:
         controls = tk.Frame(parent)

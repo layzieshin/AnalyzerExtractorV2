@@ -40,6 +40,7 @@ REQUIRED_IMPORTS = [
     "src.assaycandidate.api",
     "src.jobqueue.api",
     "src.testui.api",
+    "src.resultstore.api",
     "src.rulesuite.api",
 ]
 

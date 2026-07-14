@@ -8,7 +8,7 @@ from interfaces.tk import test_app
 
 
 def test_test_app_sections_are_defined() -> None:
-    assert test_app.SECTION_KEYS == ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "ADMIN")
+    assert test_app.SECTION_KEYS == ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "DATENBANK", "ADMIN")
 
 
 def test_test_app_class_constructable_when_tk_available(tmp_path) -> None:
@@ -1473,6 +1473,44 @@ def _write_valid_rules_for_smoke(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_test_app_database_tab_controls_exist(tmp_path) -> None:
+    app = _make_test_app(tmp_path)
+    try:
+        assert "DATENBANK" in app._tabs
+        assert hasattr(app, "tree_db_runs")
+        assert hasattr(app, "txt_db_detail")
+        assert hasattr(app, "cmb_db_assay")
+        assert hasattr(app, "cmb_db_charge")
+        assert app.tree_db_runs.cget("yscrollcommand")
+    finally:
+        app.destroy()
+
+
+def test_test_app_apply_result_columns_rebuilds_tree(tmp_path) -> None:
+    app = _make_test_app(tmp_path)
+    try:
+        runs = [
+            {
+                "id": 1,
+                "assay_key": "(1111)",
+                "lot_id": "LOT-A",
+                "device_id": "dev1",
+                "pdf_path": "/tmp/a.pdf",
+                "result_date": "2026-01-01",
+                "payload": {"TEST": "1.2"},
+            }
+        ]
+        app._db_runs = runs
+        app._db_runs_by_id = {"1": runs[0]}
+        app._apply_result_columns(["result_date", "meta:assay_key", "payload:TEST"], runs)
+        values = app.tree_db_runs.item("1", "values")
+        assert values[0] == "2026-01-01"
+        assert values[1] == "(1111)"
+        assert values[2] == "1.2"
+    finally:
+        app.destroy()
 
 
 def test_test_app_startup_smoke_check_accepts_valid_rules(tmp_path) -> None:

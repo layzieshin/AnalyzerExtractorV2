@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from .helpers import (
     build_rework_items,
+    build_result_column_catalog,
     classify_job_outcome,
+    default_result_columns,
     filter_rework_items,
     format_assay_data_detail,
     format_assay_overview_rows,
@@ -16,6 +18,8 @@ from .helpers import (
     format_job_result_summary,
     format_partial_writes_note,
     format_queue_job_row,
+    format_result_run_detail,
+    format_result_run_row,
     format_rework_context_text,
     format_rework_item_detail,
     format_rework_item_summary,
@@ -30,6 +34,7 @@ from .helpers import (
     load_job_state,
     merge_file_rows_with_queue,
     normalize_file_row_key,
+    normalize_visible_result_columns,
     preferred_rework_dump_path,
     resolve_rework_context_source,
     REWORK_FILTER_LABELS,
@@ -37,7 +42,9 @@ from .helpers import (
 
 __all__ = [
     "build_rework_items",
+    "build_result_column_catalog",
     "classify_job_outcome",
+    "default_result_columns",
     "format_assay_data_detail",
     "format_assay_overview_rows",
     "format_device_choice",
@@ -51,6 +58,8 @@ __all__ = [
     "format_job_result_summary",
     "format_partial_writes_note",
     "format_queue_job_row",
+    "format_result_run_detail",
+    "format_result_run_row",
     "format_rework_context_text",
     "format_rework_item_detail",
     "format_rework_item_summary",
@@ -65,6 +74,7 @@ __all__ = [
     "load_job_state",
     "merge_file_rows_with_queue",
     "normalize_file_row_key",
+    "normalize_visible_result_columns",
     "preferred_rework_dump_path",
     "resolve_rework_context_source",
     "REWORK_FILTER_LABELS",

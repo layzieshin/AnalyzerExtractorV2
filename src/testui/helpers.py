@@ -863,3 +863,112 @@ def _object_field(obj: object | Mapping[str, object], key: str) -> str:
     if isinstance(obj, Mapping):
         return _string_or_empty(obj.get(key))
     return _string_or_empty(getattr(obj, key, None))
+
+
+RESULT_COLUMN_LABELS: Dict[str, str] = {
+    "result_date": "DATUM",
+    "meta:assay_key": "Assay",
+    "meta:lot_id": "CHARGE",
+    "meta:device_id": "Gerät",
+    "meta:pdf_path": "PDF",
+    "meta:id": "Run-ID",
+    "meta:job_id": "Job-ID",
+    "meta:dedupe_key": "Dedupe-Key",
+    "meta:dedupe_version": "Dedupe-Version",
+    "meta:created_at": "created_at",
+    "meta:ruleset_file": "Ruleset",
+    "meta:pdf_sha256": "PDF-SHA256",
+    "meta:assay_block_hash": "Assay-Block-Hash",
+}
+
+
+def default_result_columns() -> List[str]:
+    return [
+        "result_date",
+        "meta:assay_key",
+        "meta:lot_id",
+        "meta:device_id",
+        "meta:pdf_path",
+    ]
+
+
+def build_result_column_catalog(runs: List[Mapping[str, object]]) -> Dict[str, str]:
+    catalog = dict(RESULT_COLUMN_LABELS)
+    for run in runs:
+        payload = run.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        for key in payload.keys():
+            col_id = f"payload:{key}"
+            if col_id not in catalog:
+                catalog[col_id] = str(key)
+    return catalog
+
+
+def normalize_visible_result_columns(visible: List[str], catalog: Mapping[str, str]) -> List[str]:
+    defaults = default_result_columns()
+    normalized: List[str] = []
+    for col_id in visible or defaults:
+        if col_id in catalog and col_id not in normalized:
+            normalized.append(col_id)
+    if not normalized:
+        return [col_id for col_id in defaults if col_id in catalog]
+    return normalized
+
+
+def format_result_run_row(run: Mapping[str, object], visible_columns: List[str]) -> tuple[str, ...]:
+    values: List[str] = []
+    for col_id in visible_columns:
+        values.append(_format_result_column_value(run, col_id))
+    return tuple(values)
+
+
+def format_result_run_detail(run: Mapping[str, object]) -> str:
+    lines = [
+        f"Run-ID: {run.get('id', '')}",
+        f"Job-ID: {run.get('job_id', '')}",
+        f"Assay: {run.get('assay_key', '')}",
+        f"CHARGE: {run.get('lot_id', '')}",
+        f"Gerät: {run.get('device_id', '')}",
+        f"PDF: {run.get('pdf_path', '')}",
+        f"Dedupe-Key: {run.get('dedupe_key', '')}",
+        f"Dedupe-Version: {run.get('dedupe_version', '')}",
+        f"Ruleset: {run.get('ruleset_file', '')}",
+        f"Ergebnisdatum: {run.get('result_date', '')}",
+        f"created_at: {run.get('created_at', '')}",
+        f"PDF-SHA256: {run.get('pdf_sha256', '')}",
+        f"Assay-Block-Hash: {run.get('assay_block_hash', '')}",
+    ]
+    if run.get("payload_parse_error"):
+        lines.append(f"payload_parse_error: {run.get('payload_parse_error')}")
+    if run.get("dedupe_basis_parse_error"):
+        lines.append(f"dedupe_basis_parse_error: {run.get('dedupe_basis_parse_error')}")
+
+    payload = run.get("payload")
+    if isinstance(payload, Mapping) and payload:
+        lines.append("Payload:")
+        for key, value in sorted(payload.items(), key=lambda kv: str(kv[0])):
+            lines.append(f"  {key}: {_format_duplicate_value(value)}")
+
+    dedupe_basis = run.get("dedupe_basis")
+    if isinstance(dedupe_basis, Mapping) and dedupe_basis:
+        lines.append("Dedupe-Basis:")
+        for key, value in sorted(dedupe_basis.items(), key=lambda kv: str(kv[0])):
+            lines.append(f"  {key}: {_format_duplicate_value(value)}")
+
+    return "\n".join(lines)
+
+
+def _format_result_column_value(run: Mapping[str, object], col_id: str) -> str:
+    if col_id == "result_date":
+        return _string_or_empty(run.get("result_date"))
+    if col_id.startswith("meta:"):
+        key = col_id.split(":", 1)[1]
+        return _string_or_empty(run.get(key))
+    if col_id.startswith("payload:"):
+        key = col_id.split(":", 1)[1]
+        payload = run.get("payload")
+        if isinstance(payload, Mapping):
+            return _format_duplicate_value(payload.get(key))
+        return ""
+    return ""
