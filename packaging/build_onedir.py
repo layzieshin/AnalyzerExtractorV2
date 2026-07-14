@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib
 import importlib.util
 import json
@@ -57,16 +58,29 @@ SECRET_NAME_MARKERS = (
 
 
 def main() -> None:
+    args = _parse_args()
     os.chdir(PROJECT_ROOT)
     _preflight()
     _clean_outputs()
-    _run_pyinstaller()
+    _run_pyinstaller(diet_experiment=args.diet_experiment)
+    _prune_unneeded_bundle_payload()
     _prepare_runtime_tree()
     _verify_bundle()
     _run_bundle_smoke_check()
     _write_zip()
+    _print_size_report()
     print(f"[build] done: {APP_DIR}")
     print(f"[build] zip:  {ZIP_PATH}")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build AREV2 onedir bundle")
+    parser.add_argument(
+        "--diet-experiment",
+        action="store_true",
+        help="Skip --collect-all for pymupdf/fitz; hidden imports remain",
+    )
+    return parser.parse_args()
 
 
 def _preflight() -> None:
@@ -100,8 +114,9 @@ def _clean_outputs() -> None:
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def _run_pyinstaller() -> None:
-    print("[build] running PyInstaller onedir")
+def _run_pyinstaller(*, diet_experiment: bool = False) -> None:
+    mode = "diet-experiment" if diet_experiment else "default"
+    print(f"[build] running PyInstaller onedir ({mode})")
     command = [
         sys.executable,
         "-m",
@@ -132,12 +147,31 @@ def _run_pyinstaller() -> None:
         "rule_editor_main",
     ]
 
-    for package_name in ("fitz", "pymupdf", "openpyxl"):
+    collect_all_packages = ["openpyxl"]
+    if not diet_experiment:
+        collect_all_packages = ["fitz", "pymupdf", "openpyxl"]
+
+    for package_name in collect_all_packages:
         if importlib.util.find_spec(package_name) is not None:
             command.extend(["--collect-all", package_name])
 
     command.append(str(ENTRY_POINT))
     _run(command, cwd=PROJECT_ROOT)
+
+
+def _prune_unneeded_bundle_payload() -> None:
+    tzdata_dir = APP_DIR / "_internal" / "_tcl_data" / "tzdata"
+    if not tzdata_dir.exists():
+        print("[build] tzdata prune: nothing to remove")
+        return
+
+    files = [path for path in tzdata_dir.rglob("*") if path.is_file()]
+    total_bytes = sum(path.stat().st_size for path in files)
+    shutil.rmtree(tzdata_dir)
+    print(
+        "[build] tzdata prune: removed "
+        f"{len(files)} files, {total_bytes / (1024 * 1024):.2f} MB"
+    )
 
 
 def _prepare_runtime_tree() -> None:
@@ -167,6 +201,9 @@ def _verify_bundle() -> None:
     _require_dir(APP_DIR / "input" / "watch")
     if (APP_DIR / "rules" / "drafts").exists():
         raise SystemExit("[verify] rules/drafts must not be bundled")
+    tzdata_dir = APP_DIR / "_internal" / "_tcl_data" / "tzdata"
+    if tzdata_dir.exists():
+        raise SystemExit("[verify] bundled tzdata must be pruned")
     _check_no_obvious_secret_files(APP_DIR)
 
     print("[verify] checking bundled rules")
@@ -195,6 +232,43 @@ def _write_zip() -> None:
             if path.is_file():
                 archive.write(path, path.relative_to(DIST_ROOT))
     _require_file(ZIP_PATH)
+
+
+def _print_size_report() -> None:
+    print("[build] size report")
+    onedir_bytes = _tree_size(APP_DIR)
+    print(f"[build] onedir total: {_format_mib(onedir_bytes)}")
+
+    internal_dir = APP_DIR / "_internal"
+    if internal_dir.is_dir():
+        top_entries = sorted(
+            ((entry.name, _tree_size(entry)) for entry in internal_dir.iterdir()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        print("[build] top _internal entries:")
+        for name, size_bytes in top_entries[:12]:
+            print(f"[build]   {name}: {_format_mib(size_bytes)}")
+
+    largest_files = sorted(
+        ((path, path.stat().st_size) for path in APP_DIR.rglob("*") if path.is_file()),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    print("[build] top files:")
+    for path, size_bytes in largest_files[:15]:
+        print(f"[build]   {path.relative_to(APP_DIR)}: {_format_mib(size_bytes)}")
+
+    if ZIP_PATH.is_file():
+        print(f"[build] zip total: {_format_mib(ZIP_PATH.stat().st_size)}")
+
+
+def _tree_size(root: Path) -> int:
+    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+
+
+def _format_mib(size_bytes: int) -> str:
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 
 def _check_no_obvious_secret_files(root: Path) -> None:
