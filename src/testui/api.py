@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from .helpers import (
+    build_assay_filter_choices,
     build_rework_items,
     build_result_column_catalog,
+    build_result_display_context,
     classify_job_outcome,
     default_result_columns,
     filter_rework_items,
     format_assay_data_detail,
+    format_assay_display_label,
     format_assay_overview_rows,
     format_device_choice,
     format_duplicate_candidate_detail,
@@ -37,15 +40,19 @@ from .helpers import (
     normalize_visible_result_columns,
     preferred_rework_dump_path,
     resolve_rework_context_source,
+    ResultDisplayContext,
     REWORK_FILTER_LABELS,
 )
 
 __all__ = [
+    "build_assay_filter_choices",
     "build_rework_items",
     "build_result_column_catalog",
+    "build_result_display_context",
     "classify_job_outcome",
     "default_result_columns",
     "format_assay_data_detail",
+    "format_assay_display_label",
     "format_assay_overview_rows",
     "format_device_choice",
     "format_duplicate_candidate_detail",
@@ -77,5 +84,6 @@ __all__ = [
     "normalize_visible_result_columns",
     "preferred_rework_dump_path",
     "resolve_rework_context_source",
+    "ResultDisplayContext",
     "REWORK_FILTER_LABELS",
 ]

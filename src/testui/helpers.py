@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Sequence, TypedDict
 
 
 def classify_job_outcome(status: str, details: Dict[str, Any]) -> str:
@@ -867,7 +867,7 @@ def _object_field(obj: object | Mapping[str, object], key: str) -> str:
 
 RESULT_COLUMN_LABELS: Dict[str, str] = {
     "result_date": "DATUM",
-    "meta:assay_key": "Assay",
+    "meta:assay_key": "Assay-Name",
     "meta:lot_id": "CHARGE",
     "meta:device_id": "Gerät",
     "meta:pdf_path": "PDF",
@@ -882,6 +882,126 @@ RESULT_COLUMN_LABELS: Dict[str, str] = {
 }
 
 
+class ResultDisplayContext(TypedDict):
+    assay_labels: Dict[str, str]
+    payload_labels: Dict[str, str]
+
+
+def _assay_key_suffix(assay_key: str) -> str:
+    key = str(assay_key or "").strip()
+    if len(key) >= 2 and key.startswith("(") and key.endswith(")"):
+        return key[1:-1]
+    return key
+
+
+def _ruleset_name_by_key(rulesets: Sequence[Mapping[str, object]]) -> Dict[str, str]:
+    names: Dict[str, str] = {}
+    for row in rulesets:
+        if not isinstance(row, Mapping):
+            continue
+        assay_key = str(row.get("assay_key", "")).strip()
+        if not assay_key:
+            continue
+        names[assay_key] = str(row.get("assay_name", "")).strip()
+    return names
+
+
+def _ambiguous_assay_names(names_by_key: Mapping[str, str]) -> set[str]:
+    counts: Dict[str, int] = {}
+    for name in names_by_key.values():
+        if not name:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    return {name for name, count in counts.items() if count > 1}
+
+
+def format_assay_display_label(
+    assay_key: str,
+    assay_name: str,
+    *,
+    ambiguous_names: set[str] | None = None,
+) -> str:
+    key = str(assay_key or "").strip()
+    name = str(assay_name or "").strip()
+    if not name:
+        return f"Unbekannter Assay ({key})" if key else "Unbekannter Assay"
+    if ambiguous_names and name in ambiguous_names:
+        suffix = _assay_key_suffix(key)
+        return f"{name} ({suffix})" if suffix else name
+    return name
+
+
+def build_assay_filter_choices(
+    rulesets: Sequence[Mapping[str, object]],
+    assay_keys: Sequence[str],
+) -> List[Dict[str, str]]:
+    names_by_key = _ruleset_name_by_key(rulesets)
+    ambiguous = _ambiguous_assay_names(names_by_key)
+    choices: List[Dict[str, str]] = []
+    for assay_key in assay_keys:
+        key = str(assay_key or "").strip()
+        if not key:
+            continue
+        label = format_assay_display_label(key, names_by_key.get(key, ""), ambiguous_names=ambiguous)
+        choices.append({"label": label, "assay_key": key})
+    return choices
+
+
+def build_result_display_context(
+    rulesets: Sequence[Mapping[str, object]],
+    assay_keys: Sequence[str],
+    column_mapping: Mapping[str, str] | None = None,
+) -> ResultDisplayContext:
+    names_by_key = _ruleset_name_by_key(rulesets)
+    ambiguous = _ambiguous_assay_names(names_by_key)
+    assay_labels: Dict[str, str] = {}
+    for assay_key in assay_keys:
+        key = str(assay_key or "").strip()
+        if not key:
+            continue
+        assay_labels[key] = format_assay_display_label(
+            key,
+            names_by_key.get(key, ""),
+            ambiguous_names=ambiguous,
+        )
+
+    payload_labels: Dict[str, str] = {}
+    if column_mapping:
+        for field_key, label in column_mapping.items():
+            key = str(field_key or "").strip()
+            if not key:
+                continue
+            payload_labels[key] = str(label or key).strip() or key
+
+    return {
+        "assay_labels": assay_labels,
+        "payload_labels": payload_labels,
+    }
+
+
+def _empty_result_display_context() -> ResultDisplayContext:
+    return {"assay_labels": {}, "payload_labels": {}}
+
+
+def build_result_column_catalog(
+    runs: List[Mapping[str, object]],
+    display_context: ResultDisplayContext | Mapping[str, object] | None = None,
+) -> Dict[str, str]:
+    context = _normalize_result_display_context(display_context)
+    catalog = dict(RESULT_COLUMN_LABELS)
+    payload_labels = context.get("payload_labels") or {}
+    for run in runs:
+        payload = run.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        for key in payload.keys():
+            field_key = str(key)
+            col_id = f"payload:{field_key}"
+            if col_id not in catalog:
+                catalog[col_id] = str(payload_labels.get(field_key, field_key))
+    return catalog
+
+
 def default_result_columns() -> List[str]:
     return [
         "result_date",
@@ -892,17 +1012,17 @@ def default_result_columns() -> List[str]:
     ]
 
 
-def build_result_column_catalog(runs: List[Mapping[str, object]]) -> Dict[str, str]:
-    catalog = dict(RESULT_COLUMN_LABELS)
-    for run in runs:
-        payload = run.get("payload")
-        if not isinstance(payload, Mapping):
-            continue
-        for key in payload.keys():
-            col_id = f"payload:{key}"
-            if col_id not in catalog:
-                catalog[col_id] = str(key)
-    return catalog
+def _normalize_result_display_context(
+    display_context: ResultDisplayContext | Mapping[str, object] | None,
+) -> ResultDisplayContext:
+    if not display_context:
+        return _empty_result_display_context()
+    assay_labels = display_context.get("assay_labels")
+    payload_labels = display_context.get("payload_labels")
+    return {
+        "assay_labels": dict(assay_labels) if isinstance(assay_labels, Mapping) else {},
+        "payload_labels": dict(payload_labels) if isinstance(payload_labels, Mapping) else {},
+    }
 
 
 def normalize_visible_result_columns(visible: List[str], catalog: Mapping[str, str]) -> List[str]:
@@ -916,10 +1036,15 @@ def normalize_visible_result_columns(visible: List[str], catalog: Mapping[str, s
     return normalized
 
 
-def format_result_run_row(run: Mapping[str, object], visible_columns: List[str]) -> tuple[str, ...]:
+def format_result_run_row(
+    run: Mapping[str, object],
+    visible_columns: List[str],
+    display_context: ResultDisplayContext | Mapping[str, object] | None = None,
+) -> tuple[str, ...]:
+    context = _normalize_result_display_context(display_context)
     values: List[str] = []
     for col_id in visible_columns:
-        values.append(_format_result_column_value(run, col_id))
+        values.append(_format_result_column_value(run, col_id, context))
     return tuple(values)
 
 
@@ -959,9 +1084,19 @@ def format_result_run_detail(run: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _format_result_column_value(run: Mapping[str, object], col_id: str) -> str:
+def _format_result_column_value(
+    run: Mapping[str, object],
+    col_id: str,
+    display_context: ResultDisplayContext | None = None,
+) -> str:
+    context = display_context or _empty_result_display_context()
     if col_id == "result_date":
         return _string_or_empty(run.get("result_date"))
+    if col_id == "meta:assay_key":
+        assay_key = _string_or_empty(run.get("assay_key")).strip()
+        if assay_key in context["assay_labels"]:
+            return context["assay_labels"][assay_key]
+        return format_assay_display_label(assay_key, "")
     if col_id.startswith("meta:"):
         key = col_id.split(":", 1)[1]
         return _string_or_empty(run.get(key))

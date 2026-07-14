@@ -1502,13 +1502,18 @@ def test_test_app_apply_result_columns_rebuilds_tree(tmp_path) -> None:
                 "payload": {"TEST": "1.2"},
             }
         ]
+        app._db_display_context = {
+            "assay_labels": {"(1111)": "Vitamin D"},
+            "payload_labels": {"TEST": "Testwert"},
+        }
         app._db_runs = runs
         app._db_runs_by_id = {"1": runs[0]}
         app._apply_result_columns(["result_date", "meta:assay_key", "payload:TEST"], runs)
         values = app.tree_db_runs.item("1", "values")
         assert values[0] == "2026-01-01"
-        assert values[1] == "(1111)"
+        assert values[1] == "Vitamin D"
         assert values[2] == "1.2"
+        assert app._db_column_catalog["payload:TEST"] == "Testwert"
     finally:
         app.destroy()
 

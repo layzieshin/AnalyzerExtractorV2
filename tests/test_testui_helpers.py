@@ -736,6 +736,7 @@ def test_format_rework_item_detail_contains_paths_and_root_cause(tmp_path):
 def test_default_result_columns_and_row_formatting():
     from src.testui.helpers import (
         build_result_column_catalog,
+        build_result_display_context,
         default_result_columns,
         format_result_run_row,
         normalize_visible_result_columns,
@@ -750,11 +751,59 @@ def test_default_result_columns_and_row_formatting():
         "result_date": "2026-01-01",
         "payload": {"TEST": "1.2"},
     }
-    catalog = build_result_column_catalog([run])
+    context = build_result_display_context(
+        [{"assay_key": "(1111)", "assay_name": "Vitamin D"}],
+        ["(1111)"],
+        {"TEST": "Testwert"},
+    )
+    catalog = build_result_column_catalog([run], context)
     visible = normalize_visible_result_columns(default_result_columns(), catalog)
-    row = format_result_run_row(run, visible)
+    row = format_result_run_row(run, visible, context)
     assert row[0] == "2026-01-01"
-    assert row[1] == "(1111)"
+    assert row[1] == "Vitamin D"
     assert row[2] == "LOT-A"
-    assert "payload:TEST" in catalog
+    assert catalog["payload:TEST"] == "Testwert"
     assert "payload:TEST" not in visible
+
+
+def test_format_assay_display_label_unique_and_ambiguous():
+    from src.testui.helpers import build_assay_filter_choices, format_assay_display_label
+
+    assert format_assay_display_label("(1111)", "Vitamin D") == "Vitamin D"
+    assert format_assay_display_label("(1111)", "Vitamin D", ambiguous_names={"Vitamin D"}) == "Vitamin D (1111)"
+    assert format_assay_display_label("(9999)", "") == "Unbekannter Assay ((9999))"
+
+    choices = build_assay_filter_choices(
+        [
+            {"assay_key": "(1111)", "assay_name": "Vitamin D"},
+            {"assay_key": "(2222)", "assay_name": "Vitamin D"},
+            {"assay_key": "(3333)", "assay_name": ""},
+        ],
+        ["(1111)", "(2222)", "(3333)"],
+    )
+    assert choices[0] == {"label": "Vitamin D (1111)", "assay_key": "(1111)"}
+    assert choices[1] == {"label": "Vitamin D (2222)", "assay_key": "(2222)"}
+    assert choices[2] == {"label": "Unbekannter Assay ((3333))", "assay_key": "(3333)"}
+
+
+def test_build_result_column_catalog_uses_payload_labels():
+    from src.testui.helpers import build_result_column_catalog, build_result_display_context
+
+    run = {"payload": {"test": "1.0", "time": "12:00:00"}}
+    context = build_result_display_context(
+        [{"assay_key": "(1111)", "assay_name": "Vitamin D"}],
+        ["(1111)"],
+        {"test": "Test", "time": "Zeit"},
+    )
+    catalog = build_result_column_catalog([run], context)
+    assert catalog["payload:test"] == "Test"
+    assert catalog["payload:time"] == "Zeit"
+
+
+def test_format_result_run_detail_keeps_technical_assay_key():
+    from src.testui.helpers import format_result_run_detail
+
+    detail = format_result_run_detail({"id": 7, "assay_key": "(1111)", "dedupe_key": "abc"})
+    assert "Assay: (1111)" in detail
+    assert "Run-ID: 7" in detail
+    assert "Dedupe-Key: abc" in detail
