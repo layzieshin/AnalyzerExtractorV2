@@ -1,11 +1,13 @@
 from pathlib import Path
+import os
+import time
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
 from src.extractor.model import AssayRecord
 from src.ruleresolver.model import RuleSet
-from src.writer.api import write_record
+from src.writer.api import update_validation_metadata, write_record
 from src.writer.excel_table import headers_table_eligible, sync_worksheet_table
 from src.writer.writer import WriterError
 
@@ -54,6 +56,19 @@ def test_writer_lock_file_blocks_write(tmp_path: Path):
     rec = AssayRecord(assay_key="(1111)", lot_id="LOT1", dedupe_key="K1", data={})
     with pytest.raises(WriterError):
         write_record(rec, _ruleset(), str(out))
+
+
+def test_writer_reclaims_stale_runtime_lock(tmp_path: Path):
+    out = tmp_path / "final"
+    out.mkdir(parents=True)
+    lock = out / ".excel_writer.lock"
+    lock.write_text("", encoding="utf-8")
+    stale = time.time() - 901.0
+    os.utime(lock, (stale, stale))
+    rec = AssayRecord(assay_key="(1111)", lot_id="LOT1", dedupe_key="K1", data={})
+    result = write_record(rec, _ruleset(), str(out))
+    assert result.status == "created"
+    assert not lock.exists()
 
 
 def test_writer_first_write_creates_excel_table(tmp_path: Path):
@@ -182,3 +197,54 @@ def test_writer_workbook_unique_are_table_names(tmp_path: Path):
     names = {table.displayName for ws in wb.worksheets for table in ws.tables.values()}
     assert len(names) == 2
     assert all(name.startswith("ARE_") for name in names)
+
+
+def test_validated_write_is_idempotent_and_correction_updates_only_metadata(tmp_path: Path):
+    out = tmp_path / "final"
+    rec = AssayRecord(
+        assay_key="(1111)",
+        lot_id="LOT1",
+        dedupe_key="K1",
+        data={"date": "2026-01-01", "value": "42"},
+        device_id="dev1",
+        dedupe_version="v2",
+    )
+    rs = _ruleset()
+    first = write_record(
+        rec,
+        rs,
+        str(out),
+        validated_by="AB",
+        validated_at="2026-09-25T10:00:00+00:00",
+    )
+    retry = write_record(
+        rec,
+        rs,
+        str(out),
+        validated_by="AB",
+        validated_at="2026-09-25T10:00:00+00:00",
+    )
+    assert retry.status == "skipped"
+    wb = load_workbook(first.excel_path)
+    ws = wb[first.sheet_name]
+    headers = [cell.value for cell in ws[1]]
+    before_values = {header: ws.cell(2, index + 1).value for index, header in enumerate(headers)}
+    assert before_values["VALIDIERT_DURCH"] == "AB"
+    assert before_values["VALIDIERT_AM"] == "2026-09-25T10:00:00+00:00"
+
+    updated = update_validation_metadata(
+        rec,
+        rs,
+        str(out),
+        validated_by="CD",
+        validated_at="2026-09-25T11:00:00+00:00",
+    )
+    wb = load_workbook(updated.excel_path)
+    ws = wb[updated.sheet_name]
+    after_values = {header: ws.cell(2, index + 1).value for index, header in enumerate(headers)}
+    assert ws.max_row == 2
+    assert after_values["VALIDIERT_DURCH"] == "CD"
+    assert after_values["VALIDIERT_AM"] == "2026-09-25T11:00:00+00:00"
+    for header in headers:
+        if header not in {"VALIDIERT_DURCH", "VALIDIERT_AM"}:
+            assert after_values[header] == before_values[header]

@@ -1,0 +1,39 @@
+---
+description: Step-by-step agent workflow and verification commands for AREV2
+globs:
+alwaysApply: true
+---
+
+# Agent workflow
+
+Read [`AGENTS.md`](../AGENTS.md) first for search-before-create guardrails, entrypoint inventory, and scope rules. This file owns **workflow steps** and **verification commands** only.
+
+## Workflow
+
+1. Do not implement the whole task in one pass.
+2. Write a short numbered plan with small, independently testable steps.
+3. Execute **one step** at a time.
+4. After each step, run the smallest relevant command from the matrix below.
+5. Do not continue if tests or smoke checks fail — fix within the current step.
+6. Report after each step: what changed, files touched, command run, pass/fail, next step.
+7. Prefer minimal diffs; extend existing entrypoints/APIs/UI tabs before creating new ones.
+8. Do not combine multiple roadmap packages in one implementation task.
+
+## Verification matrix
+
+Run from repository root with `.\.venv\Scripts\python.exe`.
+
+| Change area | Command |
+|-------------|---------|
+| Default / any structural change | `.\.venv\Scripts\python.exe -m pytest -q` |
+| Rules JSON integrity | `.\.venv\Scripts\python.exe rules_validate_main.py` |
+| Architecture gates only | `.\.venv\Scripts\python.exe -m pytest tests/test_architecture_gates.py -q` |
+| Adapter / `interfaces/*` / root wrappers | above + `$env:ARE_WATCHDOG_ONCE="1"; .\.venv\Scripts\python.exe watchdog_main.py` and `$env:ARE_WORKER_ONCE="1"; .\.venv\Scripts\python.exe worker_main.py` |
+| Test-App / Tk UI | `.\.venv\Scripts\python.exe -m pytest tests/test_desktop_ui_v21.py tests/test_test_app_smoke.py -q` |
+| Rule matrix (functional preview) | `.\.venv\Scripts\python.exe rules_matrix_main.py --mode preview` |
+| Packaging / bundle | `.\.venv\Scripts\python.exe packaging/build_onedir.py` |
+| E2E harness smoke | `.\.venv\Scripts\python.exe main02.py` |
+
+Interpretation hints: [`docs/TESTBASELINE.md`](../docs/TESTBASELINE.md), [`docs/DEDUPE_POLICY.md`](../docs/DEDUPE_POLICY.md), [`docs/KNOWN_ISSUES.md`](../docs/KNOWN_ISSUES.md).
+
+No linter/typechecker is configured — do not invent lint/typecheck steps.

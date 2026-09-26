@@ -4,8 +4,6 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox
 
-from src.rulesuite.api import batch_check_fields, test_regex
-
 from .regex_library import RegexLibraryPopup
 
 
@@ -32,7 +30,7 @@ class RegexMixin:
             self._set_hint("regex_group muss integer sein.")
             return
 
-        res = test_regex(self.assay_block_text, regex, group=group)
+        res = self._rules.test_regex(self.assay_block_text, regex, group=group)
         self.txt_block.tag_remove("hit", "1.0", tk.END)
         record = self._build_regex_result_record(
             regex,
@@ -51,9 +49,9 @@ class RegexMixin:
             end_idx = f"1.0+{end}c"
             self.txt_block.tag_add("hit", start_idx, end_idx)
             self.txt_block.see(start_idx)
-            self._set_hint("Regex-Treffer markiert (Felder-Tab + PDF-Tab).")
+            self._set_hint("Regex-Treffer markiert (Feldeditor und PDF-Testbericht).")
         elif res.get("error"):
-            self._set_hint("Regex-Fehler. Details im Felder-Tab und Log.")
+            self._set_hint("Regex-Fehler. Details in den Feldeinstellungen und im Log.")
         else:
             if regex.lstrip().startswith("^"):
                 self._set_hint("Kein Treffer. Hinweis: '^' sucht nur am Zeilenanfang; vor dem Begriff kann noch Text stehen.")
@@ -191,7 +189,7 @@ class RegexMixin:
             return
         try:
             group = int(self.var_regex_group.get().strip() or "1")
-            out = batch_check_fields(self.current_draft_path, self.assay_block_text, group=group)
+            out = self._rules.batch_check_fields(self.current_draft_path, self.assay_block_text, group=group)
             self._log(
                 f"[BATCH] total={out.get('total_fields')} hits={out.get('hits')} "
                 f"misses={out.get('misses')} errors={out.get('errors')}"

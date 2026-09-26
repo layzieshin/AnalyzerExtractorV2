@@ -154,13 +154,31 @@
     "excel_filename_template": "{assay_name}.xlsx",
     "sheetname_template": "{lot_id}",
     "column_mapping": {
-      "plate_name": "Plattenname",
+      "ANWENDER": "ANWENDER",
       "time": "Zeit",
-      "user": "Anwender",
       "date": "Datum",
+      "PLATTE": "PLATTE",
       "test": "Test",
-      "lot_id": "Lot",
-      "lot_expiry_date": "Lot_Haltbarkeit"
+      "CHARGE": "CHARGE",
+      "Haltbarkeit": "Haltbarkeit",
+      "VALIDATION": "VALIDATION",
+      "UG_PCQ1": "UG PCQ1",
+      "ZIEL_PCQ1": "ZIEL PCQ1",
+      "OG_PCQ1": "OG PCQ1",
+      "UG_NCQ1": "UG NCQ1",
+      "ZIEL_NCQ1": "ZIEL NCQ1",
+      "OG_NCQ1": "OG NCQ1",
+      "PCQ1": "PCQ1",
+      "NCQ1": "NCQ1",
+      "SOLL_S1": "SOLL S1",
+      "IST_S1": "IST S1",
+      "S1_MIN": "S1 MIN",
+      "SOLL_S2": "SOLL S2",
+      "IST_S2": "IST S2",
+      "S2_MIN": "S2 MIN",
+      "SOLL_S3": "SOLL S3",
+      "IST_S3": "IST S3",
+      "FILE_NAME": "FILE_NAME"
     }
   }
 }

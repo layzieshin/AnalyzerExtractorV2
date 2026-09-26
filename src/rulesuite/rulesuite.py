@@ -8,7 +8,9 @@ Die Fachlogik ist nach Verantwortlichkeit in Submodule aufgeteilt:
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List
@@ -23,7 +25,9 @@ from src.ruleresolver.api import RuleSet, resolve_ruleset
 from . import regex_tools
 from .diffing import collect_diffs
 from .errors import RuleSuiteError
+from .history import snapshot_existing_active_ruleset
 from .json_io import _read_json_object, _safe_filename, _safe_key, _write_json_atomic
+from .lifecycle import rulesuite_draft_lock, rulesuite_lifecycle_lock
 from .validation import _validate_draft_data
 
 __all__ = ["RuleSuite", "RuleSuiteError", "_validate_draft_data"]
@@ -121,38 +125,54 @@ class RuleSuite:
         regex: str,
         required: bool = False,
         search_from: Dict[str, Any] | None = None,
-    ) -> Path:
-        key = key.strip()
-        if not key:
-            raise RuleSuiteError("field key required")
-        data = self.load_draft(draft_path)
-        fields = _ensure_fields(data)
-        if any(str(f.get("key", "")).strip() == key for f in fields):
-            raise RuleSuiteError(f"field_exists: {key}")
+        *,
+        excel_column: str | None = None,
+        dedupe_member: bool | None = None,
+        return_receipt: bool = False,
+    ) -> Path | Dict[str, Any]:
+        path = Path(draft_path)
 
-        row: Dict[str, Any] = {"key": key, "regex": regex, "required": bool(required)}
-        if search_from is not None:
-            row["search_from"] = search_from
-        fields.append(row)
-        _ensure_column_mapping_entry(data, key)
-        return self.save_draft(draft_path, data)
+        def _mutate(data: Dict[str, Any]) -> None:
+            _apply_field_addition(
+                data,
+                key=key,
+                regex=regex,
+                required=required,
+                search_from=search_from,
+                excel_column=excel_column,
+                dedupe_member=dedupe_member,
+            )
 
-    def remove_field(self, draft_path: str, field_key: str) -> Path:
-        data = self.load_draft(draft_path)
-        fields = _ensure_fields(data)
-        out = [f for f in fields if str(f.get("key", "")).strip() != field_key]
-        if len(out) == len(fields):
-            raise RuleSuiteError(f"field_not_found: {field_key}")
-        data.setdefault("extract_rules", {})["fields"] = out
+        receipt = _locked_draft_mutation(
+            path,
+            _mutate,
+            failure_code="draft_add_failed",
+            conflict_code="draft_changed_during_add",
+        )
+        return _publish_mutation(path, receipt, return_receipt=return_receipt)
 
-        col_map = _column_mapping_dict(data)
-        col_map.pop(field_key, None)
+    def remove_field(self, draft_path: str, field_key: str, *, return_receipt: bool = False) -> Path | Dict[str, Any]:
+        path = Path(draft_path)
 
-        dedupe = data.setdefault("extract_rules", {}).get("dedupe_fields")
-        if isinstance(dedupe, list):
-            data["extract_rules"]["dedupe_fields"] = [str(k) for k in dedupe if str(k) != field_key]
+        def _mutate(data: Dict[str, Any]) -> None:
+            fields = _ensure_fields(data)
+            out = [f for f in fields if str(f.get("key", "")).strip() != field_key]
+            if len(out) == len(fields):
+                raise RuleSuiteError(f"field_not_found: {field_key}")
+            data.setdefault("extract_rules", {})["fields"] = out
+            col_map = _column_mapping_dict(data)
+            col_map.pop(field_key, None)
+            dedupe = data.setdefault("extract_rules", {}).get("dedupe_fields")
+            if isinstance(dedupe, list):
+                data["extract_rules"]["dedupe_fields"] = [str(k) for k in dedupe if str(k) != field_key]
 
-        return self.save_draft(draft_path, data)
+        receipt = _locked_draft_mutation(
+            path,
+            _mutate,
+            failure_code="draft_remove_failed",
+            conflict_code="draft_changed_during_remove",
+        )
+        return _publish_mutation(path, receipt, return_receipt=return_receipt)
 
     def rename_field(self, draft_path: str, old_key: str, new_key: str) -> Path:
         new_key = new_key.strip()
@@ -185,45 +205,70 @@ class RuleSuite:
 
         return self.save_draft(draft_path, data)
 
-    def duplicate_field(self, draft_path: str, source_key: str, new_key: str) -> Path:
+    def duplicate_field(
+        self,
+        draft_path: str,
+        source_key: str,
+        new_key: str,
+        *,
+        return_receipt: bool = False,
+    ) -> Path | Dict[str, Any]:
         new_key = new_key.strip()
         if not new_key:
             raise RuleSuiteError("new_key required")
+        path = Path(draft_path)
 
-        data = self.load_draft(draft_path)
-        fields = _ensure_fields(data)
-        if any(str(f.get("key", "")).strip() == new_key for f in fields):
-            raise RuleSuiteError(f"field_exists: {new_key}")
+        def _mutate(data: Dict[str, Any]) -> None:
+            fields = _ensure_fields(data)
+            if any(str(f.get("key", "")).strip() == new_key for f in fields):
+                raise RuleSuiteError(f"field_exists: {new_key}")
+            source = next((f for f in fields if str(f.get("key", "")).strip() == source_key), None)
+            if not isinstance(source, dict):
+                raise RuleSuiteError(f"field_not_found: {source_key}")
+            cloned = deepcopy(source)
+            cloned["key"] = new_key
+            fields.append(cloned)
+            _ensure_column_mapping_entry(data, new_key)
 
-        source = next((f for f in fields if str(f.get("key", "")).strip() == source_key), None)
-        if not isinstance(source, dict):
-            raise RuleSuiteError(f"field_not_found: {source_key}")
+        receipt = _locked_draft_mutation(
+            path,
+            _mutate,
+            failure_code="draft_duplicate_failed",
+            conflict_code="draft_changed_during_duplicate",
+        )
+        return _publish_mutation(path, receipt, return_receipt=return_receipt)
 
-        cloned = deepcopy(source)
-        cloned["key"] = new_key
-        fields.append(cloned)
-        _ensure_column_mapping_entry(data, new_key)
-        return self.save_draft(draft_path, data)
-
-    def move_field(self, draft_path: str, field_key: str, direction: str) -> Path:
+    def move_field(
+        self,
+        draft_path: str,
+        field_key: str,
+        direction: str,
+        *,
+        return_receipt: bool = False,
+    ) -> Path | Dict[str, Any]:
         if direction not in {"up", "down"}:
             raise RuleSuiteError("direction must be 'up' or 'down'")
+        path = Path(draft_path)
 
-        data = self.load_draft(draft_path)
-        fields = _ensure_fields(data)
-        idx = next((i for i, f in enumerate(fields) if str(f.get("key", "")).strip() == field_key), -1)
-        if idx < 0:
-            raise RuleSuiteError(f"field_not_found: {field_key}")
+        def _mutate(data: Dict[str, Any]) -> None:
+            fields = _ensure_fields(data)
+            idx = next((i for i, f in enumerate(fields) if str(f.get("key", "")).strip() == field_key), -1)
+            if idx < 0:
+                raise RuleSuiteError(f"field_not_found: {field_key}")
+            if direction == "up":
+                if idx == 0:
+                    return
+                fields[idx - 1], fields[idx] = fields[idx], fields[idx - 1]
+            elif idx < len(fields) - 1:
+                fields[idx + 1], fields[idx] = fields[idx], fields[idx + 1]
 
-        if direction == "up":
-            if idx == 0:
-                return self.save_draft(draft_path, data)
-            fields[idx - 1], fields[idx] = fields[idx], fields[idx - 1]
-        else:
-            if idx >= len(fields) - 1:
-                return self.save_draft(draft_path, data)
-            fields[idx + 1], fields[idx] = fields[idx], fields[idx + 1]
-        return self.save_draft(draft_path, data)
+        receipt = _locked_draft_mutation(
+            path,
+            _mutate,
+            failure_code="draft_move_failed",
+            conflict_code="draft_changed_during_move",
+        )
+        return _publish_mutation(path, receipt, return_receipt=return_receipt)
 
     def update_field(
         self,
@@ -252,6 +297,127 @@ class RuleSuite:
             return self.save_draft(draft_path, data)
 
         raise RuleSuiteError(f"field_not_found: {field_key}")
+
+    def replace_field(
+        self,
+        draft_path: str,
+        selected_key: str,
+        *,
+        key: str,
+        regex: str,
+        required: bool,
+        search_from: Dict[str, Any] | None,
+        excel_column: str | None = None,
+        dedupe_member: bool | None = None,
+        return_receipt: bool = False,
+    ) -> Path | Dict[str, Any]:
+        path = Path(draft_path)
+
+        def _mutate(data: Dict[str, Any]) -> None:
+            _apply_field_replacement(
+                data,
+                selected_key,
+                key=key,
+                regex=regex,
+                required=required,
+                search_from=search_from,
+                excel_column=excel_column,
+                dedupe_member=dedupe_member,
+            )
+
+        receipt = _locked_draft_mutation(
+            path,
+            _mutate,
+            failure_code="draft_replace_failed",
+            conflict_code="draft_changed_during_replace",
+        )
+        return _publish_mutation(path, receipt, return_receipt=return_receipt)
+
+    def update_draft_meta(
+        self,
+        draft_path: str,
+        *,
+        assay_key: str,
+        assay_name: str,
+        lot_regex: str,
+        excel_filename_template: str,
+        sheetname_template: str,
+        return_receipt: bool = False,
+    ) -> Path | Dict[str, Any]:
+        path = Path(draft_path)
+        assay_key_clean = assay_key.strip() if isinstance(assay_key, str) else ""
+        assay_name_clean = assay_name.strip() if isinstance(assay_name, str) else ""
+        lot_clean = lot_regex.strip() if isinstance(lot_regex, str) else ""
+        filename_clean = excel_filename_template.strip() if isinstance(excel_filename_template, str) else ""
+        sheet_clean = sheetname_template.strip() if isinstance(sheetname_template, str) else ""
+        if not assay_key_clean or not assay_name_clean:
+            raise RuleSuiteError("assay_key and assay_name are required")
+        if not lot_clean:
+            raise RuleSuiteError("lot_rule.regex required")
+        if not filename_clean or not sheet_clean:
+            raise RuleSuiteError("excel filename and sheetname are required")
+
+        def _mutate(data: Dict[str, Any]) -> None:
+            data["assay_key"] = assay_key_clean
+            data["assay_name"] = assay_name_clean
+            lot_rule = data.get("lot_rule")
+            if lot_rule is None:
+                lot_rule = {}
+            if not isinstance(lot_rule, dict):
+                raise RuleSuiteError("lot_rule must be object")
+            lot_rule["regex"] = lot_clean
+            data["lot_rule"] = lot_rule
+            excel_rules = data.get("excel_rules")
+            if excel_rules is None:
+                excel_rules = {}
+            if not isinstance(excel_rules, dict):
+                raise RuleSuiteError("excel_rules must be object")
+            excel_rules["excel_filename_template"] = filename_clean
+            excel_rules["sheetname_template"] = sheet_clean
+            data["excel_rules"] = excel_rules
+
+        receipt = _locked_draft_mutation(
+            path,
+            _mutate,
+            failure_code="draft_meta_failed",
+            conflict_code="draft_changed_during_meta",
+        )
+        return _publish_mutation(path, receipt, return_receipt=return_receipt)
+
+    def draft_content_revision(self, draft_path: str) -> str:
+        path = Path(draft_path)
+        with rulesuite_draft_lock(path):
+            original, _loaded = _read_draft_bytes(path)
+            return _content_revision(original)
+
+    def restore_draft_snapshot(
+        self,
+        draft_path: str,
+        data: Dict[str, Any],
+        *,
+        expected_revision: str | None = None,
+        return_receipt: bool = False,
+    ) -> Path | Dict[str, Any]:
+        path = Path(draft_path)
+        if not isinstance(data, dict):
+            raise RuleSuiteError("draft_data_must_be_object")
+        if not _is_content_revision(expected_revision):
+            raise RuleSuiteError("draft_restore_revision_required")
+        snapshot = deepcopy(data)
+
+        def _mutate(current: Dict[str, Any]) -> None:
+            current.clear()
+            current.update(snapshot)
+
+        receipt = _locked_draft_mutation(
+            path,
+            _mutate,
+            failure_code="draft_restore_failed",
+            conflict_code="draft_changed_during_restore",
+            expected_revision=expected_revision,
+            revision_conflict_code="draft_revision_conflict",
+        )
+        return _publish_mutation(path, receipt, return_receipt=return_receipt)
 
     def sync_column_mapping_from_fields(self, draft_path: str) -> Path:
         data = self.load_draft(draft_path)
@@ -360,7 +526,11 @@ class RuleSuite:
         norm_text = "\n".join(norm_lines)
 
         index_path = root / "rules" / "index.json"
-        detected = [m.assay_key for m in detect_assays(norm_text, str(index_path))]
+        detected: list[str] = []
+        try:
+            detected = [m.assay_key for m in detect_assays(norm_text, str(index_path))]
+        except Exception:
+            detected = []
 
         use_assay_name = assay_name.strip()
         if draft_path:
@@ -423,17 +593,23 @@ class RuleSuite:
         }
 
     def activate_draft(self, project_root: str, assay_key: str, draft_path: str) -> Path:
-        root = Path(project_root)
-        rs = resolve_ruleset(assay_key, str(root / "rules"), str(root / "rules" / "index.json"))
-        target = root / "rules" / rs.ruleset_file
-        source_data = self.load_draft(draft_path)
-        check = _validate_draft_data(source_data)
-        if not check["ok"]:
-            raise RuleSuiteError(f"draft_invalid: {check['errors']}")
-        _write_json_atomic(target, source_data)
-        return target
+        with rulesuite_lifecycle_lock(project_root):
+            root = Path(project_root)
+            rs = resolve_ruleset(assay_key, str(root / "rules"), str(root / "rules" / "index.json"))
+            target = root / "rules" / rs.ruleset_file
+            source_data = self.load_draft(draft_path)
+            check = _validate_draft_data(source_data)
+            if not check["ok"]:
+                raise RuleSuiteError(f"draft_invalid: {check['errors']}")
+            snapshot_existing_active_ruleset(target)
+            _write_json_atomic(target, source_data)
+            return target
 
     def activate_new_draft(self, project_root: str, assay_key: str, assay_name: str, draft_path: str) -> Path:
+        with rulesuite_lifecycle_lock(project_root):
+            return self._activate_new_draft_unlocked(project_root, assay_key, assay_name, draft_path)
+
+    def _activate_new_draft_unlocked(self, project_root: str, assay_key: str, assay_name: str, draft_path: str) -> Path:
         root = Path(project_root)
         rules_dir = root / "rules"
         index_path = rules_dir / "index.json"
@@ -502,6 +678,305 @@ class RuleSuite:
             data = json.loads(p.read_text(encoding="utf-8"))
             return RuleSet(assay_key=assay_key, ruleset_file=p.name, data=data)
         return resolve_ruleset(assay_key, str(root / "rules"), str(root / "rules" / "index.json"))
+
+
+def _read_draft_bytes(path: Path) -> tuple[bytes, Dict[str, Any]]:
+    if not path.is_file():
+        raise RuleSuiteError(f"draft_not_found: {path}")
+    original = path.read_bytes()
+    try:
+        loaded = json.loads(original.decode("utf-8"))
+    except Exception as exc:
+        raise RuleSuiteError(f"draft_parse_failed: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise RuleSuiteError("draft_root_not_object")
+    return original, loaded
+
+
+def _content_revision(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _is_content_revision(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _publish_mutation(path: Path, receipt: Dict[str, Any], *, return_receipt: bool) -> Path | Dict[str, Any]:
+    if return_receipt:
+        return receipt
+    return path
+
+
+def _locked_draft_mutation(
+    path: Path,
+    mutate,
+    *,
+    failure_code: str,
+    conflict_code: str,
+    expected_revision: str | None = None,
+    revision_conflict_code: str = "draft_revision_conflict",
+) -> Dict[str, Any]:
+    with rulesuite_draft_lock(path):
+        original, loaded = _read_draft_bytes(path)
+        before_revision = _content_revision(original)
+        if expected_revision is not None and before_revision != expected_revision:
+            raise RuleSuiteError(revision_conflict_code)
+        before = deepcopy(loaded)
+        data = deepcopy(loaded)
+        mutate(data)
+        written = _commit_draft_mutation(
+            path,
+            original,
+            data,
+            failure_code=failure_code,
+            conflict_code=conflict_code,
+        )
+        return {
+            "before": before,
+            "before_revision": before_revision,
+            "after_revision": _content_revision(written),
+            "path": str(path),
+        }
+
+
+def _commit_draft_mutation(
+    path: Path,
+    original: bytes,
+    data: Dict[str, Any],
+    *,
+    failure_code: str,
+    conflict_code: str,
+) -> bytes:
+    if path.read_bytes() != original:
+        raise RuleSuiteError(conflict_code)
+    try:
+        _write_json_atomic(path, data)
+    except Exception as exc:
+        raise RuleSuiteError(failure_code) from exc
+    return path.read_bytes()
+
+
+def _validated_search_from(search_from: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    if search_from is None:
+        return None
+    if not isinstance(search_from, dict):
+        raise RuleSuiteError("invalid_search_from")
+    has_after = "after" in search_from
+    has_line = "line" in search_from
+    if has_after == has_line or set(search_from) - {"after", "line"}:
+        raise RuleSuiteError("invalid_search_from")
+    if has_after:
+        marker = search_from.get("after")
+        if not isinstance(marker, str) or not marker.strip():
+            raise RuleSuiteError("invalid_search_from")
+        try:
+            re.compile(marker)
+        except re.error as exc:
+            raise RuleSuiteError("invalid_search_from") from exc
+        return {"after": marker}
+    line = search_from.get("line")
+    if isinstance(line, bool) or not isinstance(line, int) or line < 0:
+        raise RuleSuiteError("invalid_search_from")
+    return {"line": line}
+
+
+def _apply_field_addition(
+    data: Dict[str, Any],
+    *,
+    key: str,
+    regex: str,
+    required: bool,
+    search_from: Dict[str, Any] | None,
+    excel_column: str | None,
+    dedupe_member: bool | None,
+) -> None:
+    new_key = str(key).strip() if isinstance(key, str) else ""
+    if not new_key:
+        raise RuleSuiteError("field key required")
+    if not isinstance(required, bool):
+        raise RuleSuiteError("invalid_required")
+    if not isinstance(regex, str) or not regex.strip():
+        raise RuleSuiteError("invalid_regex")
+    try:
+        re.compile(regex)
+    except re.error as exc:
+        raise RuleSuiteError("invalid_regex") from exc
+    if dedupe_member is not None and not isinstance(dedupe_member, bool):
+        raise RuleSuiteError("invalid_dedupe_member")
+    if excel_column is not None and (not isinstance(excel_column, str) or not excel_column.strip()):
+        raise RuleSuiteError("invalid_excel_column")
+    checked_search = _validated_search_from(search_from)
+
+    extract_rules = data.get("extract_rules")
+    if extract_rules is None:
+        extract_rules = {}
+        data["extract_rules"] = extract_rules
+    if not isinstance(extract_rules, dict):
+        raise RuleSuiteError("extract_rules must be object")
+    fields = extract_rules.get("fields")
+    if fields is None:
+        fields = []
+        extract_rules["fields"] = fields
+    if not isinstance(fields, list):
+        raise RuleSuiteError("extract_rules.fields must be list")
+    if any(not isinstance(field, dict) for field in fields):
+        raise RuleSuiteError("malformed_fields")
+    if any(str(field.get("key", "")).strip() == new_key for field in fields):
+        raise RuleSuiteError(f"field_exists: {new_key}")
+
+    excel_rules = data.get("excel_rules", {})
+    if excel_rules is None:
+        excel_rules = {}
+    if not isinstance(excel_rules, dict):
+        raise RuleSuiteError("excel_rules must be object")
+    if "column_mapping" not in excel_rules or excel_rules.get("column_mapping") is None:
+        column_mapping: Dict[str, Any] = {}
+    elif not isinstance(excel_rules.get("column_mapping"), dict):
+        raise RuleSuiteError("excel_rules.column_mapping must be object")
+    else:
+        column_mapping = dict(excel_rules["column_mapping"])
+    if excel_column is None:
+        if new_key not in column_mapping:
+            column_mapping[new_key] = new_key
+    else:
+        column_mapping[new_key] = excel_column.strip()
+    data["excel_rules"] = excel_rules
+    excel_rules["column_mapping"] = column_mapping
+
+    raw_dedupe = extract_rules.get("dedupe_fields", None) if "dedupe_fields" in extract_rules else None
+    if "dedupe_fields" in extract_rules and extract_rules.get("dedupe_fields") is None:
+        raw_dedupe = None
+    if raw_dedupe is not None and not isinstance(raw_dedupe, list):
+        raise RuleSuiteError("extract_rules.dedupe_fields must be list")
+    if isinstance(raw_dedupe, list) and any(not isinstance(item, str) for item in raw_dedupe):
+        raise RuleSuiteError("malformed_dedupe_fields")
+    if dedupe_member is True:
+        migrated = [str(item) for item in (raw_dedupe or [])]
+        if new_key not in migrated:
+            migrated.append(new_key)
+        extract_rules["dedupe_fields"] = migrated
+    elif dedupe_member is False and isinstance(raw_dedupe, list):
+        extract_rules["dedupe_fields"] = [str(item) for item in raw_dedupe if str(item) != new_key]
+
+    row: Dict[str, Any] = {"key": new_key, "regex": regex, "required": required}
+    if checked_search is not None:
+        row["search_from"] = checked_search
+    fields.append(row)
+
+
+def _apply_field_replacement(
+    data: Dict[str, Any],
+    selected_key: str,
+    *,
+    key: str,
+    regex: str,
+    required: bool,
+    search_from: Dict[str, Any] | None,
+    excel_column: str | None,
+    dedupe_member: bool | None,
+) -> None:
+    identity = str(selected_key).strip()
+    new_key = str(key).strip() if isinstance(key, str) else ""
+    if not identity or not new_key:
+        raise RuleSuiteError("field key required")
+    if not isinstance(regex, str) or not regex.strip():
+        raise RuleSuiteError("invalid_regex")
+    try:
+        re.compile(regex)
+    except re.error as exc:
+        raise RuleSuiteError("invalid_regex") from exc
+    if not isinstance(required, bool):
+        raise RuleSuiteError("invalid_required")
+    if dedupe_member is not None and not isinstance(dedupe_member, bool):
+        raise RuleSuiteError("invalid_dedupe_member")
+    if excel_column is not None and (not isinstance(excel_column, str) or not excel_column.strip()):
+        raise RuleSuiteError("invalid_excel_column")
+    checked_search = _validated_search_from(search_from)
+
+    extract_rules = data.get("extract_rules")
+    if not isinstance(extract_rules, dict):
+        raise RuleSuiteError("extract_rules must be object")
+    fields = extract_rules.get("fields")
+    if not isinstance(fields, list):
+        raise RuleSuiteError("extract_rules.fields must be list")
+    matches = [idx for idx, field in enumerate(fields) if isinstance(field, dict) and str(field.get("key", "")).strip() == identity]
+    if len(matches) != 1:
+        if not matches:
+            raise RuleSuiteError(f"field_not_found: {identity}")
+        raise RuleSuiteError("field_identity_ambiguous")
+    index = matches[0]
+    for idx, field in enumerate(fields):
+        if idx == index or not isinstance(field, dict):
+            continue
+        if str(field.get("key", "")).strip() == new_key:
+            raise RuleSuiteError(f"field_exists: {new_key}")
+
+    excel_rules = data.get("excel_rules", {})
+    if excel_rules is None:
+        excel_rules = {}
+    if not isinstance(excel_rules, dict):
+        raise RuleSuiteError("excel_rules must be object")
+    column_mapping = excel_rules.get("column_mapping", {})
+    if column_mapping is None:
+        column_mapping = {}
+    if not isinstance(column_mapping, dict):
+        raise RuleSuiteError("excel_rules.column_mapping must be object")
+    column_mapping = dict(column_mapping)
+    if new_key != identity and new_key in column_mapping:
+        raise RuleSuiteError("column_mapping_conflict")
+    mapping_changes = excel_column is not None or new_key != identity
+    if mapping_changes:
+        if excel_column is None:
+            if identity in column_mapping:
+                column_mapping[new_key] = column_mapping.pop(identity)
+            else:
+                column_mapping[new_key] = new_key
+        else:
+            if new_key != identity:
+                column_mapping.pop(identity, None)
+            column_mapping[new_key] = excel_column.strip()
+        data["excel_rules"] = excel_rules
+        excel_rules["column_mapping"] = column_mapping
+
+    if "dedupe_fields" not in extract_rules or extract_rules.get("dedupe_fields") is None:
+        dedupe = []
+        dedupe_present = False
+    else:
+        dedupe = extract_rules.get("dedupe_fields")
+        dedupe_present = True
+    if not isinstance(dedupe, list):
+        raise RuleSuiteError("extract_rules.dedupe_fields must be list")
+    was_member = any(str(item) == identity for item in dedupe)
+    target_member = was_member if dedupe_member is None else dedupe_member
+    migrated: List[str] = []
+    seen: set[str] = set()
+    placed = False
+    for item in dedupe:
+        item_key = str(item)
+        if item_key == identity or item_key == new_key:
+            if target_member and not placed:
+                migrated.append(new_key)
+                seen.add(new_key)
+                placed = True
+            continue
+        if item_key in seen:
+            continue
+        migrated.append(item_key)
+        seen.add(item_key)
+    if target_member and new_key not in seen:
+        migrated.append(new_key)
+    if dedupe_present or target_member:
+        extract_rules["dedupe_fields"] = migrated
+
+    updated = deepcopy(fields[index])
+    updated["key"] = new_key
+    updated["regex"] = regex
+    updated["required"] = required
+    if checked_search is None:
+        updated.pop("search_from", None)
+    else:
+        updated["search_from"] = checked_search
+    fields[index] = updated
 
 
 def _ensure_fields(data: Dict[str, Any]) -> List[Dict[str, Any]]:

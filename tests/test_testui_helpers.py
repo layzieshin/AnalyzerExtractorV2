@@ -56,6 +56,8 @@ def test_humanize_job_error_maps_common_cases():
     assert humanize_job_error(error="no_assay_detected") == "Kein Assay im PDF erkannt."
     assert "Excel-Schreibfehler" in humanize_job_error(error="excel_write_failed:(1):locked")
     assert "Dedupe-Basis" in humanize_job_error(error="dedupe basis missing: PLATTE")
+    assert "Regel-Nacharbeit" in humanize_job_error(error="configured_fields_empty: note,comment")
+    assert "note,comment" in humanize_job_error(error="configured_fields_empty: note,comment")
 
 
 def test_format_job_result_summary_includes_status_and_human_text():
@@ -266,7 +268,6 @@ def test_test_app_presenters_format_device_queue_options_watch_and_validation():
             "sqlite_path": "out/results.sqlite3",
             "watch_dir": "input/watch",
             "device_id": "dev1",
-            "watch_mode": "Ueberwachter Ordner",
         }
     )
     assert "Output: both" in options
@@ -771,7 +772,7 @@ def test_format_assay_display_label_unique_and_ambiguous():
 
     assert format_assay_display_label("(1111)", "Vitamin D") == "Vitamin D"
     assert format_assay_display_label("(1111)", "Vitamin D", ambiguous_names={"Vitamin D"}) == "Vitamin D (1111)"
-    assert format_assay_display_label("(9999)", "") == "Unbekannter Assay ((9999))"
+    assert format_assay_display_label("(9999)", "") == "Unbekannter Assay (9999)"
 
     choices = build_assay_filter_choices(
         [
@@ -783,7 +784,7 @@ def test_format_assay_display_label_unique_and_ambiguous():
     )
     assert choices[0] == {"label": "Vitamin D (1111)", "assay_key": "(1111)"}
     assert choices[1] == {"label": "Vitamin D (2222)", "assay_key": "(2222)"}
-    assert choices[2] == {"label": "Unbekannter Assay ((3333))", "assay_key": "(3333)"}
+    assert choices[2] == {"label": "Unbekannter Assay (3333)", "assay_key": "(3333)"}
 
 
 def test_build_result_column_catalog_uses_payload_labels():

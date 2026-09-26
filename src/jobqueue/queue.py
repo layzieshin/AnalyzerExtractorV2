@@ -28,17 +28,30 @@ class JobQueue:
         self.claim_lock_ttl_s = claim_lock_ttl_s
         self.max_attempts = max_attempts
 
-    def enqueue_pdf_job(self, project_root: str, pdf_path: str, source: str = "watchdog") -> QueueJob:
+    def enqueue_pdf_job(
+        self,
+        project_root: str,
+        pdf_path: str,
+        source: str = "watchdog",
+        *,
+        expected_sha256: str | None = None,
+    ) -> QueueJob:
         pdf = Path(pdf_path)
         if not pdf.exists():
             raise QueueError(f"pdf_not_found: {pdf}")
+
+        content_sha256 = self._hash_file_full(pdf)
+        if expected_sha256 is not None and expected_sha256 != content_sha256:
+            raise QueueError(
+                f"content_sha256_mismatch: expected={expected_sha256} actual={content_sha256}"
+            )
 
         queue_dir = self._queue_dir(project_root)
         queue_dir.mkdir(parents=True, exist_ok=True)
         lock_dir = self._lock_dir(project_root)
         lock_dir.mkdir(parents=True, exist_ok=True)
 
-        job_id = self._hash_file(pdf)
+        job_id = content_sha256[:16]
         path = queue_dir / f"{job_id}.json"
         now = _now_iso()
 
@@ -52,11 +65,18 @@ class JobQueue:
             "worker_id": "",
             "attempts": 0,
             "last_error": "",
+            "content_sha256": content_sha256,
         }
         if self._try_create(path, data):
             return self._as_job(data)
 
         existing = self._load(path)
+        existing_sha = str(existing.get("content_sha256") or "")
+        if existing_sha and existing_sha != content_sha256:
+            raise QueueError(
+                f"content_sha256_collision: job_id={job_id} "
+                f"existing={existing_sha} new={content_sha256}"
+            )
         return self._as_job(existing)
 
     def claim_next_job(self, project_root: str, worker_id: str) -> QueueJob | None:
@@ -234,12 +254,27 @@ class JobQueue:
         finally:
             self._release_lock(lock_path)
 
-    def _hash_file(self, path: Path) -> str:
+    def _hash_file_full(self, path: Path) -> str:
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 h.update(chunk)
-        return h.hexdigest()[:16]
+        return h.hexdigest()
+
+    def verify_job_content_sha256(self, project_root: str, job_id: str) -> None:
+        path = self._queue_dir(project_root) / f"{job_id}.json"
+        if not path.exists():
+            raise QueueError(f"job_not_found: {job_id}")
+        data = self._load(path)
+        expected = str(data.get("content_sha256") or "")
+        if not expected:
+            return
+        pdf = Path(str(data.get("pdf_path", "")))
+        if not pdf.is_file():
+            raise QueueError("source_changed_since_ingest: pdf_missing")
+        actual = self._hash_file_full(pdf)
+        if actual != expected:
+            raise QueueError("source_changed_since_ingest")
 
     def _queue_dir(self, project_root: str) -> Path:
         root = Path(project_root)
@@ -286,6 +321,7 @@ class JobQueue:
             worker_id=str(data.get("worker_id", "")),
             attempts=int(data.get("attempts", 0)),
             last_error=str(data.get("last_error", "")),
+            content_sha256=str(data.get("content_sha256") or ""),
         )
 
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from src.rulesuite.api import (
+    AuthoringReadinessError,
     activate_draft,
     activate_new_draft,
     add_field,
@@ -15,29 +16,37 @@ from src.rulesuite.api import (
     check_required_fields,
     clone_ruleset_to_draft,
     create_blank_draft,
+    create_authoring_proof,
     create_draft,
     create_draft_from_ruleset,
     create_draft_from_template,
     create_draft_from_template_if_missing,
     deactivate_ruleset,
     delete_inventory_item,
+    delete_never_active_ruleset,
     delete_ruleset,
     diff_draft_vs_active,
+    draft_content_revision,
     draft_path_for_assay,
     duplicate_field,
     derive_draft,
+    get_assay_text,
     list_fields,
     list_rulesets,
     list_rulesuite_inventory,
     load_draft,
     locate_fields,
+    open_active_as_draft,
+    open_history_as_draft,
     open_inactive_as_draft,
     move_field,
     preview_extract,
     read_candidate_fields,
     remove_field,
     rename_field,
+    replace_field,
     REQUIRED_HEADER_FIELD_KEYS,
+    restore_draft_snapshot,
     save_draft,
     set_dedupe_fields,
     set_excel_rules,
@@ -45,8 +54,10 @@ from src.rulesuite.api import (
     set_lot_rule,
     sync_column_mapping_from_fields,
     test_regex,
+    update_draft_meta,
     update_field,
     validate_draft,
+    verify_authoring_proof,
 )
 from src.rulesuite.header_aliases import LEGACY_HEADER_ALIAS_KEYS, resolve_required_headers_from_source
 from src.ruleresolver.api import resolve_ruleset, validate_rules_integrity
@@ -139,6 +150,24 @@ def _write_template(root: Path) -> None:
     (root / "rules" / "template.json").write_text(json.dumps(template), encoding="utf-8")
 
 
+def _fake_authoring_preview(
+    _self,
+    _project_root: str,
+    pdf_path: str,
+    _assay_key: str,
+    draft_path: str | None = None,
+) -> dict:
+    if Path(pdf_path).name == "failing.pdf":
+        assert draft_path is not None
+        return {"lot_id": "LOT-NEW", "data": {"test": "NEW", "date": "2026-09-25", "added": "X"}}
+    if draft_path is None:
+        return {"lot_id": "LOT-REF", "data": {"test": "BASE", "date": "2026-09-20"}}
+    return {
+        "lot_id": "LOT-REF",
+        "data": {"test": "BASE", "date": "2026-09-20", "added": "NONEMPTY"},
+    }
+
+
 def test_rulesuite_draft_and_set_regex(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
 
@@ -226,6 +255,84 @@ def test_add_field_does_not_overwrite_existing_column_mapping(tmp_path: Path) ->
     assert data["excel_rules"]["column_mapping"]["other"] == "other"
 
 
+def test_add_field_writes_mapping_and_dedupe_atomically(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9001)", "Add Atomic")
+    before = json.loads(Path(draft).read_text(encoding="utf-8"))
+    vendor = {"keep": True}
+    before["vendor_extension"] = vendor
+    Path(draft).write_text(json.dumps(before), encoding="utf-8")
+
+    add_field(
+        draft,
+        "gamma",
+        r"G:\s*(\w+)",
+        required=False,
+        search_from={"after": "HEAD"},
+        excel_column="GAMMA",
+        dedupe_member=True,
+    )
+    data = load_draft(draft)
+    assert data["extract_rules"]["fields"][-1]["key"] == "gamma"
+    assert data["extract_rules"]["fields"][-1]["search_from"] == {"after": "HEAD"}
+    assert data["excel_rules"]["column_mapping"]["gamma"] == "GAMMA"
+    assert data["extract_rules"]["dedupe_fields"] == ["gamma"]
+    assert data["vendor_extension"] == vendor
+
+
+def test_add_field_defaults_keep_mapping_key_and_skip_dedupe(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9002)", "Add Default")
+    payload = load_draft(draft)
+    payload["extract_rules"]["dedupe_fields"] = ["existing"]
+    save_draft(draft, payload)
+
+    add_field(draft, "delta", r"D:\s*(\w+)")
+    data = load_draft(draft)
+    assert data["excel_rules"]["column_mapping"]["delta"] == "delta"
+    assert data["extract_rules"]["dedupe_fields"] == ["existing"]
+
+
+def test_add_field_invalid_input_and_write_failure_keep_exact_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.rulesuite as rulesuite
+
+    root = _setup_project(tmp_path)
+    draft = Path(create_blank_draft(str(root), "(9003)", "Add Bytes"))
+    original = draft.read_bytes()
+
+    with pytest.raises(RuleSuiteError, match="invalid_regex"):
+        add_field(str(draft), "bad", r"[", excel_column="BAD", dedupe_member=True)
+    assert draft.read_bytes() == original
+
+    with pytest.raises(RuleSuiteError, match="invalid_excel_column"):
+        add_field(str(draft), "bad", r"B:\s*(\w+)", excel_column="  ")
+    assert draft.read_bytes() == original
+
+    with pytest.raises(RuleSuiteError, match="invalid_dedupe_member"):
+        add_field(str(draft), "bad", r"B:\s*(\w+)", dedupe_member="yes")  # type: ignore[arg-type]
+    assert draft.read_bytes() == original
+
+    def _fail_before_replace(_target: Path, _data: dict) -> None:
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(rulesuite, "_write_json_atomic", _fail_before_replace)
+    with pytest.raises(RuleSuiteError, match="draft_add_failed"):
+        add_field(str(draft), "bad", r"B:\s*(\w+)", excel_column="BAD", dedupe_member=False)
+    assert draft.read_bytes() == original
+
+    def _foreign_write(target: Path, _data: dict) -> None:
+        target.write_bytes(b"foreign-bytes")
+        raise OSError("uncooperative writer")
+
+    monkeypatch.setattr(rulesuite, "_write_json_atomic", _foreign_write)
+    with pytest.raises(RuleSuiteError, match="draft_add_failed"):
+        add_field(str(draft), "bad", r"B:\s*(\w+)", excel_column="BAD", dedupe_member=False)
+    assert draft.read_bytes() == b"foreign-bytes"
+
+
 def test_update_field_adds_missing_column_mapping(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
     draft = create_draft(str(root), "(1111)")
@@ -301,16 +408,305 @@ def test_sync_column_mapping_from_fields_adds_missing_without_overwrite(tmp_path
 
 def test_column_mapping_normalized_when_missing_or_invalid(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
-    draft = create_blank_draft(str(root), "(9000)", "Test Assay")
-    data = load_draft(draft)
-    data["excel_rules"]["column_mapping"] = "not-a-dict"
-    save_draft(draft, data)
+    draft = Path(create_blank_draft(str(root), "(9000)", "Test Assay"))
 
-    add_field(draft, "alpha", r"A:(\w+)", required=False)
-    updated = load_draft(draft)
-
-    assert isinstance(updated["excel_rules"]["column_mapping"], dict)
+    missing = load_draft(str(draft))
+    missing["excel_rules"].pop("column_mapping", None)
+    save_draft(str(draft), missing)
+    add_field(str(draft), "alpha", r"A:(\w+)", required=False)
+    updated = load_draft(str(draft))
     assert updated["excel_rules"]["column_mapping"]["alpha"] == "alpha"
+
+    none_mapping = load_draft(str(draft))
+    none_mapping["excel_rules"]["column_mapping"] = None
+    save_draft(str(draft), none_mapping)
+    add_field(str(draft), "beta", r"B:(\w+)", required=False)
+    updated = load_draft(str(draft))
+    assert updated["excel_rules"]["column_mapping"]["beta"] == "beta"
+    assert "alpha" not in updated["excel_rules"]["column_mapping"]
+
+    invalid = load_draft(str(draft))
+    invalid["excel_rules"]["column_mapping"] = "not-a-dict"
+    save_draft(str(draft), invalid)
+    original = draft.read_bytes()
+    with pytest.raises(RuleSuiteError, match="column_mapping must be object"):
+        add_field(str(draft), "gamma", r"G:(\w+)", required=False)
+    assert draft.read_bytes() == original
+
+    malformed_fields = load_draft(str(draft))
+    malformed_fields["excel_rules"]["column_mapping"] = {"alpha": "alpha"}
+    malformed_fields["extract_rules"]["fields"] = ["not-a-field"]
+    save_draft(str(draft), malformed_fields)
+    original = draft.read_bytes()
+    with pytest.raises(RuleSuiteError, match="malformed_fields"):
+        add_field(str(draft), "gamma", r"G:(\w+)", required=False)
+    assert draft.read_bytes() == original
+
+    malformed_dedupe = load_draft(str(draft))
+    malformed_dedupe["extract_rules"]["fields"] = []
+    malformed_dedupe["extract_rules"]["dedupe_fields"] = [{"bad": True}]
+    save_draft(str(draft), malformed_dedupe)
+    original = draft.read_bytes()
+    with pytest.raises(RuleSuiteError, match="malformed_dedupe_fields"):
+        add_field(str(draft), "gamma", r"G:(\w+)", required=False)
+    assert draft.read_bytes() == original
+
+    with pytest.raises(RuleSuiteError, match="invalid_required"):
+        add_field(str(draft), "gamma", r"G:(\w+)", required="false")  # type: ignore[arg-type]
+    assert draft.read_bytes() == original
+
+
+def test_draft_lock_allows_one_writer_and_releases(tmp_path: Path) -> None:
+    import threading
+
+    from src.rulesuite.lifecycle import rulesuite_draft_lock
+
+    root = _setup_project(tmp_path)
+    draft = Path(create_blank_draft(str(root), "(9010)", "Lock"))
+    started = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def _hold() -> None:
+        try:
+            with rulesuite_draft_lock(draft):
+                started.set()
+                release.wait(2)
+        except BaseException as exc:
+            errors.append(exc)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert started.wait(2)
+    with pytest.raises(RuleSuiteError, match="draft_lock_busy"):
+        add_field(str(draft), "alpha", r"A:(\w+)", required=False)
+    assert json.loads(draft.read_text(encoding="utf-8"))["extract_rules"]["fields"] == []
+    release.set()
+    holder.join(2)
+    assert errors == []
+    assert not list(draft.parent.glob("*.lock"))
+    assert not list(draft.parent.glob("*.tmp"))
+    add_field(str(draft), "alpha", r"A:(\w+)", required=False)
+    assert load_draft(str(draft))["extract_rules"]["fields"][-1]["key"] == "alpha"
+
+
+def test_update_draft_meta_preserves_unknowns_and_lock(tmp_path: Path) -> None:
+    import threading
+
+    from src.rulesuite.lifecycle import rulesuite_draft_lock
+
+    root = _setup_project(tmp_path)
+    draft = Path(create_blank_draft(str(root), "(9011)", "Meta"))
+    payload = load_draft(str(draft))
+    payload["vendor_extension"] = {"keep": True}
+    payload["lot_rule"]["note"] = "keep-lot"
+    payload["excel_rules"]["column_mapping"] = {"known": "KNOWN"}
+    payload["excel_rules"]["extra_excel"] = "keep"
+    payload["extract_rules"]["dedupe_fields"] = ["known"]
+    payload["extract_rules"]["custom_rule"] = {"mode": "strict"}
+    save_draft(str(draft), payload)
+    original = draft.read_bytes()
+
+    update_draft_meta(
+        str(draft),
+        assay_key="(9011)",
+        assay_name="Neu",
+        lot_regex="LOT-9",
+        excel_filename_template="neu.xlsx",
+        sheetname_template="blatt",
+    )
+    data = load_draft(str(draft))
+    assert data["assay_name"] == "Neu"
+    assert data["lot_rule"] == {"regex": "LOT-9", "note": "keep-lot"}
+    assert data["excel_rules"]["column_mapping"] == {"known": "KNOWN"}
+    assert data["excel_rules"]["extra_excel"] == "keep"
+    assert data["extract_rules"]["dedupe_fields"] == ["known"]
+    assert data["extract_rules"]["custom_rule"] == {"mode": "strict"}
+    assert data["vendor_extension"] == {"keep": True}
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _hold() -> None:
+        with rulesuite_draft_lock(draft):
+            started.set()
+            release.wait(2)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert started.wait(2)
+    before = draft.read_bytes()
+    with pytest.raises(RuleSuiteError, match="draft_lock_busy"):
+        update_draft_meta(
+            str(draft),
+            assay_key="(9011)",
+            assay_name="Blocked",
+            lot_regex="LOT-X",
+            excel_filename_template="x.xlsx",
+            sheetname_template="x",
+        )
+    assert draft.read_bytes() == before
+    release.set()
+    holder.join(2)
+
+    payload = load_draft(str(draft))
+    payload["excel_rules"] = "bad"
+    save_draft(str(draft), payload)
+    blocked = draft.read_bytes()
+    with pytest.raises(RuleSuiteError, match="excel_rules must be object"):
+        update_draft_meta(
+            str(draft),
+            assay_key="(9011)",
+            assay_name="Neu",
+            lot_regex="LOT-9",
+            excel_filename_template="neu.xlsx",
+            sheetname_template="blatt",
+        )
+    assert draft.read_bytes() == blocked
+    assert original != blocked
+
+
+def test_restore_draft_snapshot_is_locked(tmp_path: Path) -> None:
+    import threading
+
+    from src.rulesuite.lifecycle import rulesuite_draft_lock
+
+    root = _setup_project(tmp_path)
+    draft = Path(create_blank_draft(str(root), "(9012)", "Restore"))
+    snapshot = load_draft(str(draft))
+    add_field(str(draft), "alpha", r"A:(\w+)", required=False)
+    current_revision = draft_content_revision(str(draft))
+    restore_draft_snapshot(str(draft), snapshot, expected_revision=current_revision)
+    assert load_draft(str(draft))["extract_rules"]["fields"] == []
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _hold() -> None:
+        with rulesuite_draft_lock(draft):
+            started.set()
+            release.wait(2)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert started.wait(2)
+    before = draft.read_bytes()
+    with pytest.raises(RuleSuiteError, match="draft_lock_busy"):
+        restore_draft_snapshot(str(draft), snapshot, expected_revision="a" * 64)
+    assert draft.read_bytes() == before
+    release.set()
+    holder.join(2)
+
+
+def test_receipt_undo_keeps_foreign_commit_and_restore_is_revision_bound(tmp_path: Path) -> None:
+    import hashlib
+
+    root = _setup_project(tmp_path)
+    draft = Path(create_blank_draft(str(root), "(9013)", "Receipt"))
+    observed = load_draft(str(draft))
+    add_field(str(draft), "beta", r"B:(\w+)", required=False)
+    bytes_after_b = draft.read_bytes()
+    revision_after_b = hashlib.sha256(bytes_after_b).hexdigest()
+
+    receipt = add_field(str(draft), "alpha", r"A:(\w+)", required=False, return_receipt=True)
+    assert isinstance(receipt, dict)
+    assert [row["key"] for row in receipt["before"]["extract_rules"]["fields"]] == ["beta"]
+    assert receipt["before"] != observed
+    assert receipt["before_revision"] == revision_after_b
+    assert receipt["after_revision"] == hashlib.sha256(draft.read_bytes()).hexdigest()
+    assert receipt["after_revision"] == draft_content_revision(str(draft))
+    path_only = Path(create_blank_draft(str(root), "(9017)", "Path"))
+    assert isinstance(add_field(str(path_only), "gamma", r"G:(\w+)", required=False), str)
+
+    undone = restore_draft_snapshot(
+        str(draft),
+        receipt["before"],
+        expected_revision=receipt["after_revision"],
+        return_receipt=True,
+    )
+    assert isinstance(undone, dict)
+    assert [row["key"] for row in load_draft(str(draft))["extract_rules"]["fields"]] == ["beta"]
+    assert load_draft(str(draft)) != observed
+
+    conflict = Path(create_blank_draft(str(root), "(9014)", "Conflict"))
+    added = add_field(str(conflict), "alpha", r"A:(\w+)", required=False, return_receipt=True)
+    assert isinstance(added, dict)
+    undo_stack = [{"snapshot": added["before"], "expected_revision": added["after_revision"]}]
+    redo_stack: list[dict] = []
+    foreign = load_draft(str(conflict))
+    foreign["extract_rules"]["fields"].append({"key": "foreign", "regex": r"F:(\w+)", "required": False})
+    save_draft(str(conflict), foreign)
+    foreign_bytes = conflict.read_bytes()
+    with pytest.raises(RuleSuiteError, match="draft_revision_conflict"):
+        restore_draft_snapshot(
+            str(conflict),
+            undo_stack[-1]["snapshot"],
+            expected_revision=undo_stack[-1]["expected_revision"],
+            return_receipt=True,
+        )
+    assert conflict.read_bytes() == foreign_bytes
+    assert undo_stack[0]["expected_revision"] == added["after_revision"]
+    assert redo_stack == []
+
+    blank = Path(create_blank_draft(str(root), "(9016)", "Roundtrip"))
+    base = load_draft(str(blank))
+    added_round = add_field(str(blank), "alpha", r"A:(\w+)", required=False, return_receipt=True)
+    assert isinstance(added_round, dict)
+    undone_round = restore_draft_snapshot(
+        str(blank),
+        added_round["before"],
+        expected_revision=added_round["after_revision"],
+        return_receipt=True,
+    )
+    assert isinstance(undone_round, dict)
+    assert load_draft(str(blank))["extract_rules"]["fields"] == []
+    assert undone_round["after_revision"] == hashlib.sha256(blank.read_bytes()).hexdigest()
+    assert [row["key"] for row in undone_round["before"]["extract_rules"]["fields"]] == ["alpha"]
+    redone = restore_draft_snapshot(
+        str(blank),
+        undone_round["before"],
+        expected_revision=undone_round["after_revision"],
+        return_receipt=True,
+    )
+    assert isinstance(redone, dict)
+    assert [row["key"] for row in load_draft(str(blank))["extract_rules"]["fields"]] == ["alpha"]
+    assert redone["after_revision"] == hashlib.sha256(blank.read_bytes()).hexdigest()
+    assert redone["before_revision"] == undone_round["after_revision"]
+    assert base["assay_key"] == "(9016)"
+
+    untouched = blank.read_bytes()
+    with pytest.raises(RuleSuiteError, match="draft_restore_revision_required"):
+        restore_draft_snapshot(str(blank), base)
+    assert blank.read_bytes() == untouched
+
+
+def test_meta_receipt_is_locked_before_and_push_false_returns_path(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = Path(create_blank_draft(str(root), "(9015)", "MetaReceipt"))
+    stale = load_draft(str(draft))
+    add_field(str(draft), "beta", r"B:(\w+)", required=False)
+    receipt = update_draft_meta(
+        str(draft),
+        assay_key="(9015)",
+        assay_name="Nachher",
+        lot_regex="LOT-9",
+        excel_filename_template="neu.xlsx",
+        sheetname_template="blatt",
+        return_receipt=True,
+    )
+    assert isinstance(receipt, dict)
+    assert any(row["key"] == "beta" for row in receipt["before"]["extract_rules"]["fields"])
+    assert receipt["before"] != stale
+    assert receipt["after_revision"] == draft_content_revision(str(draft))
+    path = update_draft_meta(
+        str(draft),
+        assay_key="(9015)",
+        assay_name="Still",
+        lot_regex="LOT-9",
+        excel_filename_template="neu.xlsx",
+        sheetname_template="blatt",
+    )
+    assert path == str(draft)
 
 
 def test_regex_and_validate_draft(tmp_path: Path) -> None:
@@ -1056,6 +1452,189 @@ def test_check_authoring_readiness_with_assay_text_missing_required(tmp_path: Pa
     assert len(report["missing_required"]) >= 1
 
 
+def test_existing_rule_authoring_proof_binds_draft_and_two_distinct_pdfs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    failing_pdf = root / "failing.pdf"
+    reference_pdf = root / "reference.pdf"
+    failing_pdf.write_bytes(b"failing-pdf")
+    reference_pdf.write_bytes(b"known-good-reference")
+    monkeypatch.setattr("src.rulesuite.rulesuite.RuleSuite.preview_extract", _fake_authoring_preview)
+
+    proof = create_authoring_proof(
+        str(root),
+        "(1111)",
+        draft,
+        str(failing_pdf),
+        str(reference_pdf),
+    )
+
+    assert proof["mode"] == "update"
+    assert proof["compared_fields"] == ["test", "date"]
+    assert proof["draft_sha256"]
+    assert proof["failing_pdf_sha256"]
+    assert proof["reference_pdf_sha256"]
+    assert proof["active_ruleset_sha256"]
+    sidecar = Path(draft + ".readiness")
+    assert sidecar.is_file()
+    assert not sidecar.name.endswith(".draft.json")
+    draft_inventory = list_rulesuite_inventory(str(root), kind="draft")
+    assert [Path(row["path"]) for row in draft_inventory] == [Path(draft)]
+    assert verify_authoring_proof(str(root), "(1111)", draft)["ok"] is True
+
+    failing_pdf.write_bytes(b"changed-failing-pdf")
+    changed_pdf = verify_authoring_proof(str(root), "(1111)", draft)
+    assert "authoring_proof_failing_pdf_changed" in changed_pdf["errors"]
+
+    create_authoring_proof(str(root), "(1111)", draft, str(failing_pdf), str(reference_pdf))
+    Path(draft).write_bytes(Path(draft).read_bytes() + b"\n")
+    changed_draft = verify_authoring_proof(str(root), "(1111)", draft)
+    assert "authoring_proof_draft_changed" in changed_draft["errors"]
+
+    Path(proof["active_ruleset_path"]).write_bytes(Path(proof["active_ruleset_path"]).read_bytes() + b"\n")
+    changed_active = verify_authoring_proof(str(root), "(1111)", draft)
+    assert "authoring_proof_active_ruleset_changed" in changed_active["errors"]
+
+
+def test_existing_rule_authoring_proof_requires_distinct_reference_and_exact_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    failing_pdf = root / "failing.pdf"
+    reference_pdf = root / "reference.pdf"
+    failing_pdf.write_bytes(b"same")
+    reference_pdf.write_bytes(b"same")
+    monkeypatch.setattr("src.rulesuite.rulesuite.RuleSuite.preview_extract", _fake_authoring_preview)
+
+    with pytest.raises(AuthoringReadinessError, match="reference_must_differ"):
+        create_authoring_proof(str(root), "(1111)", draft, str(failing_pdf), str(reference_pdf))
+
+    reference_pdf.write_bytes(b"different")
+
+    def _mismatching_preview(
+        self,
+        project_root: str,
+        pdf_path: str,
+        assay_key: str,
+        draft_path: str | None = None,
+    ) -> dict:
+        result = _fake_authoring_preview(self, project_root, pdf_path, assay_key, draft_path)
+        if Path(pdf_path).name == "reference.pdf" and draft_path is not None:
+            result["data"]["date"] = "CHANGED"
+            result["lot_id"] = "CHANGED-LOT"
+        return result
+
+    monkeypatch.setattr("src.rulesuite.rulesuite.RuleSuite.preview_extract", _mismatching_preview)
+    with pytest.raises(AuthoringReadinessError, match=r"reference_mismatch: date,lot_id"):
+        create_authoring_proof(str(root), "(1111)", draft, str(failing_pdf), str(reference_pdf))
+    assert verify_authoring_proof(str(root), "(1111)", draft)["errors"] == [
+        "authoring_proof_not_ready"
+    ]
+
+
+def test_new_rule_authoring_proof_needs_only_example_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9000)", "Fresh Assay")
+    set_lot_rule(draft, r"Lot:\s*(\w+)")
+    add_field(draft, "test", r"Test:\s*(\w+)", required=True)
+    set_dedupe_fields(draft, ["test"])
+    set_excel_rules(draft, "{assay_name}.xlsx", "{lot_id}", {"test": "TEST"})
+    failing_pdf = root / "failing.pdf"
+    failing_pdf.write_bytes(b"new-rule-example")
+    monkeypatch.setattr("src.rulesuite.rulesuite.RuleSuite.preview_extract", _fake_authoring_preview)
+
+    proof = create_authoring_proof(str(root), "(9000)", draft, str(failing_pdf))
+
+    assert proof["mode"] == "create"
+    assert proof["reference_pdf_path"] == ""
+    assert proof["active_ruleset_path"] == ""
+    assert verify_authoring_proof(str(root), "(9000)", draft)["ok"] is True
+
+
+def _page_document(lines: list[str]):
+    class _Page:
+        def __init__(self) -> None:
+            self.lines = lines
+
+    class _Document:
+        pages = [_Page()]
+
+    return _Document()
+
+
+def test_get_assay_text_empty_index_returns_explicit_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = tmp_path / "empty-index"
+    (root / "rules").mkdir(parents=True)
+    (root / "rules" / "index.json").write_text(json.dumps({"assays": []}), encoding="utf-8")
+    draft = create_blank_draft(str(root), "(9000)", "Fresh Assay")
+    monkeypatch.setattr(
+        "src.rulesuite.rulesuite.parse",
+        lambda _path: _page_document(["Fresh Assay", "(9000)", "Lot: LOT1", "Test: ABC"]),
+    )
+
+    out = get_assay_text(str(root), str(root / "missing.pdf"), "(9000)", "Ignored", draft_path=draft)
+
+    assert out["detected_assays"] == []
+    assert out["assay_name"] == "Fresh Assay"
+    assert "Fresh Assay" in out["assay_block"]
+    assert "(9000)" in out["assay_block"]
+    assert "Lot: LOT1" in out["assay_block"]
+
+
+def test_get_assay_text_valid_index_keeps_detected_assays(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9000)", "Fresh Assay")
+    monkeypatch.setattr(
+        "src.rulesuite.rulesuite.parse",
+        lambda _path: _page_document(
+            ["Assay A", "(1111)", "Fresh Assay", "(9000)", "Lot: LOT1", "Test: ABC"]
+        ),
+    )
+
+    out = get_assay_text(str(root), "dummy.pdf", "(9000)", "Fresh Assay", draft_path=draft)
+
+    assert out["detected_assays"] == ["(1111)"]
+    assert out["assay_block"].startswith("Fresh Assay")
+    assert "Assay A" not in out["assay_block"]
+
+
+def test_new_authoring_proof_with_empty_index_uses_real_extract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Der Parser ist isoliert, weil die vorhandene .pdf kein gerendertes Berichtslayout ist.
+    # preview_extract, get_assay_text und der Extractor laufen real.
+    root = tmp_path / "first-assay"
+    (root / "rules").mkdir(parents=True)
+    (root / "rules" / "index.json").write_text(json.dumps({"assays": []}), encoding="utf-8")
+    draft = create_blank_draft(str(root), "(9000)", "Fresh Assay")
+    set_lot_rule(draft, r"Lot:\s*(\w+)")
+    add_field(draft, "test", r"Test:\s*(\w+)", required=True)
+    set_dedupe_fields(draft, ["test"])
+    set_excel_rules(draft, "{assay_name}.xlsx", "{lot_id}", {"test": "TEST"})
+    failing_pdf = root / "problem.pdf"
+    failing_pdf.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(
+        "src.rulesuite.rulesuite.parse",
+        lambda _path: _page_document(["Fresh Assay", "(9000)", "Lot: LOT1", "Test: ABC"]),
+    )
+
+    proof = create_authoring_proof(str(root), "(9000)", draft, str(failing_pdf))
+
+    assert proof["mode"] == "create"
+    assert proof["reference_pdf_path"] == ""
+    assert proof["status"] == "ready"
+    assert verify_authoring_proof(str(root), "(9000)", draft)["ok"] is True
+
+
 def test_preview_extract_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
     draft = create_draft(str(root), "(1111)")
@@ -1401,6 +1980,74 @@ def test_clone_ruleset_to_draft_overwrite_keeps_target_key_and_name(tmp_path: Pa
     assert data["assay_name"] != "Source Assay"
 
 
+def test_clone_ruleset_full_copy_keeps_dedupe_excel_and_unknown_properties(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    source = {
+        "assay_name": "Source Assay",
+        "assay_key": "(1111)",
+        "vendor_extension": {"keep": True, "n": 1},
+        "lot_rule": {"regex": r"Lot:\s*(\w+)", "note": "keep-lot"},
+        "extract_rules": {
+            "fields": [
+                {"key": "DATUM", "regex": r"Datum:\s*(\S+)", "required": True, "hint": "keep-datum"},
+                {"key": "PCQ1", "regex": r"PCQ1\s+(\d+)", "required": True, "note": "keep-pcq"},
+            ],
+            "dedupe_fields": ["PCQ1", "PCQ1"],
+            "custom_rule": {"mode": "strict"},
+        },
+        "excel_rules": {
+            "excel_filename_template": "Custom-{assay_name}.xlsx",
+            "sheetname_template": "Sheet-{lot_id}",
+            "column_mapping": {"DATUM": "Datumsspalte", "PCQ1": "PCQ1 Column"},
+            "extra_excel": "keep",
+        },
+    }
+    source_path = root / "rules" / "AssayA.json"
+    source_before = json.dumps(source, indent=2, ensure_ascii=False)
+    source_path.write_text(source_before, encoding="utf-8")
+
+    created = clone_ruleset_to_draft(str(root), "(1111)", "(abcd)", "Clone Target", include_fields=True)
+    assert created["status"] == "created"
+    copied = load_draft(created["draft_path"])
+    assert copied["assay_key"] == "(abcd)"
+    assert copied["assay_name"] == "Clone Target"
+    assert copied["vendor_extension"] == {"keep": True, "n": 1}
+    assert copied["lot_rule"] == {"regex": r"Lot:\s*(\w+)", "note": "keep-lot"}
+    assert copied["extract_rules"]["dedupe_fields"] == ["PCQ1", "PCQ1"]
+    assert copied["extract_rules"]["custom_rule"] == {"mode": "strict"}
+    assert copied["extract_rules"]["fields"][0]["hint"] == "keep-datum"
+    assert copied["extract_rules"]["fields"][1]["note"] == "keep-pcq"
+    assert copied["excel_rules"]["excel_filename_template"] == "Custom-{assay_name}.xlsx"
+    assert copied["excel_rules"]["sheetname_template"] == "Sheet-{lot_id}"
+    assert copied["excel_rules"]["column_mapping"]["PCQ1"] == "PCQ1 Column"
+    assert copied["excel_rules"]["extra_excel"] == "keep"
+    assert source_path.read_text(encoding="utf-8") == source_before
+
+
+def test_clone_ruleset_overwrite_false_race_keeps_foreign_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    _write_template(root)
+    _write_clone_source_ruleset(root)
+    foreign = b'{"marker":"foreign-race"}'
+    draft_path = Path(draft_path_for_assay(str(root), "(abcd)"))
+    real_publish = lifecycle._publish_bytes_exclusive
+
+    def _plant(path: Path, payload: bytes) -> bytes | None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(foreign)
+        return real_publish(path, payload)
+
+    monkeypatch.setattr(lifecycle, "_publish_bytes_exclusive", _plant)
+    result = clone_ruleset_to_draft(str(root), "(1111)", "(abcd)", "Clone Target", overwrite=False, include_fields=True)
+    assert result["status"] == "exists"
+    assert draft_path.read_bytes() == foreign
+
+
 def test_list_rulesuite_inventory_includes_inactive_and_filter(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
     inactive_dir = root / "rules" / "inactive"
@@ -1461,3 +2108,1060 @@ def test_open_inactive_as_draft_copies_to_drafts_without_overwrite(tmp_path: Pat
     exists = open_inactive_as_draft(str(root), str(inactive_path))
     assert exists["status"] == "exists"
     assert json.loads(draft_path.read_text(encoding="utf-8")) == {"marker": True}
+
+
+def test_list_rulesuite_inventory_filters_history_and_trash_and_includes_both_in_all(tmp_path: Path) -> None:
+    import hashlib
+    from datetime import datetime, timezone
+
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    trash_dir = root / "rules" / "trash"
+    history_dir.mkdir()
+    trash_dir.mkdir()
+    history_path = history_dir / "AssayA-20260924T070000000000Z.json"
+    history_path.write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    trash_path = trash_dir / "old.json"
+    trash_path.write_text("{not-json", encoding="utf-8")
+
+    history_rows = list_rulesuite_inventory(str(root), kind="history")
+    trash_rows = list_rulesuite_inventory(str(root), kind="trash")
+    all_rows = list_rulesuite_inventory(str(root), kind="all")
+
+    assert [row["kind"] for row in history_rows] == ["history"]
+    assert [row["kind"] for row in trash_rows] == ["trash"]
+    assert {row["kind"] for row in all_rows} >= {"active", "history", "trash"}
+    history = history_rows[0]
+    assert history["display_type"] == "Historie"
+    assert history["ruleset_file"] == history_path.name
+    assert history["read_only"] is True
+    assert history["sha256"] == hashlib.sha256(history_path.read_bytes()).hexdigest()
+    assert len(history["sha256"]) == 64
+    assert history["modified_at"] == datetime.fromtimestamp(history_path.stat().st_mtime, tz=timezone.utc).isoformat()
+    again = list_rulesuite_inventory(str(root), kind="history")[0]
+    assert again["modified_at"] == history["modified_at"]
+    assert again["sha256"] == history["sha256"]
+    trash = trash_rows[0]
+    assert trash["read_only"] is True
+    assert trash["display_type"] == "Trash"
+    assert trash["valid"] is False
+    assert trash["error"]
+    assert trash["sha256"] == hashlib.sha256(trash_path.read_bytes()).hexdigest()
+
+
+def test_open_history_as_draft_copies_without_touching_source_or_active(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    history_dir.mkdir()
+    history_path = history_dir / "AssayA-stamp.json"
+    history_path.write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    active_before = (root / "rules" / "AssayA.json").read_bytes()
+    other_active_before = (root / "rules" / "AssayB.json").read_bytes()
+    history_before = history_path.read_bytes()
+    index_before = (root / "rules" / "index.json").read_bytes()
+
+    created = open_history_as_draft(str(root), str(history_path))
+    assert created["status"] == "created"
+    draft_path = Path(created["draft_path"])
+    assert draft_path.is_file()
+    assert json.loads(draft_path.read_text(encoding="utf-8"))["assay_key"] == "(1111)"
+    assert history_path.read_bytes() == history_before
+    assert (root / "rules" / "AssayA.json").read_bytes() == active_before
+    assert (root / "rules" / "AssayB.json").read_bytes() == other_active_before
+    assert (root / "rules" / "index.json").read_bytes() == index_before
+
+    draft_path.write_text('{"marker": true}', encoding="utf-8")
+    exists = open_history_as_draft(str(root), history_path.name)
+    assert exists["status"] == "exists"
+    assert json.loads(draft_path.read_text(encoding="utf-8")) == {"marker": True}
+    assert history_path.read_bytes() == history_before
+    assert (root / "rules" / "AssayA.json").read_bytes() == active_before
+
+
+def test_open_history_as_draft_rejects_foreign_and_traversal_paths(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    history_dir.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"assay_key":"(1111)","assay_name":"X"}', encoding="utf-8")
+    active = root / "rules" / "AssayA.json"
+    active_before = active.read_bytes()
+
+    for candidate in (
+        str(outside),
+        str(active),
+        "../AssayA.json",
+        str(history_dir / ".." / "AssayA.json"),
+        str(history_dir),
+    ):
+        with pytest.raises(RuleSuiteError, match="path_outside_allowed_directory"):
+            open_history_as_draft(str(root), candidate)
+
+    assert active.read_bytes() == active_before
+    assert not (root / "rules" / "drafts").exists() or not list((root / "rules" / "drafts").glob("*.draft.json"))
+
+
+def test_open_history_as_draft_contains_manipulated_assay_key(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    history_dir.mkdir()
+    history_path = history_dir / "bad-key.json"
+    history_path.write_text(
+        json.dumps({"assay_key": "..\\..\\outside", "assay_name": "Bad"}),
+        encoding="utf-8",
+    )
+    history_before = history_path.read_bytes()
+    active_before = (root / "rules" / "AssayA.json").read_bytes()
+    other_before = (root / "rules" / "AssayB.json").read_bytes()
+    index_before = (root / "rules" / "index.json").read_bytes()
+    drafts = (root / "rules" / "drafts").resolve()
+
+    with pytest.raises(RuleSuiteError, match="path_outside_allowed_directory"):
+        open_history_as_draft(str(root), str(history_path))
+
+    assert history_path.read_bytes() == history_before
+    assert (root / "rules" / "AssayA.json").read_bytes() == active_before
+    assert (root / "rules" / "AssayB.json").read_bytes() == other_before
+    assert (root / "rules" / "index.json").read_bytes() == index_before
+    outside = [path for path in root.rglob("*.draft.json") if drafts not in path.resolve().parents]
+    assert outside == []
+
+
+def test_open_history_as_draft_race_keeps_foreign_draft_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    history_dir.mkdir()
+    history_path = history_dir / "AssayA-stamp.json"
+    history_path.write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    foreign = b'{"marker":"foreign"}'
+    real_publish = lifecycle._publish_new_draft_exclusive
+
+    def _plant_then_publish(path: Path, data: dict) -> bytes | None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(foreign)
+        return real_publish(path, data)
+
+    monkeypatch.setattr(lifecycle, "_publish_new_draft_exclusive", _plant_then_publish)
+
+    result = open_history_as_draft(str(root), str(history_path))
+
+    assert result["status"] == "exists"
+    assert Path(result["draft_path"]).read_bytes() == foreign
+
+
+def test_open_history_as_draft_source_change_after_publish_keeps_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    history_dir.mkdir()
+    history_path = history_dir / "AssayA-stamp.json"
+    history_path.write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    snapshot = json.loads(history_path.read_text(encoding="utf-8"))
+    active_before = (root / "rules" / "AssayA.json").read_bytes()
+    index_before = (root / "rules" / "index.json").read_bytes()
+    real_publish = lifecycle._publish_new_draft_exclusive
+
+    def _mutate_source_after_publish(path: Path, data: dict) -> bytes | None:
+        written = real_publish(path, data)
+        history_path.write_bytes(history_path.read_bytes() + b"\n")
+        return written
+
+    monkeypatch.setattr(lifecycle, "_publish_new_draft_exclusive", _mutate_source_after_publish)
+
+    created = open_history_as_draft(str(root), str(history_path))
+
+    assert created["status"] == "created_with_source_change"
+    assert created["warning"] == "history_source_changed_during_copy"
+    draft_path = Path(created["draft_path"])
+    assert json.loads(draft_path.read_text(encoding="utf-8")) == snapshot
+    assert history_path.read_bytes().endswith(b"\n")
+    assert (root / "rules" / "AssayA.json").read_bytes() == active_before
+    assert (root / "rules" / "index.json").read_bytes() == index_before
+
+
+def test_open_history_as_draft_keeps_byte_identical_foreign_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    history_dir.mkdir()
+    history_path = history_dir / "AssayA-stamp.json"
+    history_path.write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    active_before = (root / "rules" / "AssayA.json").read_bytes()
+    other_active_before = (root / "rules" / "AssayB.json").read_bytes()
+    index_before = (root / "rules" / "index.json").read_bytes()
+    history_before = history_path.read_bytes()
+    real_publish = lifecycle._publish_new_draft_exclusive
+    observed: dict[str, object] = {}
+
+    def _replace_with_identical_bytes(path: Path, data: dict) -> bytes | None:
+        written = real_publish(path, data)
+        payload = path.read_bytes()
+        path.unlink()
+        path.write_bytes(payload)
+        observed["ino"] = path.stat().st_ino
+        observed["payload"] = payload
+        history_path.write_bytes(history_before + b"\n")
+        return written
+
+    monkeypatch.setattr(lifecycle, "_publish_new_draft_exclusive", _replace_with_identical_bytes)
+
+    created = open_history_as_draft(str(root), str(history_path))
+
+    draft_path = Path(created["draft_path"])
+    assert created["status"] == "created_with_source_change"
+    assert created["warning"] == "history_source_changed_during_copy"
+    assert draft_path.exists()
+    assert draft_path.stat().st_ino == observed["ino"]
+    assert draft_path.read_bytes() == observed["payload"]
+    assert history_path.read_bytes() == history_before + b"\n"
+    assert (root / "rules" / "AssayA.json").read_bytes() == active_before
+    assert (root / "rules" / "AssayB.json").read_bytes() == other_active_before
+    assert (root / "rules" / "index.json").read_bytes() == index_before
+
+
+def test_open_history_as_draft_write_zero_raises_without_final_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    history_dir.mkdir()
+    history_path = history_dir / "AssayA-stamp.json"
+    history_path.write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    calls = {"n": 0}
+
+    def _write_zero(_fd: int, _data: object) -> int:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise AssertionError("os.write returned 0 more than once")
+        return 0
+
+    monkeypatch.setattr(lifecycle.os, "write", _write_zero)
+
+    with pytest.raises(RuleSuiteError, match="draft_publish_failed"):
+        open_history_as_draft(str(root), str(history_path))
+
+    assert calls["n"] == 1
+    drafts = root / "rules" / "drafts"
+    assert list(drafts.glob("*.draft.json")) == []
+
+
+def test_open_history_as_draft_close_error_raises_without_final_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    history_dir.mkdir()
+    history_path = history_dir / "AssayA-stamp.json"
+    history_path.write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    real_close = lifecycle.os.close
+    leaked: list[int] = []
+
+    def _close_fails(fd: int) -> None:
+        leaked.append(fd)
+        raise OSError("simulated close failure")
+
+    monkeypatch.setattr(lifecycle.os, "close", _close_fails)
+
+    try:
+        with pytest.raises(RuleSuiteError, match="draft_publish_failed"):
+            open_history_as_draft(str(root), str(history_path))
+        drafts = root / "rules" / "drafts"
+        assert list(drafts.glob("*.draft.json")) == []
+    finally:
+        for fd in leaked:
+            try:
+                real_close(fd)
+            except OSError:
+                pass
+
+
+def test_delete_inventory_item_rejects_history_and_trash(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    history_dir = root / "rules" / "history"
+    trash_dir = root / "rules" / "trash"
+    history_dir.mkdir()
+    trash_dir.mkdir()
+    history_path = history_dir / "AssayA-stamp.json"
+    trash_path = trash_dir / "old.json"
+    history_path.write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    trash_path.write_text('{"assay_key":"(t)"}', encoding="utf-8")
+    history_before = history_path.read_bytes()
+    trash_before = trash_path.read_bytes()
+
+    with pytest.raises(RuleSuiteError, match="read_only_inventory_kind"):
+        delete_inventory_item(str(root), "history", str(history_path))
+    with pytest.raises(RuleSuiteError, match="read_only_inventory_kind"):
+        delete_inventory_item(str(root), "trash", str(trash_path))
+
+    assert history_path.read_bytes() == history_before
+    assert trash_path.read_bytes() == trash_before
+
+
+def _prepared_existing_activation(root: Path) -> tuple[Path, str, bytes, bytes]:
+    active = root / "rules" / "AssayA.json"
+    active.write_bytes(active.read_bytes() + b"\n")
+    before = active.read_bytes()
+    draft = create_draft(str(root), "(1111)")
+    set_field_regex(draft, "test", r"Test:\s*(UPDATED)")
+    draft_bytes = Path(draft).read_bytes()
+    return active, draft, before, draft_bytes
+
+
+def test_activate_draft_publishes_byte_exact_history_snapshot(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    active, draft, before, draft_bytes = _prepared_existing_activation(root)
+
+    target = activate_draft(str(root), "(1111)", draft)
+
+    snapshots = sorted((root / "rules" / "history").glob("*.json"))
+    assert len(snapshots) == 1
+    assert snapshots[0].read_bytes() == before
+    assert active.read_bytes() != before
+    assert Path(target).read_bytes() == active.read_bytes()
+    assert Path(draft).read_bytes() == draft_bytes
+    assert not list((root / "rules" / "history").glob("*.tmp"))
+
+
+def test_repeated_activation_uses_collision_safe_history_names(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.history as history
+
+    monkeypatch.setattr(history, "_utc_stamp", lambda: "20260923T120000000000Z")
+    root = _setup_project(tmp_path)
+    active, draft, first_before, _draft_bytes = _prepared_existing_activation(root)
+
+    activate_draft(str(root), "(1111)", draft)
+    after_first = active.read_bytes()
+    set_field_regex(draft, "test", r"Test:\s*(TWICE)")
+    activate_draft(str(root), "(1111)", draft)
+
+    by_name = {path.name: path for path in (root / "rules" / "history").glob("*.json")}
+    first_name = "AssayA-20260923T120000000000Z.json"
+    second_name = "AssayA-20260923T120000000000Z-2.json"
+    assert set(by_name) == {first_name, second_name}
+    assert by_name[first_name].read_bytes() == first_before
+    assert by_name[second_name].read_bytes() == after_first
+    assert active.read_bytes() != after_first
+
+
+def test_activate_new_draft_does_not_publish_history_snapshot(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = create_blank_draft(str(root), "(9000)", "Fresh Assay")
+    set_lot_rule(draft, r"Lot:\\s*(\\w+)")
+    add_field(draft, "test", r"Test:\\s*(\\w+)", required=True)
+    set_dedupe_fields(draft, ["test"])
+    set_excel_rules(draft, "{assay_name}.xlsx", "{lot_id}", {"test": "TEST"})
+
+    out_path = activate_new_draft(str(root), "(9000)", "Fresh Assay", draft)
+
+    assert Path(out_path).is_file()
+    assert not (root / "rules" / "history").exists()
+
+
+def test_invalid_draft_activation_does_not_snapshot_or_overwrite(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    active = root / "rules" / "AssayA.json"
+    before = active.read_bytes()
+    draft = create_draft(str(root), "(1111)")
+    data = load_draft(draft)
+    data["excel_rules"]["column_mapping"] = {"unknown": "X"}
+    Path(draft).write_text(json.dumps(data), encoding="utf-8")
+    draft_bytes = Path(draft).read_bytes()
+
+    with pytest.raises(RuleSuiteError, match="draft_invalid"):
+        activate_draft(str(root), "(1111)", draft)
+
+    assert active.read_bytes() == before
+    assert Path(draft).read_bytes() == draft_bytes
+    assert not (root / "rules" / "history").exists()
+
+
+@pytest.mark.parametrize("stage", ["read", "mkdir", "write", "publish", "verify"])
+def test_snapshot_failure_blocks_activation_without_changing_active_or_draft(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    import src.rulesuite.history as history
+
+    root = _setup_project(tmp_path)
+    active, draft, before, draft_bytes = _prepared_existing_activation(root)
+    if stage == "read":
+
+        def _fail_read(_path: Path) -> bytes:
+            raise RuleSuiteError("snapshot_read_failed")
+
+        monkeypatch.setattr(history, "_read_source_bytes", _fail_read)
+    elif stage == "mkdir":
+        (root / "rules" / "history").write_text("blocked", encoding="utf-8")
+    elif stage == "write":
+
+        def _fail_write(path: Path, payload: bytes) -> None:
+            path.write_bytes(b"partial")
+            raise RuleSuiteError(f"snapshot_write_failed: {len(payload)}")
+
+        monkeypatch.setattr(history, "_write_temp_bytes", _fail_write)
+    elif stage == "publish":
+
+        def _fail_publish(_tmp: Path, _final: Path) -> None:
+            raise RuleSuiteError("snapshot_publish_failed")
+
+        monkeypatch.setattr(history, "_publish_snapshot", _fail_publish)
+    else:
+        real_verify = history._verify_snapshot_bytes
+
+        def _fail_publish_verify(path: Path, payload: bytes, *, stage: str) -> None:
+            real_verify(path, payload, stage=stage)
+            if stage == "publish_verify":
+                raise RuleSuiteError("snapshot_publish_verify_failed")
+
+        monkeypatch.setattr(history, "_verify_snapshot_bytes", _fail_publish_verify)
+
+    with pytest.raises(RuleSuiteError):
+        activate_draft(str(root), "(1111)", draft)
+
+    assert active.read_bytes() == before
+    assert Path(draft).read_bytes() == draft_bytes
+    history_path = root / "rules" / "history"
+    if stage == "mkdir":
+        assert history_path.is_file()
+        assert history_path.read_text(encoding="utf-8") == "blocked"
+        return
+    published = list(history_path.glob("*.json")) if history_path.exists() else []
+    temps = list(history_path.glob("*.tmp")) if history_path.exists() else []
+    assert published == []
+    assert temps == []
+
+
+def _rich_active_bytes() -> bytes:
+    payload = {
+        "assay_name": "Assay A",
+        "assay_key": "(1111)",
+        "vendor_extension": {"keep": True, "n": 1},
+        "lot_rule": {"regex": r"Lot:\s*(\w+)"},
+        "extract_rules": {
+            "fields": [
+                {
+                    "key": "alpha",
+                    "regex": r"A:\s*(\w+)",
+                    "required": True,
+                    "hint": "keep-alpha",
+                    "search_from": {"after": "BEGIN"},
+                },
+                {"key": "beta", "regex": r"B:\s*(\w+)", "required": False, "note": "keep-beta"},
+            ],
+            "dedupe_fields": ["alpha", "alpha"],
+            "custom_rule": {"mode": "strict"},
+        },
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {"alpha": "ALPHA", "beta": "BETA"},
+            "extra_excel": "keep",
+        },
+    }
+    return (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def test_open_active_as_draft_copies_complete_bytes_and_keeps_existing_draft(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    active = root / "rules" / "AssayA.json"
+    active.write_bytes(_rich_active_bytes())
+    other_before = (root / "rules" / "AssayB.json").read_bytes()
+    index_before = (root / "rules" / "index.json").read_bytes()
+
+    created = open_active_as_draft(str(root), "(1111)")
+    draft_path = Path(created["draft_path"])
+    assert created["status"] == "created"
+    assert draft_path.read_bytes() == active.read_bytes()
+    loaded = json.loads(draft_path.read_text(encoding="utf-8"))
+    assert loaded["vendor_extension"] == {"keep": True, "n": 1}
+    assert loaded["extract_rules"]["dedupe_fields"] == ["alpha", "alpha"]
+    assert loaded["extract_rules"]["custom_rule"] == {"mode": "strict"}
+    assert loaded["excel_rules"]["extra_excel"] == "keep"
+    assert loaded["extract_rules"]["fields"][0]["hint"] == "keep-alpha"
+
+    kept = json.dumps({"assay_key": "(1111)", "marker": True}, separators=(",", ":")).encode("utf-8")
+    draft_path.write_bytes(kept)
+    exists = open_active_as_draft(str(root), "(1111)")
+    assert exists["status"] == "exists"
+    assert draft_path.read_bytes() == kept
+    assert active.read_bytes() == _rich_active_bytes()
+    assert (root / "rules" / "AssayB.json").read_bytes() == other_before
+    assert (root / "rules" / "index.json").read_bytes() == index_before
+
+
+def test_open_active_as_draft_fail_closed_on_containment_and_identity(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    active = root / "rules" / "AssayA.json"
+    before = active.read_bytes()
+    index_path = root / "rules" / "index.json"
+    original_index = index_path.read_bytes()
+
+    index_path.write_text(
+        json.dumps({"assays": [{"assay_key": "(1111)", "ruleset_file": "../outside.json"}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuleSuiteError, match="protected_or_invalid_ruleset_file"):
+        open_active_as_draft(str(root), "(1111)")
+
+    index_path.write_text(
+        json.dumps(
+            {
+                "assays": [
+                    {"assay_key": "(1111)", "ruleset_file": "AssayA.json"},
+                    {"assay_key": "(1111)", "ruleset_file": "AssayB.json"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuleSuiteError, match="active_ruleset_identity_ambiguous"):
+        open_active_as_draft(str(root), "(1111)")
+
+    index_path.write_bytes(original_index)
+    active.write_text(json.dumps({"assay_key": "(9999)"}), encoding="utf-8")
+    with pytest.raises(RuleSuiteError, match="active_ruleset_identity_ambiguous"):
+        open_active_as_draft(str(root), "(1111)")
+
+    active.write_bytes(before)
+    drafts = root / "rules" / "drafts"
+    assert not drafts.exists() or list(drafts.glob("*.draft.json")) == []
+
+
+def test_open_active_as_draft_race_keeps_foreign_draft_and_source_change_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    active = root / "rules" / "AssayA.json"
+    active.write_bytes(_rich_active_bytes())
+    foreign = b'{"marker":"foreign"}'
+    real_publish = lifecycle._publish_bytes_exclusive
+
+    def _plant(_path: Path, payload: bytes) -> bytes | None:
+        _path.parent.mkdir(parents=True, exist_ok=True)
+        _path.write_bytes(foreign)
+        return real_publish(_path, payload)
+
+    monkeypatch.setattr(lifecycle, "_publish_bytes_exclusive", _plant)
+    draft_path = Path(draft_path_for_assay(str(root), "(1111)"))
+    with pytest.raises(RuleSuiteError, match="draft_identity_conflict"):
+        open_active_as_draft(str(root), "(1111)")
+    assert draft_path.read_bytes() == foreign
+    draft_path.unlink()
+
+    def _mutate_source(path: Path, payload: bytes) -> bytes | None:
+        written = real_publish(path, payload)
+        active.write_bytes(active.read_bytes() + b"\n")
+        return written
+
+    monkeypatch.setattr(lifecycle, "_publish_bytes_exclusive", _mutate_source)
+    with pytest.raises(RuleSuiteError, match="active_ruleset_changed_during_copy"):
+        open_active_as_draft(str(root), "(1111)")
+    assert list((root / "rules" / "drafts").glob("*.draft.json")) == []
+
+
+def test_open_active_as_draft_rejects_foreign_and_unreadable_existing_draft(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    active = root / "rules" / "AssayA.json"
+    active.write_bytes(_rich_active_bytes())
+    draft_path = Path(draft_path_for_assay(str(root), "(1111)"))
+    draft_path.parent.mkdir(parents=True)
+    active_before = active.read_bytes()
+
+    for payload in (b'{"marker":true}', b'{"assay_key":"(2222)"}', b"\xffnot-json", b"[]"):
+        draft_path.write_bytes(payload)
+        with pytest.raises(RuleSuiteError, match="draft_identity_conflict"):
+            open_active_as_draft(str(root), "(1111)")
+        assert draft_path.read_bytes() == payload
+        assert active.read_bytes() == active_before
+
+
+def test_open_active_as_draft_race_rejects_foreign_and_unreadable_winner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    active = root / "rules" / "AssayA.json"
+    active.write_bytes(_rich_active_bytes())
+    draft_path = Path(draft_path_for_assay(str(root), "(1111)"))
+    real_publish = lifecycle._publish_bytes_exclusive
+    planted = {"payload": b""}
+
+    def _plant(path: Path, payload: bytes) -> bytes | None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(planted["payload"])
+        return real_publish(path, payload)
+
+    monkeypatch.setattr(lifecycle, "_publish_bytes_exclusive", _plant)
+    for payload in (b'{"marker":"foreign"}', b"not-json", b'{"assay_key":"OTHER"}'):
+        planted["payload"] = payload
+        if draft_path.exists():
+            draft_path.unlink()
+        with pytest.raises(RuleSuiteError, match="draft_identity_conflict"):
+            open_active_as_draft(str(root), "(1111)")
+        assert draft_path.read_bytes() == payload
+
+
+def test_open_active_as_draft_rollback_keeps_foreign_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    active = root / "rules" / "AssayA.json"
+    active.write_bytes(_rich_active_bytes())
+    draft_path = Path(draft_path_for_assay(str(root), "(1111)"))
+    foreign = b'{"assay_key":"FOREIGN"}'
+    real_publish = lifecycle._publish_bytes_exclusive
+
+    def _mutate_and_replace(path: Path, payload: bytes) -> bytes | None:
+        written = real_publish(path, payload)
+        path.write_bytes(foreign)
+        active.write_bytes(active.read_bytes() + b"\n")
+        return written
+
+    monkeypatch.setattr(lifecycle, "_publish_bytes_exclusive", _mutate_and_replace)
+    with pytest.raises(RuleSuiteError, match="draft_target_conflict"):
+        open_active_as_draft(str(root), "(1111)")
+    assert draft_path.read_bytes() == foreign
+
+
+def _field_draft(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "proj"
+    drafts = root / "rules" / "drafts"
+    drafts.mkdir(parents=True)
+    payload = {
+        "assay_key": "FRESH",
+        "assay_name": "Fresh",
+        "vendor_extension": {"keep": True},
+        "extract_rules": {
+            "fields": [
+                {
+                    "key": "alpha",
+                    "regex": r"A:\s*(\w+)",
+                    "required": True,
+                    "hint": "keep-alpha",
+                    "search_from": {"line": 2},
+                },
+                {"key": "beta", "regex": r"B:\s*(\w+)", "required": False, "note": "keep-beta"},
+            ],
+            "dedupe_fields": ["alpha", "alpha"],
+            "custom_rule": {"mode": "strict"},
+        },
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": {"alpha": "ALPHA", "beta": "BETA"},
+            "extra_excel": "keep",
+        },
+    }
+    path = drafts / "FRESH.draft.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return root, path
+
+
+def test_replace_field_updates_renames_and_preserves_unknown_properties(tmp_path: Path) -> None:
+    _root, path = _field_draft(tmp_path)
+    replace_field(
+        str(path),
+        "alpha",
+        key="alpha",
+        regex=r"A:\s*(\d+)",
+        required=False,
+        search_from=None,
+        excel_column=None,
+        dedupe_member=None,
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    alpha = data["extract_rules"]["fields"][0]
+    assert alpha["key"] == "alpha"
+    assert alpha["regex"] == r"A:\s*(\d+)"
+    assert alpha["required"] is False
+    assert "search_from" not in alpha
+    assert alpha["hint"] == "keep-alpha"
+    assert data["extract_rules"]["fields"][1]["note"] == "keep-beta"
+    assert data["excel_rules"]["column_mapping"]["alpha"] == "ALPHA"
+    assert data["extract_rules"]["dedupe_fields"] == ["alpha"]
+    assert data["vendor_extension"] == {"keep": True}
+    assert data["extract_rules"]["custom_rule"] == {"mode": "strict"}
+
+    replace_field(
+        str(path),
+        "alpha",
+        key="gamma",
+        regex=r"G:\s*(\w+)",
+        required=True,
+        search_from={"after": "HEAD"},
+        excel_column=None,
+        dedupe_member=None,
+    )
+    renamed = json.loads(path.read_text(encoding="utf-8"))
+    fields = renamed["extract_rules"]["fields"]
+    assert [field["key"] for field in fields] == ["gamma", "beta"]
+    assert fields[0]["hint"] == "keep-alpha"
+    assert fields[0]["search_from"] == {"after": "HEAD"}
+    assert renamed["excel_rules"]["column_mapping"] == {"gamma": "ALPHA", "beta": "BETA"}
+    assert renamed["extract_rules"]["dedupe_fields"] == ["gamma"]
+    assert renamed["excel_rules"]["extra_excel"] == "keep"
+
+
+def test_replace_field_mapping_default_dedupe_authority_and_failure_keep_bytes(tmp_path: Path) -> None:
+    _root, path = _field_draft(tmp_path)
+    original = path.read_bytes()
+    payload = json.loads(original.decode("utf-8"))
+    payload["extract_rules"]["fields"][0].pop("search_from")
+    payload["excel_rules"]["column_mapping"] = {"beta": "BETA"}
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    before_rename = path.read_bytes()
+
+    replace_field(
+        str(path),
+        "alpha",
+        key="gamma",
+        regex=r"G:\s*(\w+)",
+        required=True,
+        search_from=None,
+        excel_column=None,
+        dedupe_member=False,
+    )
+    renamed = json.loads(path.read_text(encoding="utf-8"))
+    assert renamed["excel_rules"]["column_mapping"]["gamma"] == "gamma"
+    assert "alpha" not in renamed["excel_rules"]["column_mapping"]
+    assert renamed["extract_rules"]["dedupe_fields"] == []
+
+    path.write_bytes(before_rename)
+    conflict_before = path.read_bytes()
+    conflict = json.loads(conflict_before.decode("utf-8"))
+    conflict["excel_rules"]["column_mapping"]["gamma"] = "FOREIGN"
+    path.write_text(json.dumps(conflict, indent=2), encoding="utf-8")
+    conflict_bytes = path.read_bytes()
+    with pytest.raises(RuleSuiteError, match="column_mapping_conflict"):
+        replace_field(
+            str(path),
+            "alpha",
+            key="gamma",
+            regex=r"G:\s*(\w+)",
+            required=True,
+            search_from=None,
+            excel_column="GAMMA",
+        )
+    assert path.read_bytes() == conflict_bytes
+
+    with pytest.raises(RuleSuiteError, match="field_exists"):
+        replace_field(
+            str(path),
+            "alpha",
+            key="beta",
+            regex=r"B:\s*(\w+)",
+            required=True,
+            search_from=None,
+        )
+    assert path.read_bytes() == conflict_bytes
+
+    with pytest.raises(RuleSuiteError, match="invalid_search_from"):
+        replace_field(
+            str(path),
+            "alpha",
+            key="alpha",
+            regex=r"A:\s*(\w+)",
+            required=True,
+            search_from={"line": -1},
+        )
+    assert path.read_bytes() == conflict_bytes
+
+
+def test_replace_field_write_failure_restores_original_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.rulesuite as rulesuite
+
+    _root, path = _field_draft(tmp_path)
+    original = path.read_bytes()
+
+    def _fail_before_replace(_target: Path, _data: dict) -> None:
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(rulesuite, "_write_json_atomic", _fail_before_replace)
+    with pytest.raises(RuleSuiteError, match="draft_replace_failed"):
+        replace_field(
+            str(path),
+            "alpha",
+            key="alpha",
+            regex=r"A:\s*(\d+)",
+            required=False,
+            search_from=None,
+        )
+    assert path.read_bytes() == original
+
+    def _foreign_write(target: Path, _data: dict) -> None:
+        target.write_bytes(b"foreign-bytes")
+        raise OSError("uncooperative writer")
+
+    monkeypatch.setattr(rulesuite, "_write_json_atomic", _foreign_write)
+    with pytest.raises(RuleSuiteError, match="draft_replace_failed"):
+        replace_field(
+            str(path),
+            "alpha",
+            key="alpha",
+            regex=r"A:\s*(\d+)",
+            required=False,
+            search_from=None,
+        )
+    assert path.read_bytes() == b"foreign-bytes"
+
+
+def _never_active_draft(root: Path, assay_key: str = "NEVER-1", **extra: object) -> Path:
+    drafts = root / "rules" / "drafts"
+    drafts.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "assay_key": assay_key,
+        "assay_name": "Never",
+        "extract_rules": {"fields": [], "dedupe_fields": []},
+    }
+    payload.update(extra)
+    path = Path(draft_path_for_assay(str(root), assay_key))
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    readiness = path.with_name(path.name + ".readiness")
+    readiness.write_text(json.dumps({"ok": True, "assay_key": assay_key}), encoding="utf-8")
+    return path
+
+
+def test_delete_never_active_ruleset_removes_draft_and_readiness_without_trash(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    draft = _never_active_draft(root)
+    readiness = draft.with_name(draft.name + ".readiness")
+    active_before = (root / "rules" / "AssayA.json").read_bytes()
+    index_before = (root / "rules" / "index.json").read_bytes()
+
+    result = delete_never_active_ruleset(str(root), str(draft))
+    assert result["status"] == "deleted"
+    assert result["readiness_removed"] is True
+    assert not draft.exists()
+    assert not readiness.exists()
+    trash = root / "rules" / "trash"
+    history = root / "rules" / "history"
+    assert not trash.exists() or list(trash.rglob("*")) == []
+    assert not history.exists() or list(history.glob("*.json")) == []
+    assert (root / "rules" / "AssayA.json").read_bytes() == active_before
+    assert (root / "rules" / "index.json").read_bytes() == index_before
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["active-index", "active-file", "inactive", "history", "trash", "foreign", "unreadable", "ambiguous"],
+)
+def test_delete_never_active_ruleset_rejects_traced_and_foreign_files(tmp_path: Path, kind: str) -> None:
+    root = _setup_project(tmp_path)
+    if kind == "active-index":
+        draft = _never_active_draft(root, "(1111)")
+    elif kind == "active-file":
+        draft = _never_active_draft(root, "ORPHAN")
+        (root / "rules" / "index.json").write_text(json.dumps({"assays": []}), encoding="utf-8")
+        (root / "rules" / "Orphan.json").write_text(json.dumps({"assay_key": "ORPHAN"}), encoding="utf-8")
+    elif kind == "inactive":
+        draft = _never_active_draft(root, "OLD")
+        inactive = root / "rules" / "inactive"
+        inactive.mkdir()
+        (inactive / "OLD.json").write_text(json.dumps({"assay_key": "OLD"}), encoding="utf-8")
+    elif kind == "history":
+        draft = _never_active_draft(root, "HIST")
+        history = root / "rules" / "history"
+        history.mkdir()
+        (history / "HIST.json").write_text(json.dumps({"assay_key": "HIST"}), encoding="utf-8")
+    elif kind == "trash":
+        draft = _never_active_draft(root, "GONE")
+        trash = root / "rules" / "trash"
+        trash.mkdir()
+        (trash / "GONE.json").write_text(json.dumps({"assay_key": "GONE"}), encoding="utf-8")
+    elif kind == "foreign":
+        draft = _never_active_draft(root)
+        outside = tmp_path / "outside.draft.json"
+        outside.write_bytes(draft.read_bytes())
+        before = outside.read_bytes()
+        with pytest.raises(RuleSuiteError, match="path_outside_allowed_directory"):
+            delete_never_active_ruleset(str(root), str(outside))
+        assert outside.read_bytes() == before
+        assert draft.exists()
+        return
+    elif kind == "unreadable":
+        draft = _never_active_draft(root, "PLAIN")
+        history = root / "rules" / "history"
+        history.mkdir()
+        (history / "broken.json").write_bytes(b"{not-json")
+    else:
+        draft = _never_active_draft(root, "MAYBE")
+        draft.write_text(json.dumps({"assay_key": "OTHER"}), encoding="utf-8")
+
+    before = draft.read_bytes()
+    readiness = draft.with_name(draft.name + ".readiness")
+    readiness_before = readiness.read_bytes() if readiness.exists() else None
+    with pytest.raises(RuleSuiteError):
+        delete_never_active_ruleset(str(root), str(draft))
+    assert draft.read_bytes() == before
+    if readiness_before is not None:
+        assert readiness.read_bytes() == readiness_before
+
+
+def test_delete_never_active_ruleset_rolls_back_partial_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    draft = _never_active_draft(root)
+    readiness = draft.with_name(draft.name + ".readiness")
+    draft_before = draft.read_bytes()
+    readiness_before = readiness.read_bytes()
+    real_replace = lifecycle.os.replace
+    calls = {"n": 0}
+
+    def _fail_second(src: Path, dst: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("simulated partial delete")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(lifecycle.os, "replace", _fail_second)
+    with pytest.raises(RuleSuiteError, match="delete_never_active_failed"):
+        delete_never_active_ruleset(str(root), str(draft))
+
+    assert draft.read_bytes() == draft_before
+    assert readiness.read_bytes() == readiness_before
+    assert list((root / "rules" / "drafts").glob(".*.deleting")) == []
+    trash = root / "rules" / "trash"
+    assert not trash.exists() or list(trash.rglob("*")) == []
+
+
+def test_delete_never_active_ruleset_ignores_non_json_and_blocks_broken_json(tmp_path: Path) -> None:
+    root = _setup_project(tmp_path)
+    (root / "rules" / "README.md").write_text("project notes", encoding="utf-8")
+    history = root / "rules" / "history"
+    history.mkdir()
+    (history / "notes.txt").write_text("independent", encoding="utf-8")
+    draft = _never_active_draft(root)
+    readiness = draft.with_name(draft.name + ".readiness")
+
+    result = delete_never_active_ruleset(str(root), str(draft))
+    assert result["status"] == "deleted"
+    assert not draft.exists()
+    assert not readiness.exists()
+    assert (root / "rules" / "README.md").read_text(encoding="utf-8") == "project notes"
+    assert (history / "notes.txt").read_text(encoding="utf-8") == "independent"
+
+    blocked = _never_active_draft(root, "STILL")
+    blocked_readiness = blocked.with_name(blocked.name + ".readiness")
+    draft_before = blocked.read_bytes()
+    readiness_before = blocked_readiness.read_bytes()
+    (history / "broken.json").write_bytes(b"{not-json")
+    with pytest.raises(RuleSuiteError, match="lifecycle_artifact_unreadable"):
+        delete_never_active_ruleset(str(root), str(blocked))
+    assert blocked.read_bytes() == draft_before
+    assert blocked_readiness.read_bytes() == readiness_before
+    assert (history / "broken.json").read_bytes() == b"{not-json"
+
+
+def test_delete_never_active_ruleset_discard_failure_restores_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.rulesuite.lifecycle as lifecycle
+
+    root = _setup_project(tmp_path)
+    draft = _never_active_draft(root)
+    readiness = draft.with_name(draft.name + ".readiness")
+    draft_before = draft.read_bytes()
+    readiness_before = readiness.read_bytes()
+    real_discard = lifecycle._discard_quarantine
+    calls = {"n": 0}
+
+    def _fail_final_discard(path: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            path.unlink()
+            raise OSError("simulated discard failure")
+        real_discard(path)
+
+    monkeypatch.setattr(lifecycle, "_discard_quarantine", _fail_final_discard)
+    with pytest.raises(RuleSuiteError, match="delete_never_active_failed"):
+        delete_never_active_ruleset(str(root), str(draft))
+
+    assert draft.read_bytes() == draft_before
+    assert readiness.read_bytes() == readiness_before
+    assert list((root / "rules" / "drafts").glob(".*.deleting")) == []
+
+
+def test_lifecycle_lock_blocks_activate_and_permanent_delete_without_file_changes(tmp_path: Path) -> None:
+    from src.runtime.api import release_exclusive, try_acquire_exclusive
+
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    never = _never_active_draft(root, "NEVER-LOCK")
+    readiness = never.with_name(never.name + ".readiness")
+    active = root / "rules" / "AssayA.json"
+    index = root / "rules" / "index.json"
+    before = {
+        "draft": Path(draft).read_bytes(),
+        "never": never.read_bytes(),
+        "readiness": readiness.read_bytes(),
+        "active": active.read_bytes(),
+        "index": index.read_bytes(),
+    }
+    lock_path = root / "rules" / ".lifecycle.lock"
+    assert try_acquire_exclusive(lock_path, 120.0) is True
+    try:
+        with pytest.raises(RuleSuiteError, match="lifecycle_lock_busy"):
+            activate_draft(str(root), "(1111)", draft)
+        with pytest.raises(RuleSuiteError, match="lifecycle_lock_busy"):
+            activate_new_draft(str(root), "(lock)", "Lock Assay", draft)
+        with pytest.raises(RuleSuiteError, match="lifecycle_lock_busy"):
+            deactivate_ruleset(str(root), "(1111)")
+        with pytest.raises(RuleSuiteError, match="lifecycle_lock_busy"):
+            delete_never_active_ruleset(str(root), str(never))
+        assert Path(draft).read_bytes() == before["draft"]
+        assert never.read_bytes() == before["never"]
+        assert readiness.read_bytes() == before["readiness"]
+        assert active.read_bytes() == before["active"]
+        assert index.read_bytes() == before["index"]
+        assert lock_path.is_file()
+    finally:
+        release_exclusive(lock_path)
+    assert not lock_path.exists()
+
+    activate_draft(str(root), "(1111)", draft)
+    assert not lock_path.exists()
+    with pytest.raises(RuleSuiteError):
+        delete_never_active_ruleset(str(root), str(never.with_name("missing.draft.json")))
+    assert not lock_path.exists()
+    delete_never_active_ruleset(str(root), str(never))
+    assert not never.exists()
+    assert not lock_path.exists()

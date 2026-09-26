@@ -1,0 +1,21 @@
+---
+description: Analyzer-specific local agent roles, cost limits, review boundaries, and stop conditions
+globs:
+alwaysApply: true
+---
+
+# Analyzer Agent Governance
+
+- Read `AGENTS.md`, `.cursor/agent-system.json`, and `docs/AGENT_GOVERNANCE.md` before delegating or editing.
+- `.cursor/agent-system.json` is the normative source for role models and numeric limits. Agent frontmatter must match it exactly.
+- Use only local Cursor agents. Do not start Cursor Cloud Agents, remote workers, or a parallel orchestration system.
+- Keep exactly one product writer. Read-only exploration or review must not overlap a write without explicit coordinator control.
+- Use the smallest useful workflow: bounded plan, one writer, targeted verification, and a material review only when required by the configured policy.
+- Rework uses the same writer and focused regression. Do not create recursive reviewer/fixer loops or fresh budgets by relabeling findings.
+- Run the full regression at most as allowed after review GO. Run packaging or visible GUI smoke only when the package affects those areas.
+- Never substitute a more expensive model, including Sol, when a configured role is unavailable or rate-limited. Record an orchestrator review or `HUMAN_GATE`.
+- A configured or requested model is not runtime attestation. Report observed model or reasoning only when actual telemetry provides it.
+- Git writes, destructive targets, architecture changes, and phase advancement require their separate human authorization.
+- Preserve the confirmed dirty baseline and Safety-Snapshot. Never reset, checkout, clean, stash, rebase, or discard unrelated tracked or untracked work.
+- Stop before writes on any hard stop status defined in `docs/AGENT_GOVERNANCE.md`.
+- `.cursor/rules/00-agent-workflow.mdc` remains authoritative for verification commands; `.cursor/rules/01-architecture-boundaries.mdc` remains authoritative for code boundaries.

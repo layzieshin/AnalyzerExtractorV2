@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import tkinter as tk
 
-from src.rulesuite.api import load_draft, save_draft, set_dedupe_fields, set_excel_rules, set_lot_rule, sync_column_mapping_from_fields
+from .history_actions import history_entry_from_receipt
 
 
 class MetaMixin:
@@ -50,7 +50,7 @@ class MetaMixin:
             return
         try:
             self._push_undo_snapshot()
-            sync_column_mapping_from_fields(self.current_draft_path)
+            self._rules.sync_column_mapping_from_fields(self.current_draft_path)
             self._reload_column_mapping_from_draft()
             self._set_hint("Fehlende Spaltenzuordnungen aus Feldern ergänzt.")
             self._log("Fehlende Spaltenzuordnungen aus Feldern ergänzt.")
@@ -98,26 +98,23 @@ class MetaMixin:
         if not excel_filename or not sheet_template:
             raise ValueError("excel_filename_template und sheetname_template sind erforderlich")
 
-        dedupe = self._normalize_dedupe_fields()
-        col_map = self._normalize_column_mapping()
-
-        if push_undo:
-            self._push_undo_snapshot()
-        set_lot_rule(self.current_draft_path, lot_regex)
-        set_dedupe_fields(self.current_draft_path, dedupe)
-        set_excel_rules(
+        receipt = self._rules.update_draft_meta(
             self.current_draft_path,
-            excel_filename,
-            sheet_template,
-            col_map,
+            assay_key=assay_key,
+            assay_name=assay_name,
+            lot_regex=lot_regex,
+            excel_filename_template=excel_filename,
+            sheetname_template=sheet_template,
+            return_receipt=push_undo,
         )
-
-        data = load_draft(self.current_draft_path)
-        data["assay_key"] = assay_key
-        data["assay_name"] = assay_name
-        save_draft(self.current_draft_path, data)
-
-        self.column_mapping_data = col_map
-        self.var_dedupe_fields.set(",".join(dedupe))
+        if push_undo:
+            entry = history_entry_from_receipt(receipt)
+            if entry is None:
+                raise RuntimeError(
+                    "Der Undo-Beleg fehlt oder ist ungueltig. Undo und Redo wurden nicht veraendert."
+                )
+            self._commit_undo_after_success(entry)
         self._dirty = False
+        data = self._rules.load_draft(self.current_draft_path)
+        self._apply_persisted_mapping_and_dedupe(data)
         return data

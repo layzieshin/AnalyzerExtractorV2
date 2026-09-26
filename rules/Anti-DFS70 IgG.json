@@ -1,0 +1,168 @@
+{
+  "assay_name": "Anti-DFS70 IgG",
+  "assay_key": "(0437)",
+  "lot_rule": {
+    "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
+  },
+  "extract_rules": {
+    "fields": [
+      {
+        "key": "DATUM",
+        "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "required": true
+      },
+      {
+        "key": "ZEIT",
+        "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
+        "required": true
+      },
+      {
+        "key": "ANWENDER",
+        "regex": "Anwender:\\s*([^\\s]+)",
+        "required": true
+      },
+      {
+        "key": "PLATTE",
+        "regex": "Plattenname:\\s*(.+?)\\s+Zeit:",
+        "required": true
+      },
+      {
+        "key": "TEST",
+        "regex": "Test:[^\\n]*?[\\\\/]([^\\\\/]+\\.asy)\\s*\\(",
+        "required": true
+      },
+      {
+        "key": "CHARGE",
+        "regex": "Kit\\s+(E[0-9A-Za-z]+)\\s+\\d{6}",
+        "required": true
+      },
+      {
+        "key": "HALTBARKEIT",
+        "regex": "Kit\\s+E[0-9A-Za-z]+\\s+(\\d{6})",
+        "required": true
+      },
+      {
+        "key": "VALIDATION",
+        "regex": "(Validationskriterien\\s+(?:nicht\\s+)?erfüllt)",
+        "required": true,
+        "search_from": {
+          "line": 0
+        }
+      },
+      {
+        "key": "C1_MINIMUM",
+        "regex": "O\\.D\\.\\s*(\\S+)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 6
+        }
+      },
+      {
+        "key": "C1_SOLL",
+        "regex": "\\bC1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 6
+        }
+      },
+      {
+        "key": "C1_IST",
+        "regex": "\\bC1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 35
+        }
+      },
+      {
+        "key": "PCS1_LOW",
+        "regex": "\\bPCS1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*\\-",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "PCS1_HIGH",
+        "regex": "\\bPCS1\\b[^\\n]*?\\-\\s*(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "PCS1_SOLL",
+        "regex": "\\bPCS1\\b[^\\n]*?(?<![\\d.,])((?=[\\d.,]{1,3}(?![\\d.,]))\\d+(?:[\\.,]\\d+)?)(?![\\d.,])",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "NCS1_LOW",
+        "regex": "\\bNCS1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*\\-",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "NCS1_HIGH",
+        "regex": "\\bNCS1\\b[^\\n]*?\\-\\s*(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "NCS1_SOLL",
+        "regex": "\\bNCS1\\b[^\\n]*?(?<![\\d.,])((?=[\\d.,]{1,3}(?![\\d.,]))\\d+(?:[\\.,]\\d+)?)(?![\\d.,])",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "NCS1_IST",
+        "regex": "\\bNCS1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 41
+        }
+      },
+      {
+        "key": "PCS1_IST",
+        "regex": "\\bPCS1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 38
+        }
+      }
+    ],
+    "dedupe_fields": []
+  },
+  "excel_rules": {
+    "excel_filename_template": "{assay_name}.xlsx",
+    "sheetname_template": "{lot_id}",
+    "column_mapping": {
+      "DATUM": "DATUM",
+      "ZEIT": "ZEIT",
+      "ANWENDER": "ANWENDER",
+      "PLATTE": "PLATTE",
+      "TEST": "TEST",
+      "CHARGE": "CHARGE",
+      "HALTBARKEIT": "Haltbarkeit",
+      "VALIDATION": "VALIDATION",
+      "C1_MINIMUM": "C1_MINIMUM",
+      "C1_SOLL": "C1_SOLL",
+      "C1_IST": "C1_IST",
+      "PCS1_LOW": "PCS1_LOW",
+      "PCS1_HIGH": "PCS1_HIGH",
+      "PCS1_SOLL": "PCS1_SOLL",
+      "NCS1_LOW": "NCS1_LOW",
+      "NCS1_HIGH": "NCS1_HIGH",
+      "NCS1_SOLL": "NCS1_SOLL",
+      "NCS1_IST": "NCS1_IST",
+      "PCS1_IST": "PCS1_IST"
+    }
+  }
+}

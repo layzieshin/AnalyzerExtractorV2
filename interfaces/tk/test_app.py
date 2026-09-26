@@ -58,7 +58,26 @@ from src.testui.api import (
 from .scroll_helpers import TreeviewSorter, create_scrollable_treeview
 from .watch_scan import InAppWatchScanner, list_watch_pdf_paths
 
-SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "DATENBANK", "ADMIN")
+BASE_SECTION_KEYS = ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "DATENBANK")
+ADMIN_SECTION_KEY = "ADMIN"
+SECTION_KEYS = BASE_SECTION_KEYS + (ADMIN_SECTION_KEY,)
+
+
+def _env_flag_enabled(name: str) -> bool:
+    flag = os.environ.get(name, "").strip().lower()
+    return flag in {"1", "true", "yes"}
+
+
+def resolve_visible_section_keys() -> tuple[str, ...]:
+    if _env_flag_enabled("ARE_SHOW_ADMIN"):
+        return BASE_SECTION_KEYS + (ADMIN_SECTION_KEY,)
+    return BASE_SECTION_KEYS
+
+
+def legacy_ui_enabled() -> bool:
+    return _env_flag_enabled("ARE_LEGACY_UI")
+
+
 REWORK_CANDIDATE_STATUS_LABELS = {
     "known": "bekannt",
     "unknown": "unbekannt",
@@ -81,7 +100,6 @@ class TestApp(tk.Tk):
         self.var_output_mode = tk.StringVar(value=cfg.output_mode)
         self.var_sqlite_path = tk.StringVar(value=cfg.sqlite_path or "")
         self.var_watch_dir = tk.StringVar(value=cfg.watch_dir or str(self.project_root / "input" / "watch"))
-        self.var_watch_mode = tk.StringVar(value="Ueberwachter Ordner")
         self.var_device_choice = tk.StringVar(value="")
         self.var_duplicate_status = tk.StringVar(value="pending")
         self.var_auto_watch_status = tk.StringVar(value="Auto-Suche: inaktiv")
@@ -122,6 +140,7 @@ class TestApp(tk.Tk):
         self._db_display_context: dict[str, object] = {"assay_labels": {}, "payload_labels": {}}
         self._db_rulesets: list[dict[str, object]] = []
         self._tree_db_sorter: TreeviewSorter | None = None
+        self._admin_enabled = os.environ.get("ARE_SHOW_ADMIN", "").strip().lower() in {"1", "true", "yes"}
         self._busy = False
         self._extraction_running = False
         self._stop_extraction_event = threading.Event()
@@ -138,7 +157,7 @@ class TestApp(tk.Tk):
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
         self._tabs: dict[str, tk.Frame] = {}
-        for key in SECTION_KEYS:
+        for key in resolve_visible_section_keys():
             frame = tk.Frame(self.notebook)
             self._tabs[key] = frame
             self.notebook.add(frame, text=key)
@@ -149,7 +168,8 @@ class TestApp(tk.Tk):
         self._build_logs_tab(self._tabs["LOGS"])
         self._build_duplicates_tab(self._tabs["DUPLIKATE"])
         self._build_database_tab(self._tabs["DATENBANK"])
-        self._build_admin_tab(self._tabs["ADMIN"])
+        if self._admin_enabled:
+            self._build_admin_tab(self._tabs[ADMIN_SECTION_KEY])
 
         status = tk.Frame(self)
         status.pack(fill="x", padx=10, pady=(0, 10))
@@ -174,7 +194,11 @@ class TestApp(tk.Tk):
             state=tk.DISABLED,
         )
         self.btn_stop_extraction.pack(side="left", padx=(6, 0))
-        self.btn_retry_failed = tk.Button(controls, text="Erneut starten", command=self.retry_selected_failed_jobs)
+        self.btn_retry_failed = tk.Button(
+            controls,
+            text="Fehler erneut verarbeiten",
+            command=self.retry_selected_failed_jobs,
+        )
         self.btn_retry_failed.pack(side="left", padx=(6, 0))
         self.btn_refresh_queue = tk.Button(controls, text="Aktualisieren", command=self.refresh_queue)
         self.btn_refresh_queue.pack(side="left", padx=(6, 0))
@@ -258,17 +282,11 @@ class TestApp(tk.Tk):
         self.cmb_devices.grid(row=3, column=1, sticky="w", padx=6, pady=4)
         tk.Button(form, text="Neu laden", command=self._refresh_devices).grid(row=3, column=2, sticky="w", padx=6, pady=4)
 
-        tk.Label(form, text="Watch-Modus").grid(row=4, column=0, sticky="w", padx=6, pady=(4, 8))
-        ttk.Combobox(
-            form,
-            textvariable=self.var_watch_mode,
-            values=("Manuell", "Ueberwachter Ordner", "Automatikbetrieb (Folgepaket)"),
-            state="readonly",
-            width=30,
-        ).grid(row=4, column=1, sticky="w", padx=6, pady=(4, 8))
-        tk.Button(form, text="Anzeigen", command=self._refresh_options_summary).grid(row=4, column=2, sticky="w", padx=6, pady=(4, 8))
+        tk.Button(form, text="Anzeigen", command=self._refresh_options_summary).grid(
+            row=4, column=1, sticky="w", padx=6, pady=(4, 8)
+        )
 
-        self.txt_options = tk.Text(parent, height=9, wrap="word")
+        self.txt_options = tk.Text(parent, height=8, wrap="word")
         self.txt_options.pack(fill="x", padx=8, pady=(0, 8))
         self.txt_options.configure(state="disabled")
 
@@ -278,7 +296,9 @@ class TestApp(tk.Tk):
         tk.Button(controls, text="Nacharbeit aktualisieren", command=self.refresh_rework_items).pack(side="left")
         tk.Button(controls, text="Kontext anzeigen", command=self.show_rework_context).pack(side="left", padx=(6, 0))
         tk.Button(controls, text="Rule Editor oeffnen", command=self.open_rule_editor_from_rework).pack(side="left", padx=(6, 0))
-        tk.Button(controls, text="Erneut starten", command=self.retry_selected_rework_items).pack(side="left", padx=(6, 0))
+        tk.Button(controls, text="Nacharbeit wiederholen", command=self.retry_selected_rework_items).pack(
+            side="left", padx=(6, 0)
+        )
         tk.Button(controls, text="Rules validieren", command=self.validate_rules).pack(side="left", padx=(6, 0))
         tk.Button(controls, text="Assay-Kandidaten prüfen", command=self.preview_assay_candidates).pack(
             side="left", padx=(6, 0)
@@ -363,6 +383,7 @@ class TestApp(tk.Tk):
     def _build_logs_tab(self, parent: tk.Frame) -> None:
         self.txt_logs = tk.Text(parent, height=20, wrap="word")
         self.txt_logs.pack(fill="both", expand=True, padx=8, pady=8)
+        self.txt_logs.configure(state="disabled")
 
     def _build_duplicates_tab(self, parent: tk.Frame) -> None:
         controls = tk.Frame(parent)
@@ -690,14 +711,15 @@ class TestApp(tk.Tk):
                 "sqlite_path": self.var_sqlite_path.get(),
                 "watch_dir": self.var_watch_dir.get(),
                 "device_id": self._selected_device_id(),
-                "watch_mode": self.var_watch_mode.get(),
             }
         )
         self._set_text(self.txt_options, "\n".join(lines))
 
     def _log(self, message: str) -> None:
+        self.txt_logs.configure(state="normal")
         self.txt_logs.insert(tk.END, message + "\n")
         self.txt_logs.see(tk.END)
+        self.txt_logs.configure(state="disabled")
         self.var_status.set(message)
 
     def _set_text(self, widget: tk.Text, text: str) -> None:
@@ -1034,26 +1056,27 @@ class TestApp(tk.Tk):
     def refresh_queue(self) -> None:
         jobs = list_jobs(str(self.project_root))
         rows = [format_queue_job_row(job) for job in jobs]
-        for item in self.tree_queue.get_children():
-            self.tree_queue.delete(item)
-        for row in rows:
-            iid = row["job_id"] or row["path"]
-            self.tree_queue.insert(
-                "",
-                tk.END,
-                iid=iid,
-                values=(
-                    row["job_id"],
-                    row["file"],
-                    row["status"],
-                    row["source"],
-                    row["attempts"],
-                    row["last_error"],
-                    row["updated_at"],
-                    row["path"],
-                ),
-            )
-        self._tree_queue_sorter.resort()
+        if self._admin_enabled:
+            for item in self.tree_queue.get_children():
+                self.tree_queue.delete(item)
+            for row in rows:
+                iid = row["job_id"] or row["path"]
+                self.tree_queue.insert(
+                    "",
+                    tk.END,
+                    iid=iid,
+                    values=(
+                        row["job_id"],
+                        row["file"],
+                        row["status"],
+                        row["source"],
+                        row["attempts"],
+                        row["last_error"],
+                        row["updated_at"],
+                        row["path"],
+                    ),
+                )
+            self._tree_queue_sorter.resort()
         merged_rows = merge_file_rows_with_queue(
             [],
             jobs,
@@ -1410,7 +1433,11 @@ class TestApp(tk.Tk):
 
 
 def main(project_root: str | Path | None = None) -> None:
-    app = TestApp(project_root=project_root)
+    resolved_root = Path(project_root).resolve() if project_root is not None else resolve_app_root()
+    if legacy_ui_enabled():
+        app = LegacyTestApp(project_root=resolved_root)
+    else:
+        app = AnalyzerDesktopApp(project_root=resolved_root)
     app.mainloop()
 
 
@@ -1434,3 +1461,1097 @@ def run_entry(module_file: str | Path) -> None:
         RuleEditorWindow(project_root=app_root).mainloop()
     else:
         main(project_root=app_root)
+
+LegacyTestApp = TestApp
+
+
+class AnalyzerDesktopApp(tk.Tk):
+    """V2.1 desktop shell (Phase 3B). Default product UI via main(); LegacyTestApp via ARE_LEGACY_UI."""
+
+    __test__ = False
+
+    VIEW_KEYS = (
+        "dashboard",
+        "results",
+        "validation",
+        "rules",
+        "settings",
+        "diagnostics",
+    )
+    TASK_REFRESH = "refresh"
+    TASK_PROCESSING = "processing_queue"
+    TASK_BOOTSTRAP = "bootstrap"
+    TASK_SETTINGS_SAVE = "settings-save"
+
+    def __init__(
+        self,
+        project_root: str | Path,
+        *,
+        services: object | None = None,
+    ) -> None:
+        from interfaces.tk.desktop_theme import (
+            APP_TITLE,
+            DEFAULT_HEIGHT,
+            DEFAULT_WIDTH,
+            MIN_HEIGHT,
+            MIN_WIDTH,
+            configure_desktop_theme,
+        )
+        from interfaces.tk.task_runner import TkTaskRunner
+        from interfaces.tk.view_models import DASHBOARD_REPORT_JOIN_LIMIT, NAV_LABELS, PRIMARY_NAV_KEYS, SECONDARY_NAV_KEYS
+        from interfaces.tk.views import (
+            DashboardView,
+            DiagnosticsView,
+            ResultsView,
+            RulesView,
+            SettingsView,
+            ValidationView,
+        )
+        from interfaces.tk.widgets.common import StatusBadge
+        from interfaces.tk.widgets.dialogs import (
+            show_confirm_dialog,
+            show_details_dialog,
+            show_error_dialog,
+            show_info_dialog,
+        )
+        from src.application.api import (
+            ApplicationWatchError,
+            DesktopAppServices,
+            PathOpenError,
+            ProcessingOutcome,
+            ReportNotFoundError,
+            SettingsSaveError,
+            SettingsValidationError,
+            WatchCycleSummary,
+            create_desktop_services,
+        )
+
+        super().__init__()
+        self.project_root = Path(project_root).resolve()
+        self._show_confirm_dialog = show_confirm_dialog
+        self._show_details_dialog = show_details_dialog
+        self._show_error_dialog = show_error_dialog
+        self._show_info_dialog = show_info_dialog
+        self._ApplicationWatchError = ApplicationWatchError
+        self._PathOpenError = PathOpenError
+        self._ReportNotFoundError = ReportNotFoundError
+        self._SettingsSaveError = SettingsSaveError
+        self._SettingsValidationError = SettingsValidationError
+        self._WatchCycleSummary = WatchCycleSummary
+        self._ProcessingOutcome = ProcessingOutcome
+        self._dashboard_report_join_limit = DASHBOARD_REPORT_JOIN_LIMIT
+
+        self.title(APP_TITLE)
+        self.minsize(MIN_WIDTH, MIN_HEIGHT)
+        self.geometry(f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}")
+        configure_desktop_theme(self)
+
+        self._services: DesktopAppServices | None = None
+        self._settings = None
+        self._device_label_map: dict[str, str] = {}
+        self._bootstrapped = False
+        self._create_desktop_services = create_desktop_services
+        self._task_runner = TkTaskRunner(self)
+        self._watch_after_id: str | None = None
+        self._watch_schedule_generation = 0
+        self._last_watch_summary: WatchCycleSummary | None = None
+        self._last_watch_error: str = ""
+        self._refresh_generation = 0
+        self._settings_save_latest_id = 0
+        self._settings_save_latest = None
+        self._settings_save_latest_edit_generation = 0
+        self._settings_save_inflight_id: int | None = None
+        self._current_view = "dashboard"
+        self._nav_buttons: dict[str, ttk.Button] = {}
+        self._validation_badge: StatusBadge | None = None
+        self._views: dict[str, ttk.Frame] = {}
+
+        self._build_header()
+        shell = ttk.Frame(self, style="Content.TFrame")
+        shell.pack(fill="both", expand=True)
+        shell.columnconfigure(1, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        nav = ttk.Frame(shell, style="Nav.TFrame", padding=8, width=200)
+        nav.grid(row=0, column=0, sticky="ns")
+        nav.grid_propagate(False)
+        for key in PRIMARY_NAV_KEYS:
+            label = NAV_LABELS[key]
+            if key == "validation":
+                row = ttk.Frame(nav, style="Nav.TFrame")
+                row.pack(fill="x", pady=(0, 4))
+                btn = ttk.Button(row, text=label, style="Nav.TButton", command=lambda k=key: self.show_view(k))
+                btn.pack(side="left", fill="x", expand=True)
+                self._validation_badge = StatusBadge(row, "0", kind="good")
+                self._validation_badge.pack(side="right", padx=(6, 2))
+            else:
+                btn = ttk.Button(nav, text=label, style="Nav.TButton", command=lambda k=key: self.show_view(k))
+                btn.pack(fill="x", pady=(0, 4))
+            self._nav_buttons[key] = btn
+        ttk.Separator(nav).pack(fill="x", pady=8)
+        for key in SECONDARY_NAV_KEYS:
+            label = NAV_LABELS[key]
+            btn = ttk.Button(nav, text=label, style="Nav.TButton", command=lambda k=key: self.show_view(k))
+            btn.pack(fill="x", pady=(0, 4))
+            self._nav_buttons[key] = btn
+
+        content = ttk.Frame(shell, style="Content.TFrame", padding=(12, 8))
+        content.grid(row=0, column=1, sticky="nsew")
+        content.rowconfigure(0, weight=1)
+        content.columnconfigure(0, weight=1)
+
+        self._views["dashboard"] = DashboardView(
+            content,
+            on_pick_and_process_pdfs=self._pick_and_process_pdfs,
+            on_open_settings=lambda: self.show_view("settings"),
+            on_refresh=self.refresh_current_view,
+            on_open_report=self._open_report_from_dashboard,
+            on_open_selected_report=self._open_selected_dashboard_report,
+        )
+        self._views["results"] = ResultsView(
+            content,
+            on_refresh=self.refresh_current_view,
+            on_open_selected=self._open_selected_report,
+            on_open_pdf=self._open_report_pdf,
+            on_open_output_folder=self._open_output_folder,
+            on_back=self._show_results_list,
+            on_occurrence_selected=lambda _occ_id: None,
+            on_save_validation=self._save_selected_validation,
+            on_correct_validation=self._correct_selected_validation,
+        )
+        self._views["validation"] = ValidationView(
+            content,
+            on_refresh=self.refresh_current_view,
+            on_save=self._save_pending_validation,
+            on_open_pdf=self._open_validation_pdf,
+        )
+        self._views["rules"] = RulesView(
+            content,
+            on_open_rule_editor=self.open_rule_editor,
+            on_refresh=self.refresh_current_view,
+            on_validate=self._validate_rules,
+        )
+        self._views["settings"] = SettingsView(
+            content,
+            on_save=self._save_settings,
+            on_pick_watch_input=self._pick_watch_input_folder,
+            on_pick_watch_backup=self._pick_watch_backup_folder,
+            on_pick_sqlite=self._pick_sqlite_path,
+            on_reload_devices=self._reload_devices,
+            on_open_output_folder=self._open_output_folder,
+        )
+        self._views["diagnostics"] = DiagnosticsView(
+            content,
+            on_refresh=self.refresh_current_view,
+            on_show_diagnosis=self._show_diagnosis_details,
+            on_retry_job=self._retry_selected_job,
+            on_create_draft=self._create_draft_from_candidate,
+            on_show_duplicate=self._show_duplicate_details,
+            on_discard_duplicate=self._discard_selected_duplicate,
+        )
+        self._views["dashboard"].set_actions_enabled(False)
+        self._views["dashboard"].set_activity_message("Lade Anwendung …")
+
+        self.protocol("WM_DELETE_WINDOW", self.close_app)
+        self.show_view("dashboard", refresh=False)
+        if services is not None:
+            self._services = services
+            self._finish_bootstrap()
+        else:
+            self._start_bootstrap()
+
+    @property
+    def services(self) -> object:
+        return self._services
+
+    @property
+    def task_runner(self) -> object:
+        return self._task_runner
+
+    def _start_bootstrap(self) -> None:
+        def work() -> DesktopAppServices:
+            return self._create_desktop_services(self.project_root)
+
+        def on_success(services: DesktopAppServices) -> None:
+            self._services = services
+            self._finish_bootstrap()
+
+        def on_error(exc: BaseException) -> None:
+            message, details = self._friendly_error_parts(exc)
+            self._views["dashboard"].set_activity_message(f"Start fehlgeschlagen: {message}")
+            self._show_error_dialog(self, "Start", message, details=details)
+
+        self._task_runner.submit(self.TASK_BOOTSTRAP, work, on_success=on_success, on_error=on_error)
+
+    def _finish_bootstrap(self) -> None:
+        self._bootstrapped = True
+        self._views["dashboard"].set_actions_enabled(True)
+        self._views["dashboard"].set_activity_message("Bereit.")
+        self._schedule_watch()
+        self.refresh_current_view()
+
+    def _require_services(self) -> bool:
+        return self._bootstrapped and self._services is not None
+
+    def show_view(self, key: str, *, refresh: bool = True) -> None:
+        if key not in self.VIEW_KEYS:
+            return
+        self._current_view = key
+        for view_key, frame in self._views.items():
+            if view_key == key:
+                frame.grid(row=0, column=0, sticky="nsew")
+            else:
+                frame.grid_remove()
+        for view_key, button in self._nav_buttons.items():
+            style = "NavActive.TButton" if view_key == key else "Nav.TButton"
+            button.configure(style=style)
+        if refresh:
+            self.refresh_current_view()
+
+    def _friendly_error_parts(self, error: BaseException | str) -> tuple[str, str]:
+        from interfaces.tk.view_models import user_error_dialog_parts
+
+        return user_error_dialog_parts(error)
+
+    def _submit_refresh_task(self, generation: int, view_key: str) -> bool:
+        def work() -> dict[str, object]:
+            return self._load_view_payload(view_key)
+
+        def on_success(payload: dict[str, object]) -> None:
+            self._complete_refresh(generation, view_key, payload=payload)
+
+        def on_error(exc: BaseException) -> None:
+            self._complete_refresh(generation, view_key, error=exc)
+
+        return self._task_runner.submit(
+            self.TASK_REFRESH,
+            work,
+            on_success=on_success,
+            on_error=on_error,
+        )
+
+    def _maybe_submit_latest_refresh(self) -> None:
+        if getattr(self._task_runner, "shutdown", False):
+            return
+        if self._task_runner.is_active(self.TASK_REFRESH):
+            return
+        if not self._require_services():
+            return
+        self._submit_refresh_task(self._refresh_generation, self._current_view)
+
+    def _complete_refresh(
+        self,
+        generation: int,
+        view_key: str,
+        *,
+        payload: dict[str, object] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        if view_key != self._current_view:
+            self.refresh_current_view()
+            return
+        if generation != self._refresh_generation:
+            self._maybe_submit_latest_refresh()
+            return
+        if error is not None:
+            message, details = self._friendly_error_parts(error)
+            self._show_error_dialog(self, "Aktualisierung", message, details=details)
+            return
+        if payload is not None:
+            self._apply_view_payload(view_key, payload)
+
+    def refresh_current_view(self) -> None:
+        if not self._require_services():
+            return
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        view_key = self._current_view
+        if not self._submit_refresh_task(generation, view_key):
+            return
+
+    def _load_view_payload(self, view_key: str) -> dict[str, object]:
+        from interfaces.tk.view_models import build_dashboard_recent_rows
+
+        assert self._services is not None
+        settings = self._services.settings.load()
+        payload: dict[str, object] = {"view": view_key, "settings": settings}
+        validation_cases = self._services.results.list_open_validation_cases()
+        payload["validation_open_count"] = len(validation_cases)
+        if view_key == "dashboard":
+            ingestions = self._services.extraction.list_ingestion_instances()
+            reports = self._services.results.list_recent_reports(limit=self._dashboard_report_join_limit)
+            payload["recent"] = build_dashboard_recent_rows(ingestions, reports)
+            payload["watch_summary"] = self._last_watch_summary
+            payload["watch_error"] = self._last_watch_error
+        elif view_key == "results":
+            payload["reports"] = self._services.results.list_recent_reports()
+        elif view_key == "validation":
+            payload["validation_cases"] = validation_cases
+        elif view_key == "rules":
+            payload["inventory"] = self._services.rules.list_inventory()
+        elif view_key == "settings":
+            payload["devices"] = self._services.settings.get_device_inventory()
+            payload["timing"] = self._services.settings.get_watch_timing()
+        elif view_key == "diagnostics":
+            payload["diagnoses"] = self._services.extraction.list_job_diagnoses()
+            payload["duplicates"] = self._services.results.list_duplicate_candidates(status="pending")
+        return payload
+
+    def _apply_view_payload(self, view_key: str, payload: dict[str, object]) -> None:
+        settings = payload["settings"]
+        self._settings = settings
+        self._set_validation_badge(int(payload.get("validation_open_count") or 0))
+        if view_key == "dashboard":
+            dashboard = self._views["dashboard"]
+            dashboard.render_watch_settings(settings)
+            dashboard.render_recent_rows(payload.get("recent", ()))
+            summary = payload.get("watch_summary")
+            error = str(payload.get("watch_error") or "")
+            if isinstance(summary, self._WatchCycleSummary) or summary is None:
+                dashboard.render_watch_session_summary(summary, error=error)
+        elif view_key == "results":
+            self._views["results"].render_report_list(payload.get("reports", ()))
+        elif view_key == "validation":
+            validation = self._views["validation"]
+            validation.set_default_operator_initials(str(getattr(settings, "operator_initials", "") or ""))
+            validation.render_cases(payload.get("validation_cases", ()))
+        elif view_key == "rules":
+            self._views["rules"].render_inventory(payload.get("inventory", ()))
+        elif view_key == "settings":
+            devices = getattr(payload["devices"], "devices", ())
+            self._device_label_map = {
+                f"{item.display_name} ({item.device_id})": item.device_id for item in devices
+            }
+            self._views["settings"].render_settings(
+                settings,
+                devices=devices,
+                timing=payload["timing"],
+            )
+        elif view_key == "diagnostics":
+            self._views["diagnostics"].render_diagnoses(payload.get("diagnoses", ()))
+            self._views["diagnostics"].render_duplicates(payload.get("duplicates", ()))
+            self._views["diagnostics"].render_candidates(())
+
+    def _drain_processing_queue(self) -> tuple[ProcessingOutcome, ...]:
+        assert self._services is not None
+        outcomes: list[ProcessingOutcome] = []
+        while True:
+            outcome = self._services.extraction.process_next()
+            if not outcome.processed:
+                break
+            outcomes.append(outcome)
+        return tuple(outcomes)
+
+    def _submit_processing(
+        self,
+        *,
+        activity_message: str,
+        work: object,
+        on_success: object,
+        on_error: object | None = None,
+    ) -> bool:
+        dashboard = self._views["dashboard"]
+
+        def wrapped_work() -> object:
+            return work()
+
+        def wrapped_success(result: object) -> None:
+            dashboard.set_processing_busy(False)
+            dashboard.set_activity_message("Bereit.")
+            on_success(result)
+
+        def wrapped_error(exc: BaseException) -> None:
+            dashboard.set_processing_busy(False)
+            dashboard.set_activity_message("Bereit.")
+            handler = on_error or self._show_task_error
+            handler(exc)
+
+        dashboard.set_processing_busy(True)
+        dashboard.set_activity_message(activity_message)
+        submitted = self._task_runner.submit(
+            self.TASK_PROCESSING,
+            wrapped_work,
+            on_success=wrapped_success,
+            on_error=wrapped_error,
+        )
+        if not submitted:
+            dashboard.set_processing_busy(False)
+            dashboard.set_activity_message("Verarbeitung läuft bereits – bitte warten.")
+        return submitted
+
+    def _pick_and_process_pdfs(self) -> None:
+        from interfaces.tk.view_models import build_batch_file_statuses
+
+        if not self._require_services():
+            return
+        paths = filedialog.askopenfilenames(
+            parent=self,
+            title="PDF-Berichte auswählen",
+            filetypes=[("PDF", "*.pdf"), ("Alle Dateien", "*.*")],
+        )
+        if not paths:
+            return
+        selected = tuple(str(path) for path in paths)
+
+        def work() -> tuple[object, tuple[ProcessingOutcome, ...]]:
+            summary = self._services.extraction.enqueue_manual_pdfs(selected)
+            outcomes = self._drain_processing_queue()
+            return summary, outcomes
+
+        def on_success(result: tuple[object, tuple[ProcessingOutcome, ...]]) -> None:
+            summary, processing_outcomes = result
+            statuses = build_batch_file_statuses(summary.outcomes, processing_outcomes)
+            self._views["dashboard"].render_batch_statuses(statuses)
+            self.refresh_current_view()
+
+        self._submit_processing(
+            activity_message=f"{len(selected)} Datei(en) werden verarbeitet …",
+            work=work,
+            on_success=on_success,
+        )
+
+    def _open_selected_dashboard_report(self) -> None:
+        report_id = self._views["dashboard"].selected_report_id()
+        if report_id:
+            self._open_report_from_dashboard(report_id)
+
+    def _open_report_from_dashboard(self, report_id: str) -> None:
+        if not self._require_services():
+            return
+        self.show_view("results", refresh=False)
+
+        def work() -> object:
+            return self._services.results.get_report_detail(report_id)
+
+        def on_success(detail: object) -> None:
+            if detail is None:
+                self._show_error_dialog(self, "Ergebnisse", "Bericht nicht gefunden.")
+                return
+            results = self._views["results"]
+            self._apply_report_detail(results, detail)
+
+        self._task_runner.submit(
+            f"report-detail-{report_id}",
+            work,
+            on_success=on_success,
+            on_error=self._show_task_error,
+        )
+
+    def _open_selected_report(self) -> None:
+        if not self._require_services():
+            return
+        results = self._views["results"]
+        report_id = results.selected_report_id()
+        if not report_id:
+            self._show_info_dialog(self, "Ergebnisse", "Bitte einen Bericht auswählen.")
+            return
+
+        def work() -> object:
+            return self._services.results.get_report_detail(report_id)
+
+        def on_success(detail: object) -> None:
+            if detail is None:
+                self._show_error_dialog(self, "Ergebnisse", "Bericht nicht gefunden.")
+                return
+            self._apply_report_detail(results, detail)
+
+        self._task_runner.submit(
+            f"report-detail-{report_id}",
+            work,
+            on_success=on_success,
+            on_error=self._show_task_error,
+        )
+
+    def _apply_report_detail(self, results: object, detail: object) -> None:
+        results.set_default_operator_initials(str(getattr(self._settings, "operator_initials", "") or ""))
+        results.render_report_detail(detail)
+        results.show_detail()
+
+    def _save_selected_validation(self) -> None:
+        self._start_validation(correct=False)
+
+    def _set_validation_badge(self, count: int) -> None:
+        badge = getattr(self, "_validation_badge", None)
+        if badge is not None:
+            badge.set_status(str(max(0, int(count))), kind="warning" if count else "good")
+
+    def _save_pending_validation(self) -> None:
+        if not self._require_services():
+            return
+        validation = self._views["validation"]
+        item = validation.selected_item()
+        if item is None:
+            self._show_info_dialog(self, "Validierung", "Bitte eine offene Messung auswaehlen.")
+            return
+        if item.validation_ambiguous:
+            self._show_info_dialog(self, "Validierung", "Die Validierungshistorie ist nicht eindeutig.")
+            return
+        initials = str(validation.validation_initials() or "").strip()
+        if not initials:
+            self._show_info_dialog(self, "Validierung", "Bitte Initialen fuer die Validierung angeben.")
+            return
+        comment = str(validation.validation_comment() or "").strip()
+        key = f"validation-{item.report_id}-{item.run_id}"
+        if self._task_runner.is_active(key):
+            self._show_info_dialog(self, "Validierung", "Die Validierung wird bereits gespeichert.")
+            return
+
+        def work() -> tuple[object, object]:
+            assert self._services is not None
+            saved = self._services.results.validate_report_run(item.report_id, item.run_id, initials, comment)
+            return saved, self._services.results.list_open_validation_cases()
+
+        def on_success(result: tuple[object, object]) -> None:
+            saved, items = result
+            validation.clear_comment()
+            validation.render_cases(items)
+            self._set_validation_badge(len(items))
+            export_error = str(getattr(saved, "excel_export_error", "") or "")
+            if export_error:
+                self._show_error_dialog(
+                    self,
+                    "Validierung gespeichert",
+                    "Die Validierung wurde gespeichert. Der Excel-Export ist fehlgeschlagen und kann unter Diagnose erneut versucht werden.",
+                )
+
+        self._task_runner.submit(key, work, on_success=on_success, on_error=self._show_task_error)
+
+    def _open_validation_pdf(self) -> None:
+        if not self._require_services():
+            return
+        item = self._views["validation"].selected_item()
+        if item is None:
+            self._show_info_dialog(self, "PDF", "Bitte eine offene Messung auswaehlen.")
+            return
+
+        def work() -> str:
+            assert self._services is not None
+            return self._services.results.open_report_pdf(item.report_id)
+
+        self._task_runner.submit(
+            f"open-pdf-{item.report_id}",
+            work,
+            on_success=lambda _path: None,
+            on_error=self._show_task_error,
+        )
+
+    def _correct_selected_validation(self) -> None:
+        if not self._require_services():
+            return
+        request = self._selected_validation_request()
+        if request is None:
+            return
+        if not self._show_confirm_dialog(
+            self,
+            "Validierung korrigieren",
+            (
+                "Korrektur der Validierung: Die bestehende Validierung wird nicht überschrieben. "
+                "Es wird ein neuer Datensatz angelegt, der auf die bisherige Validierung verweist. "
+                "Diese Korrektur jetzt speichern?"
+            ),
+        ):
+            return
+        self._submit_validation(*request, correct=True)
+
+    def _start_validation(self, *, correct: bool) -> None:
+        if not self._require_services():
+            return
+        request = self._selected_validation_request()
+        if request is None:
+            return
+        self._submit_validation(*request, correct=correct)
+
+    def _selected_validation_request(self) -> tuple[str, int, str, str] | None:
+        results = self._views["results"]
+        report_id = str(results.current_detail_report_id() or "")
+        run_id = results.validation_run_id()
+        if not report_id or run_id is None:
+            self._show_info_dialog(self, "Validierung", "Bitte eine Messung auswählen.")
+            return None
+        initials = str(results.validation_initials() or "").strip()
+        if not initials:
+            self._show_info_dialog(self, "Validierung", "Bitte Initialen für die Validierung angeben.")
+            return None
+        return report_id, int(run_id), initials, str(results.validation_comment() or "").strip()
+
+    def _submit_validation(self, report_id: str, run_id: int, initials: str, comment: str, *, correct: bool) -> None:
+        key = f"validation-{report_id}-{run_id}"
+        if self._task_runner.is_active(key):
+            self._show_info_dialog(self, "Validierung", "Die Validierung wird bereits gespeichert.")
+            return
+
+        def work() -> tuple[object, object, object]:
+            assert self._services is not None
+            if correct:
+                saved = self._services.results.correct_report_run(report_id, run_id, initials, comment)
+            else:
+                saved = self._services.results.validate_report_run(report_id, run_id, initials, comment)
+            detail = self._services.results.get_report_detail(report_id)
+            reports = self._services.results.list_recent_reports()
+            return saved, detail, reports
+
+        def on_success(result: tuple[object, object, object]) -> None:
+            saved, detail, reports = result
+            results = self._views["results"]
+            results.render_report_list(reports)
+            if detail is None:
+                self._show_error_dialog(self, "Validierung", "Bericht nicht gefunden.")
+                return
+            results.clear_validation_comment()
+            self._apply_report_detail(results, detail)
+            if str(getattr(saved, "excel_export_error", "") or ""):
+                self._show_error_dialog(
+                    self,
+                    "Validierung gespeichert",
+                    "Die Validierung wurde gespeichert. Der Excel-Export ist fehlgeschlagen und kann unter Diagnose erneut versucht werden.",
+                )
+
+        self._task_runner.submit(key, work, on_success=on_success, on_error=self._show_task_error)
+
+    def _show_results_list(self) -> None:
+        self._views["results"].show_list()
+
+    def _open_report_pdf(self) -> None:
+        if not self._require_services():
+            return
+        report_id = self._views["results"].current_detail_report_id()
+        if not report_id:
+            self._show_info_dialog(self, "PDF", "Kein Bericht ausgewählt.")
+            return
+
+        def work() -> str:
+            return self._services.results.open_report_pdf(report_id)
+
+        def on_success(_path: str) -> None:
+            return
+
+        def on_error(exc: BaseException) -> None:
+            if isinstance(exc, self._ReportNotFoundError):
+                self._show_error_dialog(self, "PDF", "Bericht nicht gefunden.")
+                return
+            if isinstance(exc, self._PathOpenError):
+                message = "Die PDF konnte nicht geöffnet werden."
+                if str(exc) == "report_pdf_ambiguous":
+                    message = "Der PDF-Pfad ist mehrdeutig."
+                elif str(exc) == "report_pdf_missing":
+                    message = "Für diesen Bericht ist kein PDF-Pfad hinterlegt."
+                self._show_error_dialog(self, "PDF", message, details=str(exc))
+                return
+            self._show_task_error(exc)
+
+        self._task_runner.submit(f"open-pdf-{report_id}", work, on_success=on_success, on_error=on_error)
+
+    def _save_settings(self) -> None:
+        if not self._require_services():
+            return
+        settings_view = self._views["settings"]
+        settings = settings_view.collect_settings(device_id_map=self._device_label_map)
+        edit_generation = settings_view.edit_generation
+        self._settings_save_latest_id += 1
+        request_id = self._settings_save_latest_id
+        self._settings_save_latest = settings
+        self._settings_save_latest_edit_generation = edit_generation
+
+        if self._task_runner.is_active(self.TASK_SETTINGS_SAVE):
+            settings_view.set_status_message("Speichern läuft bereits – bitte warten.")
+            return
+
+        self._start_settings_save(settings, request_id, edit_generation)
+
+    def _maybe_start_pending_settings_save(self) -> None:
+        if self._task_runner.is_active(self.TASK_SETTINGS_SAVE):
+            return
+        if self._settings_save_latest is None:
+            return
+        if self._settings_save_inflight_id == self._settings_save_latest_id:
+            return
+        self._start_settings_save(
+            self._settings_save_latest,
+            self._settings_save_latest_id,
+            self._settings_save_latest_edit_generation,
+        )
+
+    def _start_settings_save(self, settings: object, request_id: int, edit_generation: int) -> None:
+        settings_view = self._views["settings"]
+        self._settings_save_inflight_id = request_id
+
+        def work() -> object:
+            return self._services.settings.save(settings)
+
+        def on_success(saved: object) -> None:
+            self._settings_save_inflight_id = None
+            if request_id < self._settings_save_latest_id:
+                self._maybe_start_pending_settings_save()
+                return
+            settings_view.mark_saved_generation(edit_generation)
+            self._settings = saved
+            settings_view.set_status_message("Einstellungen gespeichert.")
+            self._views["dashboard"].render_watch_settings(saved)
+            self._reschedule_watch()
+
+        def on_error(exc: BaseException) -> None:
+            from interfaces.tk.view_models import format_user_error_message
+
+            self._settings_save_inflight_id = None
+            if request_id < self._settings_save_latest_id:
+                self._maybe_start_pending_settings_save()
+                return
+            if isinstance(exc, self._SettingsValidationError):
+                settings_view.set_status_message(format_user_error_message(exc))
+            elif isinstance(exc, self._SettingsSaveError):
+                message, details = self._friendly_error_parts(exc)
+                self._show_error_dialog(self, "Einstellungen", message, details=details)
+            else:
+                self._show_task_error(exc)
+
+        submitted = self._task_runner.submit(
+            self.TASK_SETTINGS_SAVE,
+            work,
+            on_success=on_success,
+            on_error=on_error,
+        )
+        if not submitted:
+            self._settings_save_inflight_id = None
+            settings_view.set_status_message("Speichern läuft bereits – bitte warten.")
+
+    def _pick_watch_input_folder(self) -> None:
+        path = filedialog.askdirectory(parent=self, title="Eingabeordner wählen")
+        if path:
+            self._views["settings"].set_watch_input_path(path)
+
+    def _pick_watch_backup_folder(self) -> None:
+        path = filedialog.askdirectory(parent=self, title="Archivordner wählen")
+        if path:
+            self._views["settings"].set_watch_backup_path(path)
+
+    def _pick_sqlite_path(self) -> None:
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="SQLite-Datei wählen",
+            defaultextension=".sqlite3",
+            filetypes=[("SQLite", "*.sqlite3"), ("Alle Dateien", "*.*")],
+        )
+        if path:
+            self._views["settings"].set_sqlite_path(path)
+
+    def _reload_devices(self) -> None:
+        if not self._require_services():
+            return
+        settings_view = self._views["settings"]
+
+        def work() -> object:
+            inventory = self._services.settings.reload_device_inventory()
+            timing = self._services.settings.get_watch_timing()
+            return inventory, timing
+
+        def on_success(result: tuple[object, object]) -> None:
+            inventory, timing = result
+            self._device_label_map = {
+                f"{item.display_name} ({item.device_id})": item.device_id for item in inventory.devices
+            }
+            settings_view.render_settings(self._settings, devices=inventory.devices, timing=timing)
+
+        self._task_runner.submit("devices-reload", work, on_success=on_success, on_error=self._show_task_error)
+
+    def _open_output_folder(self) -> None:
+        if not self._require_services():
+            return
+
+        def work() -> str:
+            return self._services.settings.open_output_folder()
+
+        def on_success(_path: str) -> None:
+            return
+
+        def on_error(exc: BaseException) -> None:
+            message, details = self._friendly_error_parts(exc)
+            self._show_error_dialog(self, "Ausgabeordner", message, details=details)
+
+        self._task_runner.submit("open-output-folder", work, on_success=on_success, on_error=on_error)
+
+    def _validate_rules(self) -> None:
+        if not self._require_services():
+            return
+
+        def work() -> dict[str, object]:
+            return self._services.rules.validate_rules_integrity()
+
+        def on_success(report: dict[str, object]) -> None:
+            self._views["rules"].render_integrity_report(report)
+
+        self._task_runner.submit("rules-validate", work, on_success=on_success, on_error=self._show_task_error)
+
+    def open_rule_editor(self) -> None:
+        if getattr(sys, "frozen", False):
+            env = os.environ.copy()
+            env["ARE_HOME"] = str(self.project_root)
+            env["ARE_START_RULE_EDITOR"] = "1"
+            subprocess.Popen([sys.executable], cwd=str(self.project_root), env=env)
+            return
+        script = self.project_root / "rule_editor_main.py"
+        if not script.exists():
+            messagebox.showerror("Rule Editor", f"Nicht gefunden:\n{script}")
+            return
+        subprocess.Popen([sys.executable, str(script)], cwd=str(self.project_root))
+
+    def _show_diagnosis_details(self) -> None:
+        if not self._require_services():
+            return
+        diagnostics = self._views["diagnostics"]
+        job_id = diagnostics.selected_job_id()
+        if not job_id:
+            self._show_info_dialog(self, "Diagnose", "Bitte einen Eintrag auswählen.")
+            return
+
+        def work() -> tuple[object, object]:
+            item = self._services.extraction.get_job_diagnosis(job_id)
+            candidates = self._services.rules.discover_assay_candidates_for_job(job_id)
+            return item, candidates
+
+        def on_success(result: tuple[object, object]) -> None:
+            item, candidates = result
+            if item is None:
+                self._show_error_dialog(self, "Diagnose", "Diagnose nicht verfügbar.")
+                return
+            diagnostics.render_candidates(candidates)
+            details = item.technical_detail or item.friendly_message
+            if item.context_text:
+                details = f"{details}\n\n{item.context_text}"
+            self._show_details_dialog(self, item.error_label or "Diagnose", item.friendly_message or item.file_name, details)
+
+        self._task_runner.submit(f"diagnosis-{job_id}", work, on_success=on_success, on_error=self._show_task_error)
+
+    def _create_draft_from_candidate(self) -> None:
+        if not self._require_services():
+            return
+        diagnostics = self._views["diagnostics"]
+        candidate = diagnostics.selected_candidate()
+        if candidate is None:
+            self._show_info_dialog(self, "Draft", "Bitte einen Assay-Kandidaten auswählen.")
+            return
+        if not self._show_confirm_dialog(
+            self,
+            "Draft aus Kandidat",
+            f"Draft für Assay '{candidate.assay_key}' anlegen?",
+        ):
+            return
+
+        def work() -> object:
+            return self._services.rules.create_draft_from_template_if_missing(
+                candidate.assay_key,
+                candidate.assay_name_hint or candidate.assay_key,
+            )
+
+        def on_success(_result: object) -> None:
+            self.open_rule_editor()
+
+        self._task_runner.submit(
+            f"draft-{candidate.assay_key}",
+            work,
+            on_success=on_success,
+            on_error=self._show_task_error,
+        )
+
+    def _retry_selected_job(self) -> None:
+        if not self._require_services():
+            return
+        job_id = self._views["diagnostics"].selected_job_id()
+        if not job_id:
+            return
+
+        def work() -> tuple[object, tuple[ProcessingOutcome, ...]]:
+            diagnosis = self._services.extraction.get_job_diagnosis(job_id)
+            if diagnosis is not None and getattr(diagnosis, "retry_kind", "") == "export_only":
+                outcome = self._services.extraction.retry_excel_export(job_id)
+                return outcome, (outcome,)
+            item = self._services.extraction.retry_failed(job_id)
+            outcomes = self._drain_processing_queue()
+            return item, outcomes
+
+        def on_success(_result: tuple[object, tuple[ProcessingOutcome, ...]]) -> None:
+            self.refresh_current_view()
+
+        self._submit_processing(
+            activity_message="Fehlerhafte Verarbeitung wird erneut ausgeführt …",
+            work=work,
+            on_success=on_success,
+        )
+
+    def _show_duplicate_details(self) -> None:
+        if not self._require_services():
+            return
+        candidate_id = self._views["diagnostics"].selected_duplicate_id()
+        if candidate_id is None:
+            return
+
+        def work() -> object:
+            return self._services.results.get_duplicate_candidate_detail(candidate_id)
+
+        def on_success(detail: object) -> None:
+            from interfaces.tk.view_models import format_duplicate_detail_lines
+
+            if detail is None:
+                self._show_error_dialog(self, "Klärfall", "Kandidat nicht gefunden.")
+                return
+            self._show_details_dialog(
+                self,
+                "Klärfall",
+                f"Kandidat {candidate_id}",
+                format_duplicate_detail_lines(detail),
+            )
+
+        self._task_runner.submit(
+            f"duplicate-detail-{candidate_id}",
+            work,
+            on_success=on_success,
+            on_error=self._show_task_error,
+        )
+
+    def _discard_selected_duplicate(self) -> None:
+        if not self._require_services():
+            return
+        candidate_id = self._views["diagnostics"].selected_duplicate_id()
+        if candidate_id is None:
+            return
+        if not self._show_confirm_dialog(
+            self,
+            "Klärfall verwerfen",
+            f"Duplikat-Kandidat {candidate_id} wirklich verwerfen?",
+        ):
+            return
+
+        def work() -> object:
+            return self._services.results.discard_duplicate_candidate(candidate_id)
+
+        def on_success(_result: object) -> None:
+            self.refresh_current_view()
+
+        self._task_runner.submit(
+            f"discard-dup-{candidate_id}",
+            work,
+            on_success=on_success,
+            on_error=self._show_task_error,
+        )
+
+    def _show_task_error(self, exc: BaseException) -> None:
+        message, details = self._friendly_error_parts(exc)
+        self._show_error_dialog(self, "Aktion", message, details=details)
+
+    def _build_header(self) -> None:
+        from interfaces.tk.desktop_theme import APP_SUBTITLE, APP_TITLE
+
+        header = ttk.Frame(self, style="Header.TFrame", padding=(12, 10))
+        header.pack(fill="x")
+        title_col = ttk.Frame(header, style="Header.TFrame")
+        title_col.pack(side="left", fill="x", expand=True)
+        ttk.Label(title_col, text=APP_TITLE, style="AppTitle.TLabel").pack(anchor="w")
+        ttk.Label(title_col, text=APP_SUBTITLE, style="AppSubtitle.TLabel").pack(anchor="w")
+        ttk.Button(header, text="Einstellungen", command=lambda: self.show_view("settings")).pack(side="right")
+
+    def _schedule_watch(self) -> None:
+        if not self._require_services():
+            return
+        self._cancel_watch_schedule()
+        self._watch_schedule_generation += 1
+        generation = self._watch_schedule_generation
+        task_key = f"watch-schedule-{generation}"
+
+        def work() -> tuple[object, object, bool]:
+            settings = self._services.settings.load()
+            if not settings.watch_enabled:
+                return settings, None, False
+            timing = self._services.settings.get_watch_timing()
+            return settings, timing, True
+
+        def on_success(result: tuple[object, object, bool]) -> None:
+            if generation != self._watch_schedule_generation:
+                return
+            _settings, timing, enabled = result
+            if not enabled or timing is None:
+                return
+            delay_ms = max(1000, int(timing.scan_interval_s * 1000))
+            self._watch_after_id = self.after(delay_ms, self._run_scheduled_watch)
+
+        def on_error(exc: BaseException) -> None:
+            if generation != self._watch_schedule_generation:
+                return
+            self._show_task_error(exc)
+
+        self._task_runner.submit(task_key, work, on_success=on_success, on_error=on_error)
+
+    def _reschedule_watch(self) -> None:
+        self._schedule_watch()
+
+    def _cancel_watch_schedule(self) -> None:
+        if self._watch_after_id is not None:
+            try:
+                self.after_cancel(self._watch_after_id)
+            except Exception:
+                pass
+            self._watch_after_id = None
+
+    def _run_scheduled_watch(self) -> None:
+        from interfaces.tk.view_models import build_batch_file_statuses
+
+        self._watch_after_id = None
+        if not self._require_services():
+            return
+
+        def work() -> tuple[object, tuple[ProcessingOutcome, ...]]:
+            settings = self._services.settings.load()
+            if not settings.watch_enabled:
+                return None, ()
+            summary = self._services.extraction.run_watch_cycle()
+            outcomes = self._drain_processing_queue()
+            return summary, outcomes
+
+        def on_success(result: tuple[object, tuple[ProcessingOutcome, ...]]) -> None:
+            summary, processing_outcomes = result
+            self._last_watch_error = ""
+            if summary is not None:
+                self._last_watch_summary = summary
+                dashboard = self._views["dashboard"]
+                dashboard.render_watch_session_summary(summary)
+                if summary.outcomes:
+                    statuses = build_batch_file_statuses(summary.outcomes, processing_outcomes)
+                    if statuses:
+                        dashboard.render_batch_statuses(statuses)
+            if self._current_view != "settings":
+                self.refresh_current_view()
+            self._schedule_watch()
+
+        def on_error(exc: BaseException) -> None:
+            message, details = self._friendly_error_parts(exc)
+            self._last_watch_summary = None
+            self._last_watch_error = message
+            self._views["dashboard"].render_watch_session_summary(None, error=message)
+            if isinstance(exc, self._ApplicationWatchError):
+                self._show_error_dialog(self, "Auto-Import", message, details=details)
+            self._schedule_watch()
+
+        if not self._submit_processing(
+            activity_message="Auto-Import wird ausgeführt …",
+            work=work,
+            on_success=on_success,
+            on_error=on_error,
+        ):
+            self._schedule_watch()
+
+    def close_app(self) -> None:
+        if self._task_runner.is_active(self.TASK_PROCESSING) or self._task_runner.has_in_flight_workers():
+            messagebox.showinfo(
+                "Bitte warten",
+                "Eine Verarbeitung läuft noch. Das Fenster bleibt geöffnet, bis die Verarbeitung abgeschlossen ist.",
+                parent=self,
+            )
+            return
+        self._cancel_watch_schedule()
+        self._task_runner.shutdown_runner()
+        self.destroy()
+
+    def destroy(self) -> None:
+        if getattr(self, "_watch_after_id", None):
+            self._cancel_watch_schedule()
+        if getattr(self, "_task_runner", None) and not self._task_runner.shutdown:
+            self._task_runner.shutdown_runner()
+        super().destroy()

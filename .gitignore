@@ -13,6 +13,14 @@ dist/
 *.egg-info/
 packaging/build_work/
 packaging/dist_output/
+/ANALYZERExtractorV2.zip
+/AnalyzerResultExtractorV2.spec
+
+# Local test/review evidence
+.tmp/
+.pytest-basetemp*/
+crud_review_basetemp_*/
+ProjekteAnalyzerResultExtractorV2.tmp*/
 
 # Runtime/output data
 output/

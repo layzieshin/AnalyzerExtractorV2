@@ -5,7 +5,12 @@ from typing import Any, Dict, List
 from .rulesuite import RuleSuite
 from .templates import HEADER_FIELD_KEYS, REQUIRED_HEADER_FIELD_KEYS
 from .required_fields import check_required_fields as _check_required_fields
-from .authoring_readiness import check_authoring_readiness as _check_authoring_readiness
+from .authoring_readiness import (
+    AuthoringReadinessError,
+    check_authoring_readiness as _check_authoring_readiness,
+    create_authoring_proof as _create_authoring_proof,
+    verify_authoring_proof as _verify_authoring_proof,
+)
 from .header_aliases import LEGACY_HEADER_ALIASES, LEGACY_HEADER_ALIAS_KEYS
 from .regex_builder import build_regex_from_builder_spec as _build_regex_from_builder_spec
 from .regex_builder import suggest_builder_spec_from_selection as _suggest_builder_spec_from_selection
@@ -13,6 +18,7 @@ from .regex_suggest import suggest_regex_from_selection as _suggest_regex_from_s
 
 __all__ = [
     "HEADER_FIELD_KEYS",
+    "AuthoringReadinessError",
     "LEGACY_HEADER_ALIASES",
     "LEGACY_HEADER_ALIAS_KEYS",
     "REQUIRED_HEADER_FIELD_KEYS",
@@ -28,11 +34,13 @@ __all__ = [
     "check_required_fields",
     "clone_ruleset_to_draft",
     "create_blank_draft",
+    "create_authoring_proof",
     "create_draft",
     "create_draft_from_ruleset",
     "create_draft_from_template",
     "create_draft_from_template_if_missing",
     "delete_inventory_item",
+    "delete_never_active_ruleset",
     "delete_ruleset",
     "derive_draft",
     "deactivate_ruleset",
@@ -44,12 +52,15 @@ __all__ = [
     "list_rulesuite_inventory",
     "load_draft",
     "locate_fields",
+    "open_active_as_draft",
+    "open_history_as_draft",
     "open_inactive_as_draft",
     "read_candidate_fields",
     "move_field",
     "preview_extract",
     "remove_field",
     "rename_field",
+    "replace_field",
     "save_draft",
     "set_dedupe_fields",
     "set_excel_rules",
@@ -61,6 +72,7 @@ __all__ = [
     "test_regex",
     "update_field",
     "validate_draft",
+    "verify_authoring_proof",
 ]
 
 
@@ -94,24 +106,45 @@ def add_field(
     regex: str,
     required: bool = False,
     search_from: Dict[str, Any] | None = None,
-) -> str:
-    return str(RuleSuite().add_field(draft_path, key, regex, required=required, search_from=search_from))
+    *,
+    excel_column: str | None = None,
+    dedupe_member: bool | None = None,
+    return_receipt: bool = False,
+) -> str | Dict[str, Any]:
+    result = RuleSuite().add_field(
+        draft_path,
+        key,
+        regex,
+        required=required,
+        search_from=search_from,
+        excel_column=excel_column,
+        dedupe_member=dedupe_member,
+        return_receipt=return_receipt,
+    )
+    return result if return_receipt else str(result)
 
 
-def remove_field(draft_path: str, field_key: str) -> str:
-    return str(RuleSuite().remove_field(draft_path, field_key))
+def remove_field(draft_path: str, field_key: str, *, return_receipt: bool = False) -> str | Dict[str, Any]:
+    result = RuleSuite().remove_field(draft_path, field_key, return_receipt=return_receipt)
+    return result if return_receipt else str(result)
 
 
 def rename_field(draft_path: str, old_key: str, new_key: str) -> str:
     return str(RuleSuite().rename_field(draft_path, old_key, new_key))
 
 
-def duplicate_field(draft_path: str, source_key: str, new_key: str) -> str:
-    return str(RuleSuite().duplicate_field(draft_path, source_key, new_key))
+def duplicate_field(
+    draft_path: str, source_key: str, new_key: str, *, return_receipt: bool = False
+) -> str | Dict[str, Any]:
+    result = RuleSuite().duplicate_field(draft_path, source_key, new_key, return_receipt=return_receipt)
+    return result if return_receipt else str(result)
 
 
-def move_field(draft_path: str, field_key: str, direction: str) -> str:
-    return str(RuleSuite().move_field(draft_path, field_key, direction))
+def move_field(
+    draft_path: str, field_key: str, direction: str, *, return_receipt: bool = False
+) -> str | Dict[str, Any]:
+    result = RuleSuite().move_field(draft_path, field_key, direction, return_receipt=return_receipt)
+    return result if return_receipt else str(result)
 
 
 def update_field(
@@ -233,6 +266,26 @@ def check_authoring_readiness(
     Siehe ``authoring_readiness.check_authoring_readiness`` für Semantik (``no_assay_text`` vs. fachliche Freigabe).
     """
     return _check_authoring_readiness(draft_path, assay_text, group=group)
+
+
+def create_authoring_proof(
+    project_root: str,
+    assay_key: str,
+    draft_path: str,
+    failing_pdf_path: str,
+    reference_pdf_path: str | None = None,
+) -> Dict[str, Any]:
+    return _create_authoring_proof(
+        project_root,
+        assay_key,
+        draft_path,
+        failing_pdf_path,
+        reference_pdf_path,
+    )
+
+
+def verify_authoring_proof(project_root: str, assay_key: str, draft_path: str) -> Dict[str, Any]:
+    return _verify_authoring_proof(project_root, assay_key, draft_path)
 
 
 def locate_fields(draft_path: str, assay_text: str, group: int = 1) -> Dict[str, Any]:
@@ -385,6 +438,86 @@ def delete_ruleset(project_root: str, assay_key: str) -> Dict[str, Any]:
     return _impl(project_root, assay_key)
 
 
+def delete_never_active_ruleset(project_root: str, draft_path: str) -> Dict[str, Any]:
+    from .lifecycle import delete_never_active_ruleset as _impl
+
+    return _impl(project_root, draft_path)
+
+
+def open_active_as_draft(project_root: str, assay_key: str) -> Dict[str, Any]:
+    from .lifecycle import open_active_as_draft as _impl
+
+    return _impl(project_root, assay_key)
+
+
+def update_draft_meta(
+    draft_path: str,
+    *,
+    assay_key: str,
+    assay_name: str,
+    lot_regex: str,
+    excel_filename_template: str,
+    sheetname_template: str,
+    return_receipt: bool = False,
+) -> str | Dict[str, Any]:
+    result = RuleSuite().update_draft_meta(
+        draft_path,
+        assay_key=assay_key,
+        assay_name=assay_name,
+        lot_regex=lot_regex,
+        excel_filename_template=excel_filename_template,
+        sheetname_template=sheetname_template,
+        return_receipt=return_receipt,
+    )
+    return result if return_receipt else str(result)
+
+
+def draft_content_revision(draft_path: str) -> str:
+    return RuleSuite().draft_content_revision(draft_path)
+
+
+def restore_draft_snapshot(
+    draft_path: str,
+    data: Dict[str, Any],
+    *,
+    expected_revision: str | None = None,
+    return_receipt: bool = False,
+) -> str | Dict[str, Any]:
+    result = RuleSuite().restore_draft_snapshot(
+        draft_path,
+        data,
+        expected_revision=expected_revision,
+        return_receipt=return_receipt,
+    )
+    return result if return_receipt else str(result)
+
+
+def replace_field(
+    draft_path: str,
+    selected_key: str,
+    *,
+    key: str,
+    regex: str,
+    required: bool,
+    search_from: Dict[str, Any] | None,
+    excel_column: str | None = None,
+    dedupe_member: bool | None = None,
+    return_receipt: bool = False,
+) -> str | Dict[str, Any]:
+    result = RuleSuite().replace_field(
+        draft_path,
+        selected_key,
+        key=key,
+        regex=regex,
+        required=required,
+        search_from=search_from,
+        excel_column=excel_column,
+        dedupe_member=dedupe_member,
+        return_receipt=return_receipt,
+    )
+    return result if return_receipt else str(result)
+
+
 def deactivate_ruleset(project_root: str, assay_key: str) -> Dict[str, Any]:
     from .lifecycle import deactivate_ruleset as _impl
 
@@ -395,6 +528,12 @@ def delete_inventory_item(project_root: str, kind: str, path_or_key: str) -> Dic
     from .lifecycle import delete_inventory_item as _impl
 
     return _impl(project_root, kind, path_or_key)
+
+
+def open_history_as_draft(project_root: str, history_path: str) -> Dict[str, Any]:
+    from .lifecycle import open_history_as_draft as _impl
+
+    return _impl(project_root, history_path)
 
 
 def open_inactive_as_draft(project_root: str, inactive_path: str) -> Dict[str, Any]:

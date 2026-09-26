@@ -1,4 +1,4 @@
-"""MarkingsMixin: interaktive Markierungs-Ansicht im PDF-Tab.
+"""MarkingsMixin: interaktive Markierungs-Ansicht im Beispielbericht.
 
 Felder werden im Assay-Text farbig markiert, eine Legende zeigt Treffer-Status,
 und aus Textauswahlen lassen sich Regex- und search_from-Vorschlaege ableiten.
@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import re
 import tkinter as tk
-
-from src.rulesuite.api import locate_fields, suggest_regex_from_selection
 
 from .constants import FIELD_MARKING_COLORS as _FIELD_MARKING_COLORS
 from .regex_builder_popup import RegexBuilderPopup
@@ -30,13 +28,13 @@ class MarkingsMixin:
         if self.frame_marking_panel is None or self.btn_toggle_markings is None:
             return
         if self._marking_panel_visible:
-            self.frame_marking_panel.pack_forget()
+            self.frame_marking_panel.grid_remove()
             self._marking_panel_visible = False
-            self.btn_toggle_markings.config(text="Markierungs-Ansicht einblenden")
+            self.btn_toggle_markings.config(text="Markierungen einblenden")
         else:
-            self.frame_marking_panel.pack(side="right", fill="y", padx=(8, 0))
+            self.frame_marking_panel.grid()
             self._marking_panel_visible = True
-            self.btn_toggle_markings.config(text="Markierungs-Ansicht ausblenden")
+            self.btn_toggle_markings.config(text="Markierungen ausblenden")
             self._render_field_markings()
 
     def _maybe_refresh_field_markings(self) -> None:
@@ -115,7 +113,7 @@ class MarkingsMixin:
         if sel is None:
             self._set_hint("Bitte zuerst Text im Assay-Block markieren.")
             return
-        result = suggest_regex_from_selection(
+        result = self._rules.suggest_regex_from_selection(
             str(sel["line_text"]),
             str(sel["text"]),
             selection_start=int(sel["sel_start_in_line"]),
@@ -127,7 +125,7 @@ class MarkingsMixin:
         suffix = f" ({strategy})"
         if warnings:
             suffix += f"; Hinweis: {', '.join(str(w) for w in warnings)}"
-        self._set_hint("Regex-Vorschlag aus Auswahl uebernommen. Feldname pruefen und speichern." + suffix)
+        self._set_hint("Regex-Vorschlag aus Auswahl übernommen. Feldschlüssel prüfen und speichern." + suffix)
 
     def on_open_regex_builder(self) -> None:
         selection = self._get_block_selection()
@@ -135,17 +133,14 @@ class MarkingsMixin:
         def _accept(regex: str, search_from: dict[str, object] | None) -> None:
             self.var_field_regex.set(regex)
             if search_from and "line" in search_from:
-                self.var_search_mode.set("line")
-                self.var_search_line.set(str(search_from.get("line", "")))
-                self.var_search_after.set("")
+                self._set_search_mode("line", line=str(search_from.get("line", "")), after="")
             elif search_from and "after" in search_from:
-                self.var_search_mode.set("after")
-                self.var_search_after.set(str(search_from.get("after", "")))
-                self.var_search_line.set("")
-            self._set_hint("Regex-Baustein uebernommen. Feldname pruefen und speichern.")
+                self._set_search_mode("after", after=str(search_from.get("after", "")), line="")
+            self._set_hint("Regex-Baustein übernommen. Feldschlüssel prüfen und speichern.")
 
         RegexBuilderPopup(
             self,
+            rules=self._rules,
             assay_text=self.assay_block_text,
             selection=selection,
             on_accept=_accept,
@@ -156,9 +151,7 @@ class MarkingsMixin:
         if sel is None:
             self._set_hint("Bitte zuerst Text im Assay-Block markieren.")
             return
-        self.var_search_mode.set("line")
-        self.var_search_line.set(str(sel["line_idx"]))
-        self.var_search_after.set("")
+        self._set_search_mode("line", line=str(sel["line_idx"]), after="")
         self._set_hint(f"Suche ab Zeile {sel['line_idx']} gesetzt.")
 
     def on_marking_set_search_after_selection(self) -> None:
@@ -170,9 +163,7 @@ class MarkingsMixin:
         if not marker:
             self._set_hint("Auswahl enthaelt keinen nutzbaren Marker.")
             return
-        self.var_search_mode.set("after")
-        self.var_search_after.set(re.escape(marker))
-        self.var_search_line.set("")
+        self._set_search_mode("after", after=re.escape(marker), line="")
         self._set_hint("Suche ab Marker aus Auswahl gesetzt.")
 
     def on_marking_set_search_after_prev_line(self) -> None:
@@ -190,9 +181,7 @@ class MarkingsMixin:
         if not marker:
             self._set_hint("Vorherige Zeile ist leer.")
             return
-        self.var_search_mode.set("after")
-        self.var_search_after.set(marker)
-        self.var_search_line.set("")
+        self._set_search_mode("after", after=marker, line="")
         self._set_hint("Suche ab: Marker aus Zeile davor gesetzt.")
 
     def _select_field_in_tree(self, key: str) -> None:
@@ -247,21 +236,11 @@ class MarkingsMixin:
 
     def on_marking_selected(self, key: str) -> None:
         self._ensure_marking_state()
-        if self._marking_sync_guard:
+        if self._marking_sync_guard or getattr(self, "_field_selection_guard", False):
             return
         if key not in self._field_marking_data:
             return
-        # Zustand bereits synchron -> nichts tun (bricht asynchrone Event-Ketten).
-        if key == self._active_marking_key and self.var_field_key.get().strip() == key:
-            self._emphasize_field_marking(key)
-            return
-        self._marking_sync_guard = True
-        try:
-            self._emphasize_field_marking(key)
-            self._load_field_form_for_key(key)
-            self._select_field_in_tree(key)
-        finally:
-            self._marking_sync_guard = False
+        self._select_field(key)
 
     def on_marking_legend_selected(self, _event: object = None) -> None:
         if self.tree_marking_legend is None:
@@ -375,7 +354,7 @@ class MarkingsMixin:
             group = 1
 
         try:
-            out = locate_fields(self.current_draft_path, self.assay_block_text, group=group)
+            out = self._rules.locate_fields(self.current_draft_path, self.assay_block_text, group=group)
         except Exception as e:
             self._clear_field_markings()
             self.var_marking_status.set(f"Markierungen fehlgeschlagen: {e}")
@@ -435,7 +414,7 @@ class MarkingsMixin:
             self._update_field_guidance(active_key)
 
     def on_goto_field_marking(self) -> None:
-        """Springt in den PDF-Tab, um die Fundstelle eines Feldes zu zeigen oder zu hinterlegen."""
+        """Fokussiert den Beispielbericht, um eine Fundstelle zu zeigen oder zu hinterlegen."""
         key = self.var_field_key.get().strip()
         if not key:
             self._set_hint("Bitte zuerst ein Feld auswaehlen.")

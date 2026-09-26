@@ -1,0 +1,20 @@
+---
+description: Architecture boundary reminders for AREV2 (details in AGENTS.md)
+globs:
+  - "src/**"
+  - "interfaces/**"
+  - "*_main.py"
+  - "gui_min*.py"
+  - "rule_editor/**"
+alwaysApply: false
+---
+
+# Architecture boundaries
+
+Full rules: [`AGENTS.md`](../AGENTS.md). Automated gate: `tests/test_architecture_gates.py`.
+
+- Cross-module imports in production code: only `src.<module>.api`.
+- Adapters (`*_main.py` thin wrappers, `interfaces/`, `gui_min*.py`, `rule_editor/`, `interfaces/tk/`): only `src.*.api` for foreign modules; runtime via `src.runtime.api` only.
+- Business logic stays in `src/` services; adapters orchestrate and render.
+- Do not add root entry scripts or parallel CLI mains without explicit task scope — extend `interfaces/cli/*` or existing `*_main.py` owners.
+- `src/testui/` has no Tkinter imports (presenters only).

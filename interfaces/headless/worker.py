@@ -6,7 +6,13 @@ from pathlib import Path
 
 from interfaces.common.queue_worker import QueueWorkerConfig, default_worker_id, process_next_pending
 from src.jobcontroller.api import submit
-from src.runtime.api import load_runtime_config
+from src.runtime.api import load_runtime_config, resolve_app_root
+
+
+def _project_root() -> Path:
+    if os.getenv("ARE_HOME", "").strip():
+        return resolve_app_root()
+    return Path(__file__).resolve().parents[2]
 
 
 def _worker_id() -> str:
@@ -49,7 +55,7 @@ def run_forever(project_root: Path) -> None:
 
 
 def main() -> None:
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = _project_root()
     if os.getenv("ARE_WORKER_ONCE", "").strip() == "1":
         processed = run_once(project_root)
         print("[worker] processed_one_job" if processed else "[worker] no_pending_jobs")

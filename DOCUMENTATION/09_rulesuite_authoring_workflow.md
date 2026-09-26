@@ -14,7 +14,7 @@ Dieses Dokument beschreibt den aktuellen Workflow fuer die Regelerstellung.
 - Implementierung: `src/rulesuite/rulesuite.py`
 
 ## Gefuehrter Anlage-Wizard (Neues Regelset)
-- Start ueber den Button `Neues Regelset (gefuehrt)...` in der Kachel `Regelset-Verwaltung` (Tab `Draft`).
+- Start ueber den sekundaeren Button `Von Grund auf neu...` auf der Inventar-Startseite. Der primaere Neuanlageweg `Von bestehender Rule ableiten...` nutzt weiterhin den Clone-Dialog.
 - Eigenes modales Fenster mit 5 Schritten (Zurueck/Weiter/Abbrechen):
   1. Grunddaten: `assay_key` + `assay_name`; zwei Modi:
      - **Aehnlich wie Vorlage** (Default): Acht Pflicht-Header aus dem gewaehlten Quell-Regelset (canonical keys, Legacy-Alias-Aufloesung); weitere Felder des Quell-Regelsets erscheinen als **Kandidaten**.
@@ -91,12 +91,12 @@ Siehe auch: `docs/AP2_ACCEPTANCE.md`, `docs/AP3_ACCEPTANCE.md`.
 
 ## Regex-Bibliothek
 - Popup mit gaengigen Regex-Bausteinen und Mini-Erklaerung in einfachem Deutsch.
-- Zugang: Button `Regex-Bibliothek...` im Felder-Tab, `Bib...` im Markierungs-Panel sowie in den Wizard-Schritten 3 und 4.
+- Zugang: `Bib` in den sichtbaren Feldeinstellungen, `Regex-Bibliothek...` unter `Erweiterte Optionen` sowie in den Wizard-Schritten 3 und 4.
 - `Einfuegen` setzt das Muster an der Cursorposition in das Regex-Feld.
 
 ## Regelset-Verwaltung
-- Kachel `Regelset-Verwaltung` im Tab `Draft`: Liste aller registrierten Rulesets (Key, Name, Datei, Felderzahl, Status).
-- `Ansehen/Bearbeiten` laedt das Regelset als Draft in den Editor (Aenderungen wirken erst nach Aktivierung).
+- Die Inventar-Startseite listet aktive Rules, Drafts und inaktive Rules (Key, Name, Datei, Felderzahl, Status) mit den Filtern `Alle`, `Aktiv`, `Drafts`, `Inaktiv`.
+- `Als Entwurf bearbeiten` laedt das Regelset als Draft in den dreispaltigen Workspace (Aenderungen wirken erst nach Aktivierung).
 - `Loeschen...` mit doppelter Bestaetigung (Ja/Nein-Dialog + exaktes Eintippen des Assay-Keys):
   - Eintrag wird aus `rules/index.json` entfernt.
   - Die JSON-Datei wird nach `rules/trash/<name>.<timestamp>.json` verschoben (wiederherstellbar, nichts wird endgueltig geloescht).
@@ -104,32 +104,31 @@ Siehe auch: `docs/AP2_ACCEPTANCE.md`, `docs/AP3_ACCEPTANCE.md`.
 
 ## Empfohlener Editor-Flow
 1. `python rule_editor_main.py` starten.
-2. Ueber Tabs/Schnellnavigation arbeiten:
-   - `Draft`
-   - `PDF / Assay-Text`
-   - `Felder`
-   - `Meta & Excel`
-   - `Validierung & Aktivierung`
-   - `Log`
-3. Draft erstellen:
+2. Auf der Inventar-Startseite eine aktive Rule als Entwurf oeffnen oder eine neue Rule ableiten.
+3. Im dreispaltigen Workspace arbeiten:
+   - links Feldliste,
+   - mittig Beispielbericht und Markierungen,
+   - rechts Feldeinstellungen, Regex-Test und `search_from`.
+   Meta/Excel, technischer Diff, Batch-Check, Regex-Gruppe und Log bleiben unter `Erweiterte Optionen` erreichbar.
+4. Draft erstellen:
    - aus aktivem Assay
    - oder neues leeres Assay
    - oder aus bestehendem Assay ableiten.
-4. Test-PDF laden und Assay-Block extrahieren.
-   - Im Tab `PDF / Assay-Text` kann die Markierungs-Ansicht ein-/ausgeblendet werden.
+5. Test-PDF laden und Assay-Block extrahieren.
+   - Im mittleren Bereich `Beispielbericht` kann die Markierungs-Ansicht ein-/ausgeblendet werden.
    - Text markieren, `Regex aus Auswahl` nutzen, Feldname setzen und `Neues Feld anlegen` oder `Feld uebernehmen`.
    - `Suche ab: Zeile` bzw. `Suche ab: Zeile davor` setzen den Suchstart aus der Auswahl.
-   - Bestehende Felder erscheinen farbig; Klick auf Markierung/Legende laedt das Feld ins Bearbeitungsformular.
-5. Felder bearbeiten (key/regex/required/search_from), `lot_rule`, `dedupe_fields`, `excel_rules.column_mapping` pflegen.
-6. Regex mit Highlight im Assay-Block testen (optional mit `regex_group=0` fuer Gesamttreffer).
-   - Jeder Testlauf erscheint zusaetzlich in einer Ergebnistabelle im Felder-Tab.
-   - Ergebnis/Kontext stehen direkt im Felder-Tab im Mini-Preview.
+   - Bestehende Felder erscheinen farbig; Klick auf Markierung/Legende laedt das Feld in die Feldeinstellungen.
+6. Felder bearbeiten (key/regex/required/search_from); `lot_rule`, `dedupe_fields` und `excel_rules.column_mapping` liegen unter `Erweiterte Optionen`.
+7. Regex mit Highlight im Assay-Block testen (optional mit `regex_group=0` fuer Gesamttreffer).
+   - Jeder Testlauf erscheint zusaetzlich in der Ergebnistabelle der Feldeinstellungen.
+   - Ergebnis/Kontext stehen direkt in den Feldeinstellungen im Mini-Preview.
    - Das Log nutzt das 3-Zeilen-Schema:
      - `getesteter regex "/.../"`
      - `Kontext: ...`
      - `Ergebnis: ...`
-7. Draft validieren (Fehlerliste im Editor beachten).
-8. Draft aktivieren:
+8. Draft validieren (Fehlerliste im Editor beachten).
+9. Draft aktivieren:
    - bestehendes Assay aktualisieren oder
    - neues Assay aktivieren (inkl. `rules/index.json`-Eintrag).
 
@@ -145,12 +144,13 @@ Siehe auch: `docs/AP2_ACCEPTANCE.md`, `docs/AP3_ACCEPTANCE.md`.
 - Hybrides Help-UX:
   - einklappbare Kurz-/Langhilfe pro Hauptbereich (`Mehr/Weniger`)
   - Info-Buttons (`i`) fuer vertiefte Erklaerungen zu Bereichen/Funktionen
-- Hybrid-Navigation:
-  - Tabs fuer die Hauptbereiche
-  - Schnellnavigation (Schritte 1-6) fuer direkten Bereichswechsel
-  - Step-by-Step Popup mit "Zum passenden Tab"-Sprung
+- Navigation:
+  - Inventar-Startseite fuer Auswahl, Filter und Lifecycle-Aktionen
+  - dreispaltiger Workspace fuer Feldliste, Beispielbericht und Feldeinstellungen
+  - `Erweiterte Optionen` fuer Meta/Excel, Validierung, technischen Diff und Log
+  - Step-by-Step-Wizard als sekundaerer Neuanlageweg
 - Kontext-Hinweise in der Hint-Zeile geben bei typischen Fehlern konkrete "Wie beheben"-Tipps.
-- Feld-Fuehrung im Felder-Tab: Beim Auswaehlen eines Feldes zeigt eine Hinweiszeile, ob es eine Fundstelle im geladenen Beispiel-PDF gibt; `Im PDF-Tab zeigen/hinterlegen` springt in den PDF-Tab und hebt den Treffer hervor bzw. fuehrt zum Markieren einer fehlenden Stelle.
+- Feld-Fuehrung: Beim Auswaehlen eines Feldes zeigt eine Hinweiszeile, ob es eine Fundstelle im geladenen Beispiel-PDF gibt; `Im Bericht zeigen/hinterlegen` fokussiert den Beispielbericht und hebt den Treffer hervor bzw. fuehrt zum Markieren einer fehlenden Stelle.
 - Aktivierungsdialog zeigt explizit, ob ein bestehendes Assay ueberschrieben oder ein neues Assay angelegt wird.
 - Guardrails fuer neue Assays:
   - `assay_key`-Duplikate werden blockiert.
@@ -173,3 +173,7 @@ Siehe auch: `docs/AP2_ACCEPTANCE.md`, `docs/AP3_ACCEPTANCE.md`.
 - Drafts liegen getrennt unter `rules/drafts/`.
 - Produktive Rulesets werden erst per Aktivierung ersetzt.
 - Neue Assays werden nur bei erfolgreicher Validierung in `rules/index.json` eingetragen.
+- Beim Aktivieren eines bestehenden Regelwerks schreibt die RuleSuite vor dem Ueberschreiben einen byte-genauen Snapshot der bisherigen aktiven JSON nach `rules/history/`. Jeder Fehler beim Lesen, Anlegen, Schreiben, Veroeffentlichen oder Pruefen ist fail-closed: aktive Datei und Draft bleiben unveraendert. `activate_new_draft` und ungueltige Drafts erzeugen keinen Snapshot.
+- Der visuelle Editor erreicht Inventar, Preview, Readiness, Diff, Clone, Wizard und Aktivierung nur ueber den injizierten `RuleSuiteController`. Produkt-Shell und Rule-Editor nutzen dieselbe Inventarquelle `list_inventory`.
+- History und Trash werden als read-only Inventarzeilen mit Zeitstempel, SHA-256 und Fehlerstatus angezeigt. History kann mit `open_history_as_draft` als neuer Draft geoeffnet werden; der Snapshot und die aktive Rule bleiben unveraendert. Inactive nutzt entsprechend `open_inactive_as_draft`. Vorhandene Drafts werden nie ueberschrieben.
+- Stand: Gates 5, 6 und 7 sind `GATE_PASSED`. Review, Vollregression und der sichtbare isolierte Lifecycle-Flow bestaetigen Snapshot-Schutz, History-/Trash-Inventar sowie History-/Inactive-to-Draft.

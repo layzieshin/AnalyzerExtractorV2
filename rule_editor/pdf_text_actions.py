@@ -4,8 +4,6 @@ from __future__ import annotations
 import threading
 import tkinter as tk
 
-from src.rulesuite.api import get_assay_text
-
 
 class PdfTextMixin:
     def on_load_text(self) -> None:
@@ -18,16 +16,21 @@ class PdfTextMixin:
         key = self.var_new_assay_key.get().strip()
         name = self.var_new_assay_name.get().strip()
         if not pdf or not key or not name:
-            self._set_hint("Test-PDF, Assay-Key und Assay-Name sind erforderlich. Tipp: Draft laden, dann PDF und Assaydaten setzen.")
+            self._set_hint("Test-PDF, Assay-Schlüssel und Assay-Name sind erforderlich.")
             return
 
         self._set_busy(True, "Text laden...")
-        threading.Thread(target=self._load_text_thread, args=(pdf, key, name), daemon=True).start()
+        rules = self._rules
+        draft_path = self.current_draft_path
+        threading.Thread(
+            target=self._load_text_thread,
+            args=(rules, pdf, key, name, draft_path),
+            daemon=True,
+        ).start()
 
-    def _load_text_thread(self, pdf: str, key: str, name: str) -> None:
-        root = self.var_root.get().strip()
+    def _load_text_thread(self, rules: object, pdf: str, key: str, name: str, draft_path: str | None) -> None:
         try:
-            out = get_assay_text(root, pdf, key, name, draft_path=self.current_draft_path)
+            out = rules.get_assay_text(pdf, key, name, draft_path=draft_path)
             block = str(out.get("assay_block", ""))
             detected = out.get("detected_assays")
             self.after(0, lambda b=block, d=detected: self._finish_text_load_success(b, d))
@@ -35,17 +38,12 @@ class PdfTextMixin:
             msg = str(e)
             fallback_text = ""
             if "assay_block_empty" in msg:
-                fallback_text = self._load_normalized_pdf_text(pdf)
+                fallback_text = self._load_normalized_pdf_text(rules, pdf)
             self.after(0, lambda m=msg, fb=fallback_text: self._finish_text_load_error(m, fb))
 
-    def _load_normalized_pdf_text(self, pdf: str) -> str:
+    def _load_normalized_pdf_text(self, rules: object, pdf: str) -> str:
         try:
-            from src.normalizer.api import normalize_lines
-            from src.parser.api import parse
-
-            doc = parse(pdf)
-            lines = [ln for p in doc.pages for ln in p.lines]
-            return "\n".join(normalize_lines(lines))
+            return str(rules.load_normalized_pdf_text(pdf))
         except Exception:
             return ""
 
@@ -80,7 +78,7 @@ class PdfTextMixin:
         if text:
             self.txt_block.insert(tk.END, text)
         self.txt_block.see("1.0")
-        self._set_field_preview_text("Assay-Text geladen. Testen Sie im Felder-Tab einen Regex.")
+        self._set_field_preview_text("Assay-Text geladen. Testen Sie in den Feldeinstellungen ein Suchmuster.")
         try:
             self._maybe_refresh_field_markings()
         except Exception as e:

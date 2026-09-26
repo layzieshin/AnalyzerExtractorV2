@@ -1,31 +1,74 @@
-# AP-14B Test-App
+# AP-14B Test-App / Produkt-Shell
 
-AP-14B.1 ergaenzt eine produktionsnahe Test-App-Basis, ohne `gui_min.py` oder
-`gui_min_ext.py` umzubauen.
-
-## Start
+## Aktueller Default-Start (Phase 3B)
 
 ```powershell
 .\.venv\Scripts\python.exe test_app_main.py
 ```
 
-## Struktur
+Startet `AnalyzerDesktopApp` — Sidebar mit fuenf Ansichten:
 
-Die App ist ein Tkinter-Adapter unter `interfaces/tk/`. Sie nutzt nur Public APIs
-aus `src.*.api` und UI-neutrale Presenter aus `src.testui.api`.
+| Ansicht | Zweck |
+|---------|-------|
+| **Auswertung** | PDFs verarbeiten, Auto-Import-Status, letzte Vorgänge |
+| **Ergebnisse** | Berichte und Occurrences |
+| **Regelwerke** | Inventar, Integritaetspruefung, Rule Editor oeffnen |
+| **Einstellungen** | Pfade, Geraet, Watch, SQLite |
+| **Diagnose** | Fehlerjobs, Duplikat-Klaerfaelle, Draft aus Kandidat |
 
-Hauptbereiche:
+Orchestrierung ueber `src.application.api`; Hintergrundarbeit via `TkTaskRunner`.
 
-- `EXTRACTOR`
-- `OPTIONS`
-- `RULE SUITE`
-- `LOGS`
-- `DUPLIKATE`
-- `ADMIN`
+Weitere GUI-Dokumentation (Planungsstand / Inventar):
 
-## Extractor-Bedienung
+- Funktionsinventar: `docs/GUI_USER_FUNCTIONS_INVENTORY.md`
+- IA-Vorschlag und Journeys: `docs/GUI_IA_PROPOSAL.md`
 
-Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
+---
+
+## LegacyTestApp reference — nur mit `ARE_LEGACY_UI`
+
+> **Nicht der Default.** Die folgenden Abschnitte beschreiben ausschliesslich die tabbed
+> **LegacyTestApp** (`TestApp`). Normale Nutzer starten ohne `ARE_LEGACY_UI` die
+> Produkt-Shell (siehe oben).
+
+### Start (Legacy)
+
+```powershell
+$env:ARE_LEGACY_UI = "1"
+.\.venv\Scripts\python.exe test_app_main.py
+```
+
+Optionaler ADMIN-Tab (**nur Legacy-UI**):
+
+```powershell
+$env:ARE_LEGACY_UI = "1"
+$env:ARE_SHOW_ADMIN = "1"
+.\.venv\Scripts\python.exe test_app_main.py
+```
+
+AP-14B.1 ergaenzt die produktionsnahe Basis, ohne `gui_min.py` oder
+`gui_min_ext.py` umzubauen.
+
+### Legacy: Tab-Struktur (`SECTION_KEYS`)
+
+| Tab | Zweck |
+|-----|-------|
+| `EXTRACTOR` | PDFs finden, Arbeitsliste, Extraktion |
+| `OPTIONS` | Output, Pfade, Geraet |
+| `RULE SUITE` | Nacharbeit fehlgeschlagener Jobs |
+| `LOGS` | Chronologisches Protokoll (read-only) |
+| `DUPLIKATE` | SQLite-Dubletten pruefen |
+| `DATENBANK` | Gespeicherte Ergebnisse ansehen |
+
+Optional (**nur** mit `ARE_SHOW_ADMIN=1` in der Legacy-UI):
+
+| Tab | Zweck |
+|-----|-------|
+| `ADMIN` | Rohdaten der Job-Queue (Support/Debug) |
+
+### Legacy: EXTRACTOR-Bedienung
+
+Der Legacy-`EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
 
 - `Ergebnisse suchen` liest vorhandene PDFs aus dem eingestellten Watch-Ordner.
   Optional `Unterordner einbeziehen` durchsucht Jahres-/Monatsordner rekursiv.
@@ -35,10 +78,11 @@ Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
   Worker-Logik wie der Headless-Worker.
 - `Extraktion stoppen` stoppt kooperativ nach dem aktuell laufenden Ergebnis.
   Bereits gestartete PDF-Verarbeitung wird nicht hart abgebrochen.
-- `Erneut starten` setzt ausgewaehlte fehlgeschlagene Ergebnisse kontrolliert
-  wieder auf `Wartet`; fertige oder bereits wartende Ergebnisse werden uebersprungen.
+- `Fehler erneut verarbeiten` setzt ausgewaehlte fehlgeschlagene Ergebnisse
+  kontrolliert wieder auf `Wartet`; fertige oder bereits wartende Ergebnisse
+  werden uebersprungen.
 - `Aktualisieren` merged den internen Verarbeitungsstatus aus
-  `src.jobqueue.api.list_jobs(...)`.
+  `src.jobqueue.api.list_jobs(...)` in die Arbeitsliste.
 - `Automatische Suche starten` scannt den Watch-Ordner zyklisch, solange die App offen ist.
   Mit `Unterordner einbeziehen` werden auch Unterordner beruecksichtigt.
 - `Automatische Suche stoppen` beendet den geplanten In-App-Scan.
@@ -46,7 +90,9 @@ Der `EXTRACTOR`-Bereich ist fuer kontrollierte Testlaeufe gedacht:
 Watch-, Auto-Suche- und manuelle Eintraege teilen dieselbe persistente
 Arbeitsliste. Gleiche PDFs werden ueber den Queue-Job-Hash dedupliziert. Der
 EXTRACTOR zeigt fachliche Spalten wie `Herkunft`, `Status` und `Verarbeitung`.
-Technische Queue-Details bleiben im `ADMIN`-Bereich sichtbar.
+
+Technische Queue-Details sind in der Legacy-UI standardmaessig ausgeblendet und nur im optionalen
+`ADMIN`-Tab sichtbar (`ARE_SHOW_ADMIN=1`).
 
 Es gibt keinen direkten Submit-Pfad in der GUI. `Extraktion starten` nutzt
 `interfaces.common.queue_worker.process_next_pending(...)`; der Headless-Worker
@@ -57,8 +103,9 @@ Status und Log zeigen den aktuellen Zaehler, die Datei und den neuen Job-Status.
 Dadurch bleiben grosse Arbeitslisten sichtbar kontrollierbar.
 
 Fehlgeschlagene Jobs bleiben fehlgeschlagen, bis der Nutzer sie explizit erneut
-startet. Erneutes Suchen, Hinzufuegen oder die Auto-Suche reaktiviert FAILED-Jobs
-nicht automatisch.
+startet (`Fehler erneut verarbeiten` im EXTRACTOR oder `Nacharbeit wiederholen`
+im RULE SUITE). Erneutes Suchen, Hinzufuegen oder die Auto-Suche reaktiviert
+FAILED-Jobs nicht automatisch.
 
 Die Auto-Suche ist ein sichtbarer In-App-Watchdog light. Sie erkennt stabile neue
 PDFs im Watch-Ordner (optional rekursiv) und merkt sie per
@@ -84,7 +131,21 @@ eine Queue gelegt werden muss.
 Das Scan-Intervall kommt aus der Runtime-Konfiguration und wird fuer die GUI gegen
 Busy-Loops begrenzt.
 
-## Grenzen
+### Legacy: OPTIONS
+
+- Output-Modus (`excel` / `sqlite` / `both`), SQLite-Pfad, Watch-Ordner, Geraet
+- `Anzeigen` aktualisiert eine read-only Zusammenfassung der aktuellen Werte
+- Die fruehere Anzeige `Watch-Modus` wurde entfernt (hatte keine Wirkung auf die
+  Auto-Suche; Steuerung erfolgt ueber `Automatische Suche starten/stoppen` im EXTRACTOR)
+
+### Legacy: RULE SUITE (Nacharbeit)
+
+- `Nacharbeit wiederholen` startet ausgewaehlte fehlgeschlagene Jobs erneut
+  (gleiche Queue-Logik wie `Fehler erneut verarbeiten`, aber im Nacharbeit-Kontext)
+- `Rules validieren` prueft die Integritaet aktiver Regelwerke
+- Assay-Kandidaten, Draft-Erstellung und Rule-Editor-Hand-off fuer Reparatur
+
+### Legacy: Grenzen
 
 - Keine PyQt-Abhaengigkeit in AREV2.
 - Keine dauerhaften Watchdog-/Worker-Prozesse aus der App.
@@ -98,7 +159,7 @@ und spaetere PyQt/QMTool-Adapter auf denselben Presenter-Funktionen aufbauen.
 
 ## Feldversuch-Paket (AP-17A)
 
-Der kanonische portable Build startet die Test-App ueber `test_app_main.py`:
+Der kanonische portable Build startet die Produkt-Shell ueber `test_app_main.py`:
 
 ```powershell
 .\.venv\Scripts\python.exe packaging\build_onedir.py

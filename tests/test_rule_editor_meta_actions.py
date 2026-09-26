@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import rule_editor.meta_actions as meta_actions
 from rule_editor.meta_actions import MetaMixin
 
 
@@ -30,15 +29,16 @@ class _MetaActions(MetaMixin):
         self.cols_refreshed = True
 
 
-def test_on_sync_column_mapping_from_fields_calls_api_and_updates_ui(monkeypatch) -> None:
+def test_on_sync_column_mapping_from_fields_calls_api_and_updates_ui() -> None:
     editor = _MetaActions()
     calls: list[str] = []
 
-    def _fake_sync(draft_path: str) -> str:
-        calls.append(draft_path)
-        return draft_path
+    class _Rules:
+        def sync_column_mapping_from_fields(self, draft_path: str) -> str:
+            calls.append(draft_path)
+            return draft_path
 
-    monkeypatch.setattr(meta_actions, "sync_column_mapping_from_fields", _fake_sync)
+    editor._rules = _Rules()
 
     editor.on_sync_column_mapping_from_fields()
 

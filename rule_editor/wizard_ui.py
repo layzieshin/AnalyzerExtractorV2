@@ -4,7 +4,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from interfaces.tk.scroll_helpers import create_scrollable_listbox, create_scrollable_treeview
+from interfaces.tk.desktop_theme import configure_desktop_theme
+from interfaces.tk.scroll_helpers import create_scrollable_listbox
 
 from .regex_library import RegexLibraryPopup
 
@@ -16,20 +17,25 @@ _REQUIRED_STATUS_LABELS = {
     "missing_field": "Feld fehlt",
 }
 
-_CANDIDATE_STATUS_LABELS = _REQUIRED_STATUS_LABELS
+_SEARCH_MODE_LABELS = {
+    "none": "Gesamten Text durchsuchen",
+    "after": "ab Textmarker",
+    "line": "ab Zeile",
+}
+_SEARCH_LABEL_TO_MODE = {label: mode for mode, label in _SEARCH_MODE_LABELS.items()}
 
-_STEPS = ["basis", "pdf", "confirm", "custom", "finish"]
+_STEPS = ["target", "fields", "custom", "finish"]
 _STEP_TITLES = {
-    "basis": "Schritt 1 von 5: Grunddaten",
-    "pdf": "Schritt 2 von 5: Beispiel-PDF laden",
-    "confirm": "Schritt 3 von 5: Pflichtfelder bestaetigen",
-    "custom": "Schritt 4 von 5: Kandidaten und eigene Felder (optional)",
-    "finish": "Schritt 5 von 5: Abschluss",
+    "target": "Schritt 1 von 4: PDF und Ziel",
+    "fields": "Schritt 2 von 4: Felder prüfen",
+    "custom": "Schritt 3 von 4: Weitere Felder",
+    "finish": "Schritt 4 von 4: Abschlussprüfung",
 }
 
 
 class WizardUiMixin:
     def _build_ui(self) -> None:
+        configure_desktop_theme(self)
         self.lbl_title = tk.Label(self, text="", font=("Segoe UI", 11, "bold"), anchor="w")
         self.lbl_title.pack(fill="x", padx=12, pady=(12, 2))
         tk.Label(self, textvariable=self.var_status, anchor="w", fg="#555", wraplength=1050).pack(
@@ -45,13 +51,12 @@ class WizardUiMixin:
             self._card_frames[key] = frame
         self._cards.columnconfigure(0, weight=1)
 
-        self._build_basis_card(self._card_frames["basis"])
-        self._build_pdf_card(self._card_frames["pdf"])
-        self._build_confirm_card(self._card_frames["confirm"])
+        self._build_target_card(self._card_frames["target"])
+        self._build_fields_card(self._card_frames["fields"])
         self._build_custom_card(self._card_frames["custom"])
         self._build_finish_card(self._card_frames["finish"])
 
-        preview = tk.LabelFrame(self, text="Assay-Text (Treffer wird gelb markiert)")
+        preview = tk.LabelFrame(self, text="PDF-Text (Treffer wird gelb markiert)")
         preview.pack(fill="both", expand=True, padx=12, pady=(8, 6))
         self.txt_preview = tk.Text(preview, wrap="word", height=12)
         self.txt_preview.pack(fill="both", expand=True, padx=6, pady=6)
@@ -61,55 +66,19 @@ class WizardUiMixin:
         nav = tk.Frame(self)
         nav.pack(fill="x", padx=12, pady=(0, 12))
         tk.Button(nav, text="Abbrechen", command=self._on_cancel).pack(side="left")
-        self.btn_next = tk.Button(nav, text="Weiter", width=16, command=self._on_next)
+        self.btn_next = tk.Button(nav, text="Weiter", width=42, command=self._on_next)
         self.btn_next.pack(side="right")
-        self.btn_back = tk.Button(nav, text="Zurueck", width=10, command=self._on_back)
+        self.btn_back = tk.Button(nav, text="Zurück", width=10, command=self._on_back)
         self.btn_back.pack(side="right", padx=(0, 8))
 
-    def _build_basis_card(self, card: tk.Frame) -> None:
-        form = tk.LabelFrame(card, text="Neues Regelset")
-        form.pack(fill="x")
-        tk.Label(form, text="Assay-Key (z.B. (1234))").grid(row=0, column=0, sticky="w", padx=(6, 0), pady=(8, 4))
-        tk.Entry(form, textvariable=self.var_key, width=20).grid(row=0, column=1, sticky="w", padx=(4, 12), pady=(8, 4))
-        tk.Label(form, text="Assay-Name").grid(row=0, column=2, sticky="w", pady=(8, 4))
-        tk.Entry(form, textvariable=self.var_name, width=44).grid(row=0, column=3, sticky="we", padx=(4, 8), pady=(8, 4))
-        form.columnconfigure(3, weight=1)
-
-        tk.Radiobutton(
-            form,
-            text="Aehnlich wie Vorlage (Pflicht-Header aus Quell-Regelset; weitere Felder als Kandidaten)",
-            variable=self.var_mode,
-            value="similar",
-        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(8, 2))
-        src_row = tk.Frame(form)
-        src_row.grid(row=2, column=0, columnspan=4, sticky="w", padx=(28, 6))
-        tk.Label(src_row, text="Vorlage:").pack(side="left")
-        self.cmb_source = ttk.Combobox(
-            src_row,
-            textvariable=self.var_source,
-            values=sorted(self._assay_display_to_key.keys()),
-            width=52,
-            state="readonly",
-        )
-        self.cmb_source.pack(side="left", padx=(6, 0))
-        if self.cmb_source["values"]:
-            self.var_source.set(self.cmb_source["values"][0])
-
-        tk.Radiobutton(
-            form,
-            text="Von Grund auf neu (Pflicht-Header aus template.json; Zusatzfelder als Kandidaten)",
-            variable=self.var_mode,
-            value="blank",
-        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(6, 8))
-
-    def _build_pdf_card(self, card: tk.Frame) -> None:
+    def _build_target_card(self, card: tk.Frame) -> None:
         form = tk.LabelFrame(card, text="Beispiel-PDF")
         form.pack(fill="x")
         tk.Label(
             form,
             text=(
-                "Waehlen Sie eine PDF, die zu diesem Regelset passt. Der erkannte Text wird unten "
-                "angezeigt und dient in den naechsten Schritten als Pruefgrundlage."
+                "Zuerst die Beispiel- oder Problem-PDF laden. Ohne erfolgreich geladenen PDF-Text "
+                "wird kein Entwurf erzeugt oder verändert und es geht nicht zu den Feldern."
             ),
             anchor="w",
             justify="left",
@@ -119,38 +88,52 @@ class WizardUiMixin:
         row = tk.Frame(form)
         row.pack(fill="x", padx=6, pady=(0, 8))
         tk.Entry(row, textvariable=self.var_pdf).pack(side="left", fill="x", expand=True)
-        tk.Button(row, text="PDF...", command=self._on_pick_pdf).pack(side="left", padx=(6, 0))
-        tk.Button(row, text="Text laden", command=self._on_load_text).pack(side="left", padx=(6, 0))
+        tk.Button(row, text="PDF auswählen …", command=self._on_pick_pdf).pack(side="left", padx=(6, 0))
+        tk.Button(row, text="PDF-Text laden", command=self._on_load_text).pack(side="left", padx=(6, 0))
 
-        req = tk.LabelFrame(card, text="Pflichtfelder (Focus Mode)")
-        req.pack(fill="x", pady=(8, 0))
-        tk.Label(
-            req,
-            text=(
-                "Nach dem Laden sehen Sie den Status der acht Pflichtfelder. "
-                "Im naechsten Schritt waehlen Sie ein Feld, pflegen den Regex manuell "
-                "und pruefen den Treffer gegen den Beispieltext."
-            ),
-            anchor="w",
-            justify="left",
-            wraplength=1000,
-            fg="#444",
-        ).pack(fill="x", padx=6, pady=(8, 4))
-        self.list_required, required_frame = create_scrollable_listbox(req, height=6, exportselection=False)
-        required_frame.pack(fill="both", expand=True, padx=6, pady=(0, 8))
-        self.list_required.bind("<<ListboxSelect>>", self._on_required_field_selected)
-
-        cand = tk.LabelFrame(card, text="Kandidaten (Vorschau)")
-        cand.pack(fill="x", pady=(8, 0))
-        self.lbl_candidates_summary = tk.Label(cand, text="", anchor="w", fg="#444", wraplength=1000)
-        self.lbl_candidates_summary.pack(fill="x", padx=6, pady=(8, 4))
-        self.list_candidates_preview, candidates_preview_frame = create_scrollable_listbox(
-            cand, height=4, exportselection=False
+        choice = tk.LabelFrame(card, text="Ziel ausdrücklich wählen")
+        choice.pack(fill="x", pady=(8, 0))
+        self.rad_mode_new = tk.Radiobutton(
+            choice,
+            text="Neue Regel aus PDF erstellen",
+            variable=self.var_mode,
+            value="new",
+            command=self._on_mode_changed,
+            state=tk.DISABLED,
         )
-        candidates_preview_frame.pack(fill="both", expand=True, padx=6, pady=(0, 8))
+        self.rad_mode_new.pack(anchor="w", padx=6, pady=(6, 2))
+        new_row = tk.Frame(choice)
+        new_row.pack(fill="x", padx=28, pady=(0, 4))
+        tk.Label(new_row, text="Assay-Schlüssel").pack(side="left")
+        self.ent_assay_key = tk.Entry(new_row, textvariable=self.var_key, width=18, state=tk.DISABLED)
+        self.ent_assay_key.pack(side="left", padx=(4, 12))
+        tk.Label(new_row, text="Assay-Name").pack(side="left")
+        self.ent_assay_name = tk.Entry(new_row, textvariable=self.var_name, width=42, state=tk.DISABLED)
+        self.ent_assay_name.pack(side="left", padx=(4, 0))
 
-    def _build_confirm_card(self, card: tk.Frame) -> None:
-        form = tk.LabelFrame(card, text="Pflichtfeld pruefen")
+        self.rad_mode_existing = tk.Radiobutton(
+            choice,
+            text="Vorhandenen Entwurf mit PDF prüfen/bearbeiten",
+            variable=self.var_mode,
+            value="existing",
+            command=self._on_mode_changed,
+            state=tk.DISABLED,
+        )
+        self.rad_mode_existing.pack(anchor="w", padx=6, pady=(4, 2))
+        tk.Label(
+            choice,
+            text="Nur vorhandene Entwürfe. Aktive, inaktive und historische Regeln sind hier keine Quelle.",
+            anchor="w",
+            fg="#444",
+            wraplength=1000,
+        ).pack(fill="x", padx=28, pady=(0, 4))
+        self.list_drafts, drafts_frame = create_scrollable_listbox(choice, height=5, exportselection=False)
+        drafts_frame.pack(fill="both", expand=True, padx=28, pady=(0, 8))
+        self.list_drafts.configure(state=tk.DISABLED)
+        self.list_drafts.bind("<<ListboxSelect>>", self._on_draft_selected)
+
+    def _build_fields_card(self, card: tk.Frame) -> None:
+        form = tk.LabelFrame(card, text="Feld prüfen")
         form.pack(fill="x")
         head = tk.Frame(form)
         head.pack(fill="x", padx=6, pady=(8, 2))
@@ -159,117 +142,120 @@ class WizardUiMixin:
 
         grid = tk.Frame(form)
         grid.pack(fill="x", padx=6, pady=(2, 4))
-        tk.Label(grid, text="Feldname").grid(row=0, column=0, sticky="w")
-        tk.Entry(grid, textvariable=self.var_f_key, width=24, state="readonly").grid(row=0, column=1, sticky="w", padx=(4, 12))
-        self.chk_required = tk.Checkbutton(grid, text="Pflichtfeld", variable=self.var_f_required)
-        self.chk_required.grid(row=0, column=2, sticky="w")
-        tk.Label(grid, text="Regex").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        tk.Label(grid, text="Feldschlüssel").grid(row=0, column=0, sticky="w")
+        tk.Entry(grid, textvariable=self.var_f_key, width=28, state="readonly").grid(
+            row=0, column=1, sticky="w", padx=(4, 12)
+        )
+        tk.Label(grid, text="Erkennungsregel (Regex)").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.ent_confirm_regex = tk.Entry(grid, textvariable=self.var_f_regex, width=80)
         self.ent_confirm_regex.grid(row=1, column=1, columnspan=2, sticky="we", padx=(4, 0), pady=(4, 0))
         tk.Button(
-            grid, text="Bib...", width=4, command=lambda: RegexLibraryPopup(self, self.ent_confirm_regex)
+            grid, text="Regex-Bibliothek …", command=lambda: RegexLibraryPopup(self, self.ent_confirm_regex)
         ).grid(row=1, column=3, sticky="w", padx=(6, 0), pady=(4, 0))
         grid.columnconfigure(1, weight=1)
         self._build_search_from_row(grid, row=2)
 
         btns = tk.Frame(form)
         btns.pack(fill="x", padx=6, pady=(4, 8))
-        tk.Button(btns, text="Pflichtfeld pruefen", command=self._on_confirm_required_field).pack(side="left")
-        tk.Button(btns, text="Erneut testen", command=self._on_retest_field).pack(side="left", padx=(6, 0))
-        self.btn_remove_field = tk.Button(btns, text="Feld entfernen", command=self._on_remove_field)
-        self.btn_remove_field.pack(side="left", padx=(6, 0))
-        sf_btns = tk.Frame(form)
-        sf_btns.pack(fill="x", padx=6, pady=(0, 8))
-        tk.Button(sf_btns, text="Suche ab Cursor-Zeile", command=self._on_use_cursor_line).pack(side="left")
-        tk.Button(sf_btns, text="Suche ab vorheriger Zeile", command=self._on_use_previous_line).pack(side="left", padx=(6, 0))
+        tk.Button(btns, text="Prüfen", command=self._on_check_field).pack(side="left")
         tk.Label(
             btns,
-            text="'Passt - weiter' speichert das Feld und zeigt das naechste Pflichtfeld.",
+            text="Speichern und nächstes Feld schreibt nur bei gültigem Regex und nichtleerem Treffer.",
             fg="#666",
         ).pack(side="right")
 
     def _build_custom_card(self, card: tk.Frame) -> None:
-        cand = tk.LabelFrame(card, text="Kandidaten aus Vorlage")
-        cand.pack(fill="x")
-        tk.Label(
-            cand,
-            textvariable=self.var_candidates_summary,
-            anchor="w",
-            fg="#444",
-            wraplength=1000,
-        ).pack(fill="x", padx=6, pady=(8, 4))
-        self.list_candidates, candidates_frame = create_scrollable_listbox(cand, height=5, exportselection=False)
-        candidates_frame.pack(fill="both", expand=True, padx=6, pady=(0, 4))
-        self.list_candidates.bind("<<ListboxSelect>>", self._on_candidate_selected)
-        cand_btns = tk.Frame(cand)
-        cand_btns.pack(fill="x", padx=6, pady=(0, 8))
-        tk.Button(cand_btns, text="Kandidat testen", command=self._on_test_candidate).pack(side="left")
-        tk.Button(cand_btns, text="Kandidat uebernehmen", command=self._on_adopt_candidate).pack(side="left", padx=(6, 0))
-        tk.Button(cand_btns, text="Verwerfen", command=self._on_dismiss_candidate).pack(side="left", padx=(6, 0))
-
-        form = tk.LabelFrame(card, text="Eigenes Feld anlegen (optional)")
-        form.pack(fill="x", pady=(8, 0))
+        form = tk.LabelFrame(card, text="Eigenes Feld anlegen")
+        form.pack(fill="x")
         head = tk.Frame(form)
         head.pack(fill="x", padx=6, pady=(8, 2))
         tk.Label(head, textvariable=self.var_custom_count, fg="#444").pack(side="left")
         tk.Label(head, textvariable=self.var_match, fg="#444").pack(side="right")
+        tk.Label(
+            form,
+            text=(
+                "Feldschlüssel, Regex und Suchbereich prüfen, dann hinzufügen. "
+                "Weitere eigene Felder können danach nacheinander angelegt werden. "
+                "Felder entfernen Sie im normalen Editor."
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=1000,
+            fg="#444",
+        ).pack(fill="x", padx=6, pady=(0, 4))
 
         grid = tk.Frame(form)
         grid.pack(fill="x", padx=6, pady=(2, 4))
-        tk.Label(grid, text="Feldname").grid(row=0, column=0, sticky="w")
-        tk.Entry(grid, textvariable=self.var_f_key, width=24).grid(row=0, column=1, sticky="w", padx=(4, 12))
-        tk.Checkbutton(grid, text="Pflichtfeld", variable=self.var_f_required).grid(row=0, column=2, sticky="w")
-        tk.Label(grid, text="Regex").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        tk.Label(grid, text="Feldschlüssel").grid(row=0, column=0, sticky="w")
+        tk.Entry(grid, textvariable=self.var_f_key, width=28).grid(row=0, column=1, sticky="w", padx=(4, 12))
+        tk.Label(grid, text="Erkennungsregel (Regex)").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.ent_custom_regex = tk.Entry(grid, textvariable=self.var_f_regex, width=80)
         self.ent_custom_regex.grid(row=1, column=1, columnspan=2, sticky="we", padx=(4, 0), pady=(4, 0))
         tk.Button(
-            grid, text="Bib...", width=4, command=lambda: RegexLibraryPopup(self, self.ent_custom_regex)
+            grid, text="Regex-Bibliothek …", command=lambda: RegexLibraryPopup(self, self.ent_custom_regex)
         ).grid(row=1, column=3, sticky="w", padx=(6, 0), pady=(4, 0))
         grid.columnconfigure(1, weight=1)
         self._build_search_from_row(grid, row=2)
 
         btns = tk.Frame(form)
         btns.pack(fill="x", padx=6, pady=(4, 8))
-        tk.Button(btns, text="Regex testen", command=self._on_test_custom).pack(side="left")
-        tk.Button(btns, text="Feld uebernehmen", command=self._on_add_custom).pack(side="left", padx=(6, 0))
-        tk.Label(
-            btns,
-            text="Felder nacheinander anlegen; mit 'Weiter' geht es zum Abschluss.",
-            fg="#666",
-        ).pack(side="right")
+        tk.Button(btns, text="Prüfen", command=self._on_test_custom).pack(side="left")
+        tk.Button(btns, text="Feld hinzufügen und nächstes", command=self._on_add_custom).pack(
+            side="left", padx=(6, 0)
+        )
 
     def _build_search_from_row(self, grid: tk.Frame, row: int) -> None:
         sf = tk.Frame(grid)
         sf.grid(row=row, column=0, columnspan=4, sticky="w", pady=(4, 2))
-        tk.Label(sf, text="Suche ab").pack(side="left")
+        tk.Label(sf, text="Suchbereich").pack(side="left")
         ttk.Combobox(
             sf,
-            textvariable=self.var_f_mode,
-            values=["none", "after", "line"],
-            width=8,
+            textvariable=self.var_f_search_label,
+            values=list(_SEARCH_MODE_LABELS.values()),
+            width=28,
             state="readonly",
         ).pack(side="left", padx=(4, 10))
-        tk.Label(sf, text="after").pack(side="left")
+        tk.Label(sf, text="Textmarker").pack(side="left")
         tk.Entry(sf, textvariable=self.var_f_after, width=28).pack(side="left", padx=(4, 10))
-        tk.Label(sf, text="line").pack(side="left")
+        tk.Label(sf, text="Zeilennummer").pack(side="left")
         tk.Entry(sf, textvariable=self.var_f_line, width=6).pack(side="left", padx=(4, 0))
 
     def _build_finish_card(self, card: tk.Frame) -> None:
         form = tk.LabelFrame(card, text="Zusammenfassung")
         form.pack(fill="x")
-        self.list_summary, summary_frame = create_scrollable_listbox(form, height=7)
+        self.list_summary, summary_frame = create_scrollable_listbox(form, height=6)
         summary_frame.pack(fill="both", expand=True, padx=6, pady=(8, 6))
+        self.frm_reference = tk.Frame(form)
+        tk.Label(
+            self.frm_reference,
+            text=(
+                "Änderung einer aktiven Regel: Die Problem-PDF muss mit diesem Entwurf bestehen. "
+                "Zusätzlich eine andere Referenz-PDF wählen, mit der die bisherige Regel funktioniert hat. "
+                "Alte und neue Regel müssen auf dieser Referenz dieselben Werte liefern."
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=1000,
+            fg="#444",
+        ).pack(fill="x", padx=6, pady=(0, 4))
+        ref_row = tk.Frame(self.frm_reference)
+        ref_row.pack(fill="x", padx=6, pady=(0, 8))
+        tk.Label(ref_row, text="Referenz-PDF").pack(side="left")
+        tk.Entry(ref_row, textvariable=self.var_reference_pdf).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        tk.Button(ref_row, text="PDF auswählen …", command=self._on_pick_reference_pdf).pack(side="left", padx=(6, 0))
         tk.Radiobutton(
             form,
-            text="Draft im Editor oeffnen (empfohlen: dort weiter pruefen und kontrolliert aktivieren)",
+            text="Entwurf im Editor öffnen (empfohlen)",
             variable=self.var_finish_action,
             value="editor",
         ).pack(anchor="w", padx=6)
         tk.Radiobutton(
             form,
-            text="Direkt aktivieren (nur wenn alle Pflichtfelder Treffer haben)",
+            text="Kontrolliert aktivieren",
             variable=self.var_finish_action,
             value="activate",
-        ).pack(anchor="w", padx=6, pady=(0, 8))
+        ).pack(anchor="w", padx=6, pady=(0, 4))
         self.lbl_required_summary = tk.Label(form, text="", anchor="w", fg="#666", wraplength=1000)
         self.lbl_required_summary.pack(fill="x", padx=6, pady=(0, 8))
+        self.lbl_mode_summary = tk.Label(form, text="", anchor="w", fg="#444", wraplength=1000)
+        self.lbl_mode_summary.pack(fill="x", padx=6, pady=(0, 8))

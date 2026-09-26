@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .candidates import _load_ruleset_data, read_candidate_fields
+from .candidates import _load_ruleset_data
 from .errors import RuleSuiteError
 from .header_aliases import resolve_required_headers_from_source
 from .json_io import _write_json_atomic
@@ -27,6 +27,46 @@ def _extract_fields_and_mapping(data: Dict[str, Any]) -> tuple[List[Dict[str, An
     return fields, column_mapping
 
 
+def _header_only_payload(
+    source_data: Dict[str, Any],
+    target_assay_key: str,
+    target_assay_name: str,
+) -> Dict[str, Any]:
+    source_fields, source_column_mapping = _extract_fields_and_mapping(source_data)
+    header = resolve_required_headers_from_source(source_fields, source_column_mapping)
+    lot_rule = source_data.get("lot_rule")
+    lot_rule = deepcopy(lot_rule) if isinstance(lot_rule, dict) else {"regex": ""}
+    return {
+        "assay_name": target_assay_name,
+        "assay_key": target_assay_key,
+        "lot_rule": lot_rule,
+        "extract_rules": {"fields": [deepcopy(field) for field in header["fields"]], "dedupe_fields": []},
+        "excel_rules": {
+            "excel_filename_template": "{assay_name}.xlsx",
+            "sheetname_template": "{lot_id}",
+            "column_mapping": dict(header["column_mapping"]),
+        },
+    }
+
+
+def _result(
+    status: str,
+    draft_path: Path,
+    source_assay_key: str,
+    target_assay_key: str,
+    target_assay_name: str,
+    include_fields: bool,
+) -> Dict[str, Any]:
+    return {
+        "status": status,
+        "draft_path": str(draft_path),
+        "source_assay_key": source_assay_key,
+        "target_assay_key": target_assay_key,
+        "target_assay_name": target_assay_name,
+        "include_fields": include_fields,
+    }
+
+
 def clone_ruleset_to_draft(
     project_root: str,
     source_assay_key: str,
@@ -42,58 +82,27 @@ def clone_ruleset_to_draft(
         raise RuleSuiteError("source_assay_key, target_assay_key and target_assay_name are required")
 
     draft_path = Path(draft_path_for_assay(project_root, target_assay_key))
-    existed = draft_path.exists()
-    if existed and not overwrite:
-        return {
-            "status": "exists",
-            "draft_path": str(draft_path),
-            "source_assay_key": source_assay_key,
-            "target_assay_key": target_assay_key,
-            "target_assay_name": target_assay_name,
-            "include_fields": include_fields,
-        }
+    if draft_path.exists() and not overwrite:
+        return _result("exists", draft_path, source_assay_key, target_assay_key, target_assay_name, include_fields)
 
     source_data = _load_ruleset_data(project_root, source_assay_key)
-    source_fields, source_column_mapping = _extract_fields_and_mapping(source_data)
-    header = resolve_required_headers_from_source(source_fields, source_column_mapping)
-
-    lot_rule = source_data.get("lot_rule")
-    lot_rule = deepcopy(lot_rule) if isinstance(lot_rule, dict) else {"regex": ""}
-
-    fields = [deepcopy(field) for field in header["fields"]]
-    column_mapping = dict(header["column_mapping"])
-
     if include_fields:
-        bundle = read_candidate_fields(project_root, source_assay_key=source_assay_key)
-        for field in bundle["fields"]:
-            key = str(field.get("key", "")).strip()
-            if not key:
-                continue
-            fields.append(deepcopy(field))
-            if key in bundle["column_mapping"]:
-                column_mapping[key] = bundle["column_mapping"][key]
-            elif key not in column_mapping:
-                column_mapping[key] = key
+        data = deepcopy(source_data)
+        data["assay_key"] = target_assay_key
+        data["assay_name"] = target_assay_name
+    else:
+        data = _header_only_payload(source_data, target_assay_key, target_assay_name)
 
-    data: Dict[str, Any] = {
-        "assay_name": target_assay_name,
-        "assay_key": target_assay_key,
-        "lot_rule": lot_rule,
-        "extract_rules": {"fields": fields, "dedupe_fields": []},
-        "excel_rules": {
-            "excel_filename_template": "{assay_name}.xlsx",
-            "sheetname_template": "{lot_id}",
-            "column_mapping": column_mapping,
-        },
-    }
+    if not overwrite:
+        from .lifecycle import _publish_new_draft_exclusive
+
+        written = _publish_new_draft_exclusive(draft_path, data)
+        if written is None:
+            return _result("exists", draft_path, source_assay_key, target_assay_key, target_assay_name, include_fields)
+        return _result("created", draft_path, source_assay_key, target_assay_key, target_assay_name, include_fields)
+
+    existed = draft_path.exists()
     draft_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(draft_path, data)
-
-    return {
-        "status": "overwritten" if existed else "created",
-        "draft_path": str(draft_path),
-        "source_assay_key": source_assay_key,
-        "target_assay_key": target_assay_key,
-        "target_assay_name": target_assay_name,
-        "include_fields": include_fields,
-    }
+    status = "overwritten" if existed else "created"
+    return _result(status, draft_path, source_assay_key, target_assay_key, target_assay_name, include_fields)

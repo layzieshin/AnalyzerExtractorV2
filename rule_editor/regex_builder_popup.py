@@ -5,14 +5,13 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Any, Callable
 
-from src.rulesuite.api import build_regex_from_builder_spec, suggest_builder_spec_from_selection, test_regex
-
 
 class RegexBuilderPopup(tk.Toplevel):
     def __init__(
         self,
         master: tk.Misc,
         *,
+        rules: object,
         assay_text: str,
         selection: dict[str, object] | None,
         on_accept: Callable[[str, dict[str, Any] | None], None],
@@ -21,6 +20,7 @@ class RegexBuilderPopup(tk.Toplevel):
         self.title("Regex-Baustein")
         self.geometry("800x620")
         self.transient(master)
+        self._rules = rules
         self._assay_text = assay_text
         self._on_accept = on_accept
         self._last_result: dict[str, Any] | None = None
@@ -54,7 +54,7 @@ class RegexBuilderPopup(tk.Toplevel):
     def _initial_spec(self, selection: dict[str, object] | None) -> dict[str, Any]:
         if not selection:
             return {"value_type": "auto"}
-        out = suggest_builder_spec_from_selection(
+        out = self._rules.suggest_builder_spec_from_selection(
             str(selection.get("line_text", "")),
             str(selection.get("text", "")),
             selection_start=int(selection.get("sel_start_in_line", 0)),
@@ -222,7 +222,7 @@ class RegexBuilderPopup(tk.Toplevel):
         }
 
     def _build_regex(self) -> dict[str, Any]:
-        self._last_result = build_regex_from_builder_spec(self._spec())
+        self._last_result = self._rules.build_regex_from_builder_spec(self._spec())
         self._render_result(self._last_result)
         return self._last_result
 
@@ -235,7 +235,7 @@ class RegexBuilderPopup(tk.Toplevel):
             if isinstance(proposed, dict):
                 search_from = proposed
         if self._assay_text.strip():
-            test = test_regex(self._assay_text, regex, group=1, search_from=search_from)
+            test = self._rules.test_regex(self._assay_text, regex, group=1, search_from=search_from)
         else:
             test = {"error": "no_assay_text"}
         result = dict(result)

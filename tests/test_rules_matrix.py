@@ -129,7 +129,11 @@ def test_rules_matrix_marks_missing_v2_dedupe_basis_red(tmp_path: Path, monkeypa
         lines = ["Assay A", "(1111)", "Lot: LOT-A", "Date: 2026-07-09", "Time: 12:30:00"]
         return ParsedDocument(source_path=str(pdf), pages=[ParsedPage(page_number=1, lines=lines)], meta={"page_count": 1})
 
+    def fake_extract_record(_block, _ruleset):
+        raise RuntimeError("dedupe basis missing: PLATTE,TEST")
+
     monkeypatch.setattr(rules_matrix, "parse", fake_parse)
+    monkeypatch.setattr(rules_matrix, "extract_record", fake_extract_record)
 
     report = rules_matrix.run_matrix(root, pdfs=[pdf], mode="preview", write_report=False)
 
@@ -163,7 +167,7 @@ def test_rules_matrix_marks_dedupe_fields_empty_red(tmp_path: Path, monkeypatch)
     assert any("extract_failed:dedupe fields empty" in issue for issue in pdf_result["issues"])
 
 
-def test_rules_matrix_marks_optional_missing_yellow_without_required_yellow(tmp_path: Path, monkeypatch) -> None:
+def test_rules_matrix_marks_empty_configured_field_red(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "proj"
     pdf = _write_project(root, explicit_dedupe=True)
 
@@ -175,9 +179,7 @@ def test_rules_matrix_marks_optional_missing_yellow_without_required_yellow(tmp_
 
     report = rules_matrix.run_matrix(root, pdfs=[pdf], mode="preview", write_report=False)
 
-    assert report["summary"] == {"green": 0, "yellow": 1, "red": 0}
+    assert report["summary"] == {"green": 0, "yellow": 0, "red": 1}
     pdf_result = report["assays"][0]["pdf_results"][0]
-    assert pdf_result["criteria"]["required_fields"] == "green"
-    assert pdf_result["criteria"]["dedupe"] == "green"
-    assert "optional" in pdf_result["optional_missing"]
-    assert "optional_fields_missing" in pdf_result["issues"]
+    assert pdf_result["criteria"]["required_fields"] == "red"
+    assert "extract_failed:configured_fields_empty: optional" in pdf_result["issues"]

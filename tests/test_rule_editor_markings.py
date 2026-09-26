@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import tkinter as tk
+
 import rule_editor.marking_actions as marking_actions
+from rule_editor.field_actions import FieldsMixin
 from rule_editor.marking_actions import MarkingsMixin
 from rule_editor.regex_actions import RegexMixin
 
@@ -96,15 +99,30 @@ class _Tree:
         return None
 
 
-class _DummyMarkings(MarkingsMixin):
+class _Entry:
+    def __init__(self) -> None:
+        self.state = tk.NORMAL
+
+    def configure(self, **kwargs: object) -> None:
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+
+
+class _DummyMarkings(MarkingsMixin, FieldsMixin):
     def __init__(self) -> None:
         self.txt_block = _Text()
         self.tree_marking_legend = _Tree()
         self.var_field_key = _Var("")
         self.var_field_regex = _Var("")
         self.var_search_mode = _Var("none")
+        self.var_search_mode_label = _Var("Gesamter Assay-Text")
         self.var_search_line = _Var("")
         self.var_search_after = _Var("")
+        self.ent_search_after = _Entry()
+        self.ent_search_line = _Entry()
+        self._suspend_dirty_tracking = False
+        self._field_form_loading = False
+        self._field_form_dirty = False
         self.assay_block_text = "Block"
         self._field_marking_data = {
             "A": {"key": "A", "matched": True, "span": [2, 5], "value": "hit", "error": None},
@@ -185,20 +203,36 @@ def test_hidden_active_marking_still_scrolls_with_emphasis() -> None:
     assert markings.txt_block.seen == ["1.0+2c"]
 
 
-def test_regex_from_selection_uses_backend_result(monkeypatch) -> None:
+def test_regex_from_selection_uses_backend_result() -> None:
     markings = _SelectionMarkings()
+    seen: dict[str, object] = {}
 
-    monkeypatch.setattr(
-        marking_actions,
-        "suggest_regex_from_selection",
-        lambda *args, **kwargs: {
-            "regex": r"\bS5\s+\S+\s+\d{6}\s+(\d+(?:[\.,]\d+)?)\s+O\.D\.",
-            "strategy": "anchored_left+decimal+unit_right",
-            "warnings": [],
-        },
-    )
+    class _Rules:
+        def suggest_regex_from_selection(
+            self,
+            line_text: str,
+            selected_text: str,
+            *,
+            selection_start: int | None = None,
+            selection_end: int | None = None,
+        ) -> dict[str, object]:
+            seen["call"] = (line_text, selected_text, selection_start, selection_end)
+            return {
+                "regex": r"\bS5\s+\S+\s+\d{6}\s+(\d+(?:[\.,]\d+)?)\s+O\.D\.",
+                "strategy": "anchored_left+decimal+unit_right",
+                "warnings": [],
+            }
+
+    markings._rules = _Rules()
 
     markings.on_marking_regex_from_selection()
+
+    assert seen["call"] == (
+        "25-OH Vitamin D S5 0013200223 261126 0,722 O.D.",
+        "0,722",
+        38,
+        43,
+    )
 
     assert markings.var_field_regex.get() == r"\bS5\s+\S+\s+\d{6}\s+(\d+(?:[\.,]\d+)?)\s+O\.D\."
     assert "anchored_left+decimal+unit_right" in markings.hints[-1]
@@ -206,9 +240,11 @@ def test_regex_from_selection_uses_backend_result(monkeypatch) -> None:
 
 def test_regex_builder_popup_acceptance_updates_field_form(monkeypatch) -> None:
     markings = _SelectionMarkings()
+    markings._rules = object()
 
     class _FakePopup:
-        def __init__(self, _master, *, assay_text, selection, on_accept):
+        def __init__(self, _master, *, rules, assay_text, selection, on_accept):
+            assert rules is markings._rules
             assert assay_text == "Block"
             assert selection["text"] == "0,722"
             on_accept(r"\bS5\b[^\n]*?(\d+(?:[\.,]\d+)?)\s*O\.D\.", {"line": 4})
@@ -219,15 +255,20 @@ def test_regex_builder_popup_acceptance_updates_field_form(monkeypatch) -> None:
 
     assert markings.var_field_regex.get() == r"\bS5\b[^\n]*?(\d+(?:[\.,]\d+)?)\s*O\.D\."
     assert markings.var_search_mode.get() == "line"
+    assert markings.var_search_mode_label.get() == "Ab Zeile"
     assert markings.var_search_line.get() == "4"
     assert markings.var_search_after.get() == ""
+    assert markings.ent_search_line.state == tk.NORMAL
+    assert markings.ent_search_after.state == tk.DISABLED
 
 
 def test_regex_builder_popup_acceptance_updates_after_search_from(monkeypatch) -> None:
     markings = _SelectionMarkings()
+    markings._rules = object()
 
     class _FakePopup:
-        def __init__(self, _master, *, assay_text, selection, on_accept):
+        def __init__(self, _master, *, rules, assay_text, selection, on_accept):
+            assert rules is markings._rules
             assert assay_text == "Block"
             assert selection["text"] == "0,722"
             on_accept(r"\bS5\b[^\n]*?(\d+(?:[\.,]\d+)?)\s*O\.D\.", {"after": r"O\.D\."})
@@ -238,8 +279,11 @@ def test_regex_builder_popup_acceptance_updates_after_search_from(monkeypatch) -
 
     assert markings.var_field_regex.get() == r"\bS5\b[^\n]*?(\d+(?:[\.,]\d+)?)\s*O\.D\."
     assert markings.var_search_mode.get() == "after"
+    assert markings.var_search_mode_label.get() == "Ab Textmarker"
     assert markings.var_search_after.get() == r"O\.D\."
     assert markings.var_search_line.get() == ""
+    assert markings.ent_search_after.state == tk.NORMAL
+    assert markings.ent_search_line.state == tk.DISABLED
 
 
 def test_search_after_marker_from_selection_sets_escaped_literal_marker() -> None:
@@ -248,8 +292,11 @@ def test_search_after_marker_from_selection_sets_escaped_literal_marker() -> Non
     markings.on_marking_set_search_after_selection()
 
     assert markings.var_search_mode.get() == "after"
+    assert markings.var_search_mode_label.get() == "Ab Textmarker"
     assert markings.var_search_after.get() == r"O\.D\."
     assert markings.var_search_line.get() == ""
+    assert markings.ent_search_after.state == tk.NORMAL
+    assert markings.ent_search_line.state == tk.DISABLED
     assert "Marker aus Auswahl" in markings.hints[-1]
 
 

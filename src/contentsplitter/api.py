@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .contentsplitter import ContentSplitter, split_by_assay_keys
+from .contentsplitter import ContentSplitter, split_by_assay_keys as _split_by_assay_keys_impl
 from .model import AssayDescriptor
+
+__all__ = [
+    "AssayDescriptor",
+    "split_by_assay_keys",
+    "split_by_assay_name",
+    "split_by_assay_name_and_key",
+]
 
 
 # TODO: deprecated – remove after migration to split_by_assay_name_and_key
 def split_by_assay_keys(norm_text: str, assay_keys: List[str]) -> Dict[str, str]:
     """Legacy public API (temporary)."""
-    return split_by_assay_keys(norm_text, assay_keys)
+    return _split_by_assay_keys_impl(norm_text, assay_keys)
 
 
 # TODO: deprecated – remove after migration to split_by_assay_name_and_key

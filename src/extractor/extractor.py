@@ -44,11 +44,12 @@ class Extractor:
 
         out: Dict[str, Any] = {}
         lines = text.splitlines()
+        empty_keys: list[str] = []
 
         for f in fields:
             key = f.get("key")
             regex = f.get("regex")
-            req = bool(f.get("required", False))
+            # required bleibt im Ruleset erhalten, steuert die Laufzeit-Leere aber nicht mehr.
 
             if not key or not regex:
                 raise ExtractionError("field requires key+regex")
@@ -78,12 +79,18 @@ class Extractor:
 
             m = re.search(regex, search_text)
             if not m:
-                if req:
-                    raise ExtractionError(f"required field not found: {key}")
+                empty_keys.append(str(key))
                 out[key] = None
                 continue
 
-            out[key] = (m.group(1) if m.groups() else m.group(0)).strip()
+            captured = m.group(1) if m.groups() else m.group(0)
+            value = captured.strip() if captured is not None else None
+            if value is None or value == "":
+                empty_keys.append(str(key))
+            out[key] = value
+
+        if empty_keys:
+            raise ExtractionError(f"configured_fields_empty: {','.join(empty_keys)}")
 
         return out
 

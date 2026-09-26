@@ -15,6 +15,7 @@ __all__ = [
     "mark_job_pending",
     "recover_stale_jobs",
     "retry_failed_job",
+    "verify_job_content_sha256",
 ]
 
 
@@ -38,11 +39,12 @@ def enqueue_pdf_job(
     pdf_path: str,
     source: str = "watchdog",
     *,
+    expected_sha256: str | None = None,
     claim_lock_ttl_s: float | None = None,
     max_attempts: int | None = None,
 ) -> QueueJob:
     return _queue(claim_lock_ttl_s=claim_lock_ttl_s, max_attempts=max_attempts).enqueue_pdf_job(
-        project_root, pdf_path, source
+        project_root, pdf_path, source, expected_sha256=expected_sha256
     )
 
 
@@ -122,6 +124,15 @@ def recover_stale_jobs(
         processing_ttl_s=processing_ttl_s,
         claim_lock_ttl_s=claim_lock_ttl_s,
     ).recover_stale_jobs(project_root, processing_ttl_s)
+
+
+def verify_job_content_sha256(
+    project_root: str,
+    job_id: str,
+    *,
+    claim_lock_ttl_s: float | None = None,
+) -> None:
+    _queue(claim_lock_ttl_s=claim_lock_ttl_s).verify_job_content_sha256(project_root, job_id)
 
 
 def list_jobs(project_root: str) -> List[QueueJob]:

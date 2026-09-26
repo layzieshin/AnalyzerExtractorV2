@@ -91,7 +91,7 @@ def test_submit_writes_excel_and_sqlite(tmp_path: Path, monkeypatch):
     result = submit(str(pdf), str(root), output_mode="both", sqlite_path=str(sqlite_path), device_id="dev1")
 
     assert result.status == "DONE"
-    assert (root / "output" / "final" / "Assay_A.xlsx").exists()
+    assert not (root / "output" / "final" / "Assay_A.xlsx").exists()
     assert sqlite_path.exists()
 
     writes = result.details.get("writes")
@@ -109,11 +109,17 @@ def test_submit_writes_excel_and_sqlite(tmp_path: Path, monkeypatch):
     assert item["pdf_sha256"].startswith(result.job_id)
     assert len(item["assay_block_hash"]) == 64
     assert item["data"]["test"] == "TESTX"
+    state = json.loads((root / "jobs" / f"{result.job_id}.json").read_text(encoding="utf-8"))
+    assert state["status"] == "DONE"
+    assert state["excel_status"] == "awaiting_validation"
+    assert state["output_plan"]["version"] == 2
+    assert state["output_plan"]["assays"][0]["sqlite_run_id"] == item["sqlite_run_id"]
     assert item["missing_required"] == []
-    assert len(item["outputs"]) == 2
+    assert len(item["outputs"]) == 1
+    assert item["outputs"][0]["sink"] == "sqlite"
 
 
-def test_submit_reports_missing_required_in_write_item(tmp_path: Path, monkeypatch):
+def test_submit_aborts_empty_configured_fields_before_sink(tmp_path: Path, monkeypatch):
     root = tmp_path / "proj"
     (root / "rules").mkdir(parents=True)
     (root / "output" / "final").mkdir(parents=True)
@@ -148,9 +154,17 @@ def test_submit_reports_missing_required_in_write_item(tmp_path: Path, monkeypat
 
     monkeypatch.setattr("src.parser.api.parse", fake_parse)
 
-    result = submit(str(pdf), str(root), output_mode="sqlite", sqlite_path=str(root / "output" / "final" / "res.sqlite3"))
+    sqlite_path = root / "output" / "final" / "res.sqlite3"
+    result = submit(str(pdf), str(root), output_mode="sqlite", sqlite_path=str(sqlite_path))
     assert result.status == "FAILED"
-    assert "required field not found" in str(result.details.get("error", ""))
+    assert result.details.get("error") == "configured_fields_empty: plate_name,date,optional"
+    assert not sqlite_path.exists()
+
+    state = json.loads((root / "jobs" / f"{result.job_id}.json").read_text(encoding="utf-8"))
+    assert state["status"] == "FAILED"
+    assert state["error"] == "configured_fields_empty: plate_name,date,optional"
+    assert "output_plan" not in state
+    assert state.get("export_retry_available") is not True
 
 
 def test_submit_sqlite_only_skips_excel(tmp_path: Path, monkeypatch):
@@ -241,7 +255,7 @@ def test_submit_both_duplicate_uses_sqlite_ledger_before_excel(tmp_path: Path, m
     second_item = second.details["writes"][0]
     assert first_item["duplicate_status"] == "none"
     assert any(out["sink"] == "sqlite" and out["status"] == "inserted" for out in first_item["outputs"])
-    assert any(out["sink"] == "excel" and out["status"] == "created" for out in first_item["outputs"])
+    assert not any(out["sink"] == "excel" for out in first_item["outputs"])
     assert second_item["duplicate_status"] == "pending"
     assert second_item["duplicate_candidate_id"] is not None
     assert second_item["existing_run_id"] is not None

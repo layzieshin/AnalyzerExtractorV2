@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "profile": "arev2-local-cost-aware",
+  "defaults": {
+    "local_only": true,
+    "remote_agents_enabled": false,
+    "max_parallel_writers": 1,
+    "max_writer_agents": 1,
+    "max_normal_reviewers": 1,
+    "max_rework_rounds": 2,
+    "max_escalation_reviews": 1,
+    "max_full_regression_runs_after_review_go": 1,
+    "architecture_change_requires_human": true,
+    "phase_advance_requires_human": true,
+    "external_git_requires_human": true,
+    "destructive_scope_requires_human": true
+  },
+  "review_policy": {
+    "required_for": [
+      "material business logic",
+      "public API or architecture boundary",
+      "persistence or data integrity",
+      "packaging or deployment behavior"
+    ],
+    "optional_for": [
+      "documentation-only change",
+      "mechanical low-risk change"
+    ],
+    "unavailable_model_action": "ORCHESTRATOR_REVIEW_OR_HUMAN_GATE",
+    "automatic_expensive_fallback": false
+  },
+  "attestation": {
+    "configured_or_requested_is_runtime_proof": false,
+    "report_observed_model_only_with_telemetry": true,
+    "report_observed_reasoning_only_with_telemetry": true
+  },
+  "roles": {
+    "roadmap-architect": {
+      "model": "grok-4.7-high",
+      "readonly": true,
+      "product_writer": false,
+      "purpose": "Plan one Analyzer phase or package and perform a final evidence audit without editing product files."
+    },
+    "repo-explorer": {
+      "model": "grok-4.7-high",
+      "readonly": true,
+      "product_writer": false,
+      "purpose": "Investigate bounded Analyzer owners, contracts, dependencies, tests, and risks read-only."
+    },
+    "implementer": {
+      "model": "grok-4.7-high",
+      "readonly": false,
+      "product_writer": true,
+      "purpose": "Implement exactly one approved Analyzer package or rework and run targeted verification."
+    },
+    "checkpoint-reviewer": {
+      "model": "gpt-5.6-terra-medium-fast",
+      "readonly": true,
+      "product_writer": false,
+      "purpose": "Independently review one material Analyzer package against its acceptance criteria and evidence."
+    },
+    "git-steward": {
+      "model": "gpt-5.6-luna-medium-fast",
+      "readonly": false,
+      "product_writer": false,
+      "requires_explicit_user_authorization": true,
+      "purpose": "Perform only the exact Git action separately authorized by the user."
+    },
+    "escalation-reviewer": {
+      "model": "gpt-5.6-terra-high-fast",
+      "readonly": true,
+      "product_writer": false,
+      "purpose": "Reassess a material failure after the normal rework budget and return PASS or HUMAN_GATE."
+    }
+  }
+}

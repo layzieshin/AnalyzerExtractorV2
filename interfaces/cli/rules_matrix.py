@@ -179,7 +179,7 @@ def _analyze_pdf(root: Path, pdf: Path, mode: str) -> dict[str, Any]:
             row["status"] = "red"
             if "lot_id not found" in msg:
                 row["criteria"]["lot_id"] = "red"
-            elif "required field not found" in msg:
+            elif "required field not found" in msg or msg.startswith("configured_fields_empty:"):
                 row["criteria"]["required_fields"] = "red"
             elif "dedupe basis missing" in msg:
                 row["criteria"]["dedupe"] = "red"

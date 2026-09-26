@@ -181,13 +181,31 @@ class DbWriter:
             )
 
         existing = conn.execute(
-            "SELECT id FROM runs WHERE assay_key = ? AND dedupe_key = ?",
+            """
+            SELECT id, job_id, pdf_sha256, assay_block_hash, payload_json
+            FROM runs WHERE assay_key = ? AND dedupe_key = ?
+            """,
             (record.assay_key, record.dedupe_key),
         ).fetchone()
         if existing is None:
             return DbWriteResult(sqlite_path=sqlite_path, table_name="runs", status="skipped")
 
         existing_run_id = int(existing[0])
+        if (
+            str(job_id or "")
+            and str(pdf_sha256 or "")
+            and str(assay_block_hash or "")
+            and str(existing[1] or "") == str(job_id)
+            and str(existing[2] or "") == str(pdf_sha256)
+            and str(existing[3] or "") == str(assay_block_hash)
+            and _loads_json_object(existing[4]) == dict(record.data)
+        ):
+            return DbWriteResult(
+                sqlite_path=sqlite_path,
+                table_name="runs",
+                status="already_persisted",
+                run_id=existing_run_id,
+            )
         candidate_id = self._ensure_duplicate_candidate(
             conn,
             record,

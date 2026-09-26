@@ -70,7 +70,7 @@ def test_extractor_fails_if_v2_dedupe_basis_missing():
             "excel_rules": {},
         },
     )
-    text = "Lot: LOTC"
+    text = "Lot: LOTC\nX: PRESENT"
     with pytest.raises(ExtractionError, match="dedupe basis missing"):
         extract_record(text, ruleset)
 
@@ -98,3 +98,72 @@ def test_extractor_different_device_changes_v2_key():
     rec1 = extract_record(text, ruleset, device_id="dev1")
     rec2 = extract_record(text, ruleset, device_id="dev2")
     assert rec1.dedupe_key != rec2.dedupe_key
+
+
+def _basis_ruleset(fields: list[dict]) -> RuleSet:
+    return RuleSet(
+        assay_key="(5555)",
+        ruleset_file="E.json",
+        data={
+            "assay_name": "E",
+            "assay_key": "(5555)",
+            "lot_rule": {"regex": r"Lot:\s*(\w+)"},
+            "extract_rules": {"fields": fields},
+            "excel_rules": {},
+        },
+    )
+
+
+def test_extractor_rejects_unmatched_optional_configured_fields():
+    ruleset = _basis_ruleset(
+        [
+            {"key": "plate_name", "regex": r"Plate:\s*(\w+)", "required": True},
+            {"key": "note", "regex": r"Note:\s*(\w+)", "required": False},
+            {"key": "comment", "regex": r"Comment:\s*(\w+)", "required": False},
+        ]
+    )
+    text = "Lot: LOTE\nPlate: P1"
+    with pytest.raises(ExtractionError, match=r"configured_fields_empty: note,comment"):
+        extract_record(text, ruleset)
+
+
+def test_extractor_rejects_blank_capture_and_accepts_zero():
+    ruleset = _basis_ruleset(
+        [
+            {"key": "count", "regex": r"Count:\s*(\S+)", "required": False},
+            {"key": "note", "regex": r"Note:\s*(.*)", "required": False},
+        ]
+    )
+    with pytest.raises(ExtractionError, match=r"configured_fields_empty: note"):
+        extract_record("Lot: LOTE\nCount: 0\nNote:    ", ruleset)
+
+    complete = _basis_ruleset(
+        [
+            {"key": "PLATTE", "regex": r"Platte:\s*(\S+)", "required": False},
+            {"key": "DATUM", "regex": r"Datum:\s*(\S+)", "required": False},
+            {"key": "ZEIT", "regex": r"Zeit:\s*(\S+)", "required": False},
+            {"key": "TEST", "regex": r"Test:\s*(\S+)", "required": False},
+            {"key": "count", "regex": r"Count:\s*(\S+)", "required": False},
+        ]
+    )
+    rec = extract_record(
+        "Lot: LOTE\nPlatte: P1\nDatum: 01.01.2026\nZeit: 10:10:00\nTest: Assay.asy\nCount: 0",
+        complete,
+    )
+    assert rec.data["count"] == "0"
+    assert rec.dedupe_key == "v2|DEFAULT_DEVICE|P1|2026-01-01|10:10:00|Assay.asy"
+
+
+def test_extractor_treats_nonparticipating_capture_group_as_empty():
+    ruleset = _basis_ruleset(
+        [
+            {
+                "key": "note",
+                "regex": r"(?:Note:\s*(\w+))?",
+                "required": False,
+            }
+        ]
+    )
+
+    with pytest.raises(ExtractionError, match=r"configured_fields_empty: note"):
+        extract_record("Lot: LOTE", ruleset)

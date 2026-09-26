@@ -2,10 +2,12 @@
 
 ## Ziel
 
-Der kanonische Onedir-/ZIP-Build liefert die Test-App (`test_app_main.py`) als
-portables Feldversuch-Paket fuer Windows-PCs **ohne Python-Installation**.
+Der kanonische Onedir-/ZIP-Build liefert die Produkt-Shell (`test_app_main.py` →
+`AnalyzerDesktopApp`) als portables Feldversuch-Paket fuer Windows-PCs **ohne
+Python-Installation**.
 
-Fenstertitel nach Start: **AREV2 Test-App**
+Fenstertitel nach Start: **Analyzer Result Extractor** (Sidebar-Ansichten). Legacy-Tab-UI
+nur mit `ARE_LEGACY_UI=1` (Titel **AREV2 Test-App**).
 
 ## Build (Entwicklungs-PC)
 
@@ -55,60 +57,62 @@ $env:ARE_HOME = "D:\Apps\AnalyzerResultExtractorV2"
 
 Ohne `ARE_HOME` ist der App-Root das Verzeichnis der EXE.
 
-## Erster Start — Checkliste
+## Erster Start — Checkliste (Produkt-Shell)
 
 ### 1. App oeffnen
 
-Doppelklick auf `AnalyzerResultExtractorV2.exe`. Tab **OPTIONS** pruefen.
+Doppelklick auf `AnalyzerResultExtractorV2.exe`. Ansicht **Einstellungen** pruefen.
 
 ### 2. Watch-Ordner setzen
 
-Unter **OPTIONS** den Pfad zum PDF-Eingangsordner einstellen (Default:
-`input/watch/` relativ zum App-Ordner). Ordner muss existieren und lesbar sein.
+Unter **Einstellungen** Eingabe- und Archivordner fuer Auto-Import setzen (Default:
+`input/watch/` relativ zum App-Ordner). Ordner muessen existieren und lesbar sein.
+Auto-Import aktivieren und Einstellungen speichern.
 
 ### 3. Gerät waehlen
 
-In **OPTIONS** das Geraet aus `config/devices.json` waehlen (falls konfiguriert).
-Ohne Konfiguration gilt der Runtime-Default (`DEFAULT_DEVICE`).
+In **Einstellungen** das Geraet waehlen (falls konfiguriert). Ohne Konfiguration gilt
+der Runtime-Default (`DEFAULT_DEVICE`).
 
-### 4. Arbeitsliste fuellen
+### 4. PDFs verarbeiten
 
-Tab **EXTRACTOR**:
+Ansicht **Auswertung**:
 
 | Aktion | Zweck |
 |--------|-------|
-| **Ergebnisse suchen** | PDFs aus Watch-Ordner in Arbeitsliste uebernehmen |
-| **Dateien hinzufuegen** | Einzelne PDFs manuell vormerken |
-| **Automatische Suche starten** | Zyklischer Scan des Watch-Ordners (In-App) |
+| **PDFs auswählen** | Manuelle PDFs einreihen; die Verarbeitung startet automatisch |
+| Auto-Import | Zyklischer Watch (nach Speichern der Einstellungen) |
 
-Die Arbeitsliste ist Source of Truth. Gleiche PDFs werden dedupliziert.
+Ergebnisse unter **Ergebnisse** (Berichte, Occurrences, PDF/Ausgabeordner oeffnen).
+Klaerfaelle und Duplikat-Kandidaten unter **Diagnose**.
 
-### 5. Extraktion starten
+### 5. Regelwerke
 
-**Extraktion starten** verarbeitet wartende Jobs. Ergebnisse landen unter
-`output/final/` (Excel) und ggf. SQLite (je nach `output_mode` in OPTIONS).
+Ansicht **Regelwerke**: Inventar, Integritaetspruefung, Rule Editor oeffnen.
 
-**Aktualisieren** zeigt Queue-Status; technische Details auch im Tab **ADMIN**.
+Im **portablen Paket** startet der Rule Editor dieselbe `AnalyzerResultExtractorV2.exe`
+neu mit `ARE_START_RULE_EDITOR=1` (intern gesetzt). Es gibt **keine** separate
+Rule-Editor-EXE und auf dem Ziel-PC ist **kein Python** erforderlich.
 
-## Fehlgeschlagene Jobs — Nacharbeit
+Auf dem Entwicklungs-PC alternativ: `python rule_editor_main.py`.
 
-Wenn ein Job **fehlgeschlagen** ist (z. B. unbekannter Assay, fehlende Regeln):
+## Fehlgeschlagene Jobs — Nacharbeit (Default-Produkt-Shell)
 
-1. Tab **RULE SUITE** (Nacharbeit) oeffnen
-2. Fehlgeschlagenen Job in der Nacharbeitsliste waehlen
-3. **Assay-Kandidaten** anzeigen lassen (read-only Erkennung aus normalisiertem Dump)
-4. **Draft aus Kandidat erstellen** oder Felder aus bestehendem Regelwerk uebernehmen
-5. Rule Editor starten (`rule_editor_main.py` — nur auf Entwicklungs-PC mit Python,
-   oder Draft-Datei unter `rules/drafts/` auf Entwicklungs-PC bearbeiten und Rules
-   ins Paket neu bauen)
+Wenn eine Verarbeitung fehlschlaegt (z. B. unbekannter Assay, fehlende Regeln):
 
-### Rule Editor auf Entwicklungs-PC
+1. Ansicht **Diagnose** oeffnen
+2. Fehlgeschlagenen Vorgang in der Liste waehlen
+3. **Details** — technische Diagnose und Assay-Kandidaten anzeigen
+4. Kandidat waehlen, **Draft aus Kandidat** bestaetigen — legt bei Bedarf einen Draft an
+5. Rule Editor oeffnen (aus **Regelwerke** oder nach Draft-Handoff; im Paket dieselbe EXE)
+6. Draft bearbeiten, validieren, aktivieren (Entwicklungs-PC oder nach Rules-Update im Paket)
+7. Zurueck in **Diagnose**: **Erneut verarbeiten** fuer den betroffenen Job
 
-```powershell
-python rule_editor_main.py
-```
+Hinweis: Erneutes Einreihen oder Auto-Import reaktiviert **FAILED**-Jobs nicht automatisch.
 
-Im Draft-Tab **Regelwerk-Verwaltung**:
+### Rule Editor — Lifecycle (Kurz)
+
+Im Rule Editor (Inventar-Startseite **Regelwerke**):
 
 - Inventar filtern: Alle / Aktiv / Drafts / Inaktiv
 - Draft bearbeiten, validieren, **aktivieren**
@@ -116,22 +120,29 @@ Im Draft-Tab **Regelwerk-Verwaltung**:
 - Drafts/Inaktive: **Loeschen** archiviert nach `rules/trash/`
 
 Nach Aktivierung neues Regelwerk ins Feldversuch-Paket kopieren (Rebuild) oder
-`rules/` manuell auf Ziel-PC aktualisieren (nur mit Bedacht, Index muss passen).
+`rules/` auf Ziel-PC aktualisieren (nur mit Bedacht, Index muss passen).
 
-### Job erneut starten
+## Excel-Ausgabe nach gespeichertem Ergebnis
 
-Zurueck in der Test-App, Tab **EXTRACTOR**:
+SQLite ist die strukturierte Ablage. Excel ist der nachgelagerte Export. Sind die Ergebnisdaten gespeichert und scheitert nur die Excel-Datei, zeigt Auswertung und Diagnose genau:
 
-1. Fehlgeschlagenen Job in der Arbeitsliste waehlen
-2. **Erneut starten** — setzt den Job explizit auf `Wartet`
-3. **Extraktion starten**
+`Ergebnis gespeichert – Excel-Ausgabe fehlgeschlagen`
 
-Hinweis: Erneutes Suchen/Hinzufuegen reaktiviert **FAILED**-Jobs nicht automatisch.
+Die Fehlerart in **Diagnose** ist `Excel-Ausgabe`.
 
-## Duplikate
+1. Ansicht **Diagnose** oeffnen und den Eintrag waehlen.
+2. **Erneut verarbeiten** — das ist die vorhandene Diagnose-Aktion, kein zweiter Button.
+3. Wiederholt wird nur die fehlgeschlagene Excel-Ausgabe aus dem eingefrorenen Plan. Die PDF und die aktuellen Regelwerke werden nicht neu gelesen. Das bereits gespeicherte SQLite-Ergebnis wird nicht erneut geschrieben.
+4. Bleibt die Excel-Datei gesperrt, bleibt der Vorgang fehlgeschlagen und erneut ausfuehrbar. Nach erfolgreichem Export wird der Lauf `Fertig`. Watch-Importe werden erst dann archiviert.
 
-Tab **DUPLIKATE** listet SQLite-Duplicate-Kandidaten. Vergleich anzeigen, bei Bedarf
-Kandidat **verwerfen**. Overwrite/Add/Excel-Recovery sind noch nicht implementiert.
+`Excel-Ausgabe fehlgeschlagen` ohne den Zusatz „Ergebnis gespeichert“ bedeutet, dass keine strukturierte SQLite-Ablage fuer diesen Lauf vorliegt (reiner Excel-Modus oder SQLite war nicht erfolgreich). Auch dann ist **Erneut verarbeiten** die vorhandene Aktion; ohne versionierten Plan laeuft die Verarbeitung vollstaendig erneut.
+
+## Duplikate und Ergebnisreview (Default)
+
+- **Ergebnisse** — gespeicherte Berichte, Detailansicht, Occurrences
+- **Diagnose** — ausstehende Duplikat-Kandidaten unter **Klärfälle (Duplikate)**: **Details**, Vergleich, bei Bedarf **Verwerfen**
+
+Overwrite und Add fuer Duplikate sind nicht implementiert. Es gibt keine Aktion, die ein bestehendes Ergebnis ueberschreibt oder als zusaetzliche Messung anlegt.
 
 ## Wartung auf dem Ziel-PC
 
@@ -142,15 +153,29 @@ Kandidat **verwerfen**. Overwrite/Add/Excel-Recovery sind noch nicht implementie
 | `rules/` | Aktive Regelwerke (nicht manuell editieren ohne Ruecksprache) |
 | `input/watch/` | PDF-Eingang |
 
-Bei Problemen: Tab **LOGS** und **ADMIN** pruefen.
+Bei Problemen: Ansicht **Diagnose** (Fehlerjobs, Klärfälle) und **Auswertung** (letzte Laeufe).
+Technische Queue-Rohdaten nur in der Legacy-UI (`ARE_LEGACY_UI=1`, optional `ARE_SHOW_ADMIN=1`).
+
+## LegacyTestApp — Support-Fallback
+
+Nur bei Bedarf (Support/Vergleich):
+
+```powershell
+$env:ARE_LEGACY_UI = "1"
+.\AnalyzerResultExtractorV2.exe
+```
+
+Tab-Workflow (**EXTRACTOR**, **OPTIONS**, **RULE SUITE**, **DUPLIKATE**, **DATENBANK**):
+siehe `docs/AP14_TEST_APP.md` (Abschnitt LegacyTestApp).
 
 ## Abgrenzung
 
 | Enthalten | Nicht enthalten |
 |-----------|-----------------|
-| Test-App (Arbeitsliste, Queue-Worker-Logik) | Separater Watchdog-/Worker-Prozess |
-| Aktive Rules, Runtime-Ordner | Rule Editor als EXE |
-| Duplikat-Review (Verwerfen) | `rules/drafts/` aus Entwicklungs-PC |
+| Produkt-Shell (Auswertung, Ergebnisse, Regelwerke, Einstellungen, Diagnose) | Separater Watchdog-/Worker-Prozess aus der GUI |
+| Rule Editor ueber dieselbe EXE (`ARE_START_RULE_EDITOR=1`) | Separate Rule-Editor-EXE |
+| Aktive Rules, Runtime-Ordner | `rules/drafts/` aus Entwicklungs-PC im Bundle |
+| Duplikat-Review (Anzeigen, Verwerfen) in Diagnose | Overwrite/Add fuer Duplikate |
 
 Legacy Direktmodus (`gui_min.py`) ist nicht Teil des Feldversuch-Pakets.
 

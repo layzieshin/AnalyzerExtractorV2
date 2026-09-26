@@ -14,3 +14,4 @@ class QueueJob:
     worker_id: str = ""
     attempts: int = 0
     last_error: str = ""
+    content_sha256: str = ""

@@ -50,6 +50,9 @@ def humanize_job_error(error: str | None = None, reason: str | None = None) -> s
         return "SQLite-Schreibfehler."
     if "required field not found" in err:
         return f"Pflichtfeld fehlt: {err}"
+    if err.startswith("configured_fields_empty:"):
+        fields = err.partition(":")[2].strip()
+        return f"Regel-Nacharbeit erforderlich: Felder nicht extrahiert ({fields})."
     if "dedupe basis missing" in err:
         return f"Dedupe-Basis unvollstaendig: {err}"
     if "dedupe fields empty" in err:
@@ -664,7 +667,6 @@ def format_runtime_options_summary(options: Mapping[str, object]) -> List[str]:
         f"SQLite: {_string_or_empty(options.get('sqlite_path')) or '-'}",
         f"Watch: {_string_or_empty(options.get('watch_dir')) or '-'}",
         f"Geraet: {_string_or_empty(options.get('device_id')) or '-'}",
-        f"Watch-Modus: {_string_or_empty(options.get('watch_mode')) or '-'}",
     ]
     return lines
 
@@ -924,7 +926,8 @@ def format_assay_display_label(
     key = str(assay_key or "").strip()
     name = str(assay_name or "").strip()
     if not name:
-        return f"Unbekannter Assay ({key})" if key else "Unbekannter Assay"
+        suffix = _assay_key_suffix(key)
+        return f"Unbekannter Assay ({suffix})" if suffix else "Unbekannter Assay"
     if ambiguous_names and name in ambiguous_names:
         suffix = _assay_key_suffix(key)
         return f"{name} ({suffix})" if suffix else name

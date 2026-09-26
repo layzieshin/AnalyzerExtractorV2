@@ -2,102 +2,113 @@
 from __future__ import annotations
 
 HELP_TEXTS: dict[str, str] = {
+    "search_pattern": (
+        "Die Erkennungsregel (Regex) legt fest, welcher Teil des Berichttexts als Wert übernommen wird. "
+        "Markieren Sie am besten zuerst den gewünschten Wert im PDF-Testbericht."
+    ),
+    "required_field": (
+        "Ist diese Option aktiv, muss das Feld im Bericht gefunden werden. "
+        "Fehlt es, wird die Auswertung als fehlerhaft behandelt."
+    ),
+    "search_from": (
+        "Der Suchbereich begrenzt die Suche auf einen späteren Bereich des Berichts. "
+        "Das ist hilfreich, wenn derselbe Begriff mehrfach vorkommt."
+    ),
+    "pattern_from_selection": (
+        "Muster aus Markierung erstellt aus dem markierten Beispieltext einen Vorschlag für die Erkennungsregel. "
+        "Prüfen Sie den Vorschlag anschließend mit 'Regex testen'."
+    ),
     "draft_control": (
-        "Hier starten Sie immer. "
-        "Bestehendes Regelset bearbeiten: Assay auswaehlen und 'Draft aus aktivem Assay' klicken. "
-        "Neues Regelset anlegen: neuen assay_key + assay_name eintragen und 'Neues Draft mit Headern' "
-        "oder 'Aus aktivem ableiten' verwenden."
+        "Im Inventar wählen Sie eine bestehende Regel. "
+        "'Regel aus PDF erstellen oder prüfen …' startet immer neutral. "
+        "'Neue Regel aus PDF …' startet denselben Ablauf für eine Neuanlage, weiterhin mit PDF zuerst."
     ),
     "pdf_block": (
-        "Waehlen Sie hier eine Test-PDF und klicken Sie auf 'Text laden'. "
-        "Markieren Sie Text im Assay-Block, lassen sich Regex vorschlagen und legen Felder "
-        "neu an oder passen bestehende direkt im Markierungs-Panel an."
+        "Wählen Sie eine Test-PDF und klicken Sie auf 'PDF-Text laden'. "
+        "Markieren Sie Text im Bericht, lassen Sie eine Erkennungsregel vorschlagen und legen Sie Felder an."
     ),
     "fields": (
-        "Hier legen Sie fest, welche Werte aus der PDF gelesen werden sollen. "
-        "Ein Feld besteht aus Name (key), Suchmuster (regex) und optionalen Einstellungen "
-        "wie 'required' oder 'search_from'."
+        "Hier legen Sie fest, welche Werte aus der PDF gelesen werden. "
+        "Ein Feld besteht aus Feldschlüssel, Erkennungsregel (Regex) und dem Suchbereich."
     ),
     "meta_actions": (
-        "Hier pflegen Sie Assay-Name, Lot-Regel, Dedupe-Felder und Spalten-Mapping fuer Excel. "
-        "Danach speichern, validieren, Preview ausfuehren und erst dann aktivieren."
+        "Unter Regeldetails pflegen Sie Assay-Name, Los-/Chargenkennung und die Exportdateinamen. "
+        "Die Excel-Spaltenzuordnung entsteht im Feldeditor. Danach speichern, strukturell prüfen, "
+        "die Extraktion mit PDF testen und erst dann den Entwurf aktivieren."
     ),
     "validation": (
-        "Die Validierung prueft, ob Ihr Regelset technisch sauber ist. "
-        "Typische Fehler: leere regex, falsche search_from-Werte oder Mapping auf nicht vorhandene Felder."
+        "Die Strukturprüfung prüft, ob die Regeldatei technisch sauber ist. "
+        "Typische Fehler: leere Erkennungsregel, falscher Suchbereich oder eine Excel-Spalte ohne Feld."
     ),
     "preview": (
-        "Preview testet Ihr Draft mit einer echten PDF, ohne produktive Dateien zu ueberschreiben. "
-        "So sehen Sie vorab, ob die richtigen Werte extrahiert werden."
+        "Extraktion mit PDF testen prüft den Entwurf mit einer echten PDF, ohne produktive Dateien zu überschreiben."
     ),
     "activate": (
-        "Aktivieren uebernimmt den Draft in die produktiven Regeln. "
+        "Entwurf aktivieren übernimmt den Entwurf in die produktiven Regeln. "
         "Bei bestehendem Assay wird die alte Regel ersetzt, bei neuem Assay wird ein neuer Eintrag angelegt."
     ),
     "diff": (
-        "Diff zeigt, was sich gegenueber der aktiven Regel geaendert hat. "
-        "Pruefen Sie vor Aktivierung vor allem Felder, lot_rule und column_mapping."
+        "Änderungen anzeigen zeigt, was sich gegenüber der aktiven Regel geändert hat. "
+        "Prüfen Sie vor der Aktivierung vor allem Felder, Los-/Chargenkennung und die Excel-Spaltenzuordnung."
     ),
     "batch_regex": (
-        "Batch-Regex-Check prueft alle Felder in einem Lauf. "
+        "Alle Felder testen prüft jede Erkennungsregel in einem Lauf. "
         "Sie sehen pro Feld: Treffer, kein Treffer oder Fehler."
     ),
     "undo_redo": (
-        "Mit Undo/Redo koennen Sie Aenderungen schnell rueckgaengig machen oder wiederherstellen. "
-        "Shortcuts: Ctrl+Z und Ctrl+Y."
+        "Mit Rückgängig und Wiederholen machen Sie Änderungen zurück oder stellen sie wieder her. "
+        "Shortcuts: Strg+Z und Strg+Y."
     ),
     "autosave": (
-        "Auto-Save speichert Ihren Draft automatisch alle 45 Sekunden, wenn es neue Aenderungen gibt. "
-        "Die Uhrzeit der letzten automatischen Speicherung wird rechts angezeigt."
+        "Automatisch speichern sichert den Entwurf alle 45 Sekunden, wenn es neue Änderungen gibt. "
+        "Der Zeitpunkt der letzten automatischen Speicherung wird daneben angezeigt."
     ),
 }
 
 STEP_BY_STEP_GUIDE: list[dict[str, str]] = [
     {
-        "title": "1) Start: Draft anlegen oder laden",
+        "title": "1) Regel aus PDF erstellen oder prüfen",
         "text": (
-            "Wenn Sie ein bestehendes Regelset bearbeiten wollen: Assay auswaehlen und "
-            "'Draft aus aktivem Assay' klicken.\n\n"
-            "Wenn Sie ein neues Regelset brauchen: assay_key + assay_name eintragen und "
-            "'Neues Draft mit Headern' oder 'Aus aktivem ableiten' nutzen."
+            "Die Schaltfläche in der Kopfzeile startet immer neutral. "
+            "Wählen Sie dort ausdrücklich eine neue Regel aus einer PDF oder einen vorhandenen Entwurf.\n\n"
+            "'Neue Regel aus PDF …' im Inventar startet denselben Ablauf direkt für eine Neuanlage, weiterhin mit PDF zuerst."
         ),
     },
     {
         "title": "2) Test-PDF laden",
         "text": (
-            "Im Tab 'PDF / Assay-Text' eine Test-PDF waehlen und 'Text laden' klicken.\n\n"
-            "Text markieren, Regex vorschlagen lassen und Felder direkt im Markierungs-Panel "
-            "neu anlegen oder bestehende anpassen."
+            "Im Bereich 'PDF-Testbericht' eine Test-PDF wählen und 'PDF-Text laden' klicken.\n\n"
+            "Text markieren, eine Erkennungsregel vorschlagen lassen und Felder direkt bearbeiten."
         ),
     },
     {
         "title": "3) Felder pflegen",
         "text": (
-            "Im Bereich 'Felder' key + regex setzen. Optional: required und search_from.\n\n"
-            "Mit 'Regex testen' pruefen Sie ein Feld sofort. Mit 'Batch-Regex-Check' testen Sie alle Felder auf einmal."
+            "In der Feldliste ein Feld wählen und rechts Feldschlüssel und Erkennungsregel pflegen.\n\n"
+            "Mit 'Regex testen' prüfen Sie ein Feld sofort. 'Alle Felder testen' liegt unter Regeldetails."
         ),
     },
     {
-        "title": "4) Meta und Mapping pflegen",
+        "title": "4) Regeldetails",
         "text": (
-            "Im Bereich 'Meta / Excel / Aktionen' assay_name, lot_rule.regex, dedupe_fields und "
-            "column_mapping pflegen.\n\n"
-            "Speichern Sie danach den Draft."
+            "Unter Regeldetails Assay-Name, Los-/Chargenkennung und Exportdateinamen pflegen.\n\n"
+            "Die Excel-Spaltenzuordnung wird im Feldeditor gesetzt und dort nur angezeigt. "
+            "Speichern Sie danach den Entwurf."
         ),
     },
     {
-        "title": "5) Validieren und Preview",
+        "title": "5) Strukturprüfung und Extraktionstest",
         "text": (
-            "Klicken Sie 'Draft validieren'. Beheben Sie Fehler aus der Liste.\n\n"
-            "Danach 'Preview (extract)' starten, um mit echter PDF zu pruefen, "
+            "Klicken Sie 'Entwurf strukturell prüfen'. Beheben Sie Fehler aus der Liste.\n\n"
+            "Danach 'Extraktion mit PDF testen', um mit echter PDF zu prüfen, "
             "ob die erwarteten Werte extrahiert werden."
         ),
     },
     {
-        "title": "6) Diff pruefen und aktivieren",
+        "title": "6) Änderungen prüfen und aktivieren",
         "text": (
-            "Mit 'Diff anzeigen' kontrollieren Sie die Unterschiede zur aktiven Regel.\n\n"
-            "Erst wenn alles passt: 'Aktivieren'. Bestehende Regeln werden dabei ersetzt, "
+            "Mit 'Änderungen anzeigen' kontrollieren Sie die Unterschiede zur aktiven Regel.\n\n"
+            "Erst wenn alles passt: 'Entwurf aktivieren'. Bestehende Regeln werden dabei ersetzt, "
             "neue Assays werden neu angelegt."
         ),
     },

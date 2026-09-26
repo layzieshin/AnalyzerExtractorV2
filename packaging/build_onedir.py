@@ -24,6 +24,18 @@ ZIP_PATH = DIST_ROOT / f"{APP_NAME}.zip"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+DESKTOP_RUNTIME_IMPORTS = [
+    "interfaces.tk.desktop_theme",
+    "interfaces.tk.task_runner",
+    "interfaces.tk.view_models",
+    "interfaces.tk.views",
+    "interfaces.tk.widgets.dialogs",
+    "src.application.api",
+    "src.processing.api",
+    "src.ingestion.api",
+    "src.runtime.api",
+]
+
 REQUIRED_IMPORTS = [
     "fitz",
     "openpyxl",
@@ -43,6 +55,15 @@ REQUIRED_IMPORTS = [
     "src.testui.api",
     "src.resultstore.api",
     "src.rulesuite.api",
+    *DESKTOP_RUNTIME_IMPORTS,
+]
+
+PYINSTALLER_HIDDEN_IMPORTS = [
+    "fitz",
+    "pymupdf",
+    "openpyxl",
+    "rule_editor_main",
+    *DESKTOP_RUNTIME_IMPORTS,
 ]
 
 SECRET_NAME_MARKERS = (
@@ -137,15 +158,9 @@ def _run_pyinstaller(*, diet_experiment: bool = False) -> None:
         "_internal",
         "--paths",
         str(PROJECT_ROOT),
-        "--hidden-import",
-        "fitz",
-        "--hidden-import",
-        "pymupdf",
-        "--hidden-import",
-        "openpyxl",
-        "--hidden-import",
-        "rule_editor_main",
     ]
+    for hidden_import in PYINSTALLER_HIDDEN_IMPORTS:
+        command.extend(["--hidden-import", hidden_import])
 
     collect_all_packages = ["openpyxl"]
     if not diet_experiment:

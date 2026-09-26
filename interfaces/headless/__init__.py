@@ -1,0 +1,1 @@
+"""Headless adapter entry points."""

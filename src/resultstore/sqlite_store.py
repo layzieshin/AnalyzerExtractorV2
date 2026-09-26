@@ -1,10 +1,19 @@
 """Read-only SQLite access for result ledger inspection."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_UTC = timezone.utc
+_UTC_MIN = datetime.min.replace(tzinfo=_UTC)
+
+# Rows written during one PDF processing batch are grouped when their
+# normalized pdf_path matches and created_at falls within this window.
+LEGACY_REPORT_TIME_WINDOW_S = 5.0
 
 KNOWN_RUN_COLUMNS = (
     "id",
@@ -58,6 +67,11 @@ def get_result_store_status(store_spec: dict[str, Any]) -> dict[str, Any]:
             if missing:
                 base["schema_warnings"].append(
                     "Fehlende Kernspalten: " + ", ".join(missing)
+                )
+            legacy_missing = _missing_legacy_report_columns(columns)
+            if legacy_missing:
+                base["schema_warnings"].append(
+                    "Legacy-Berichte erfordern Spalten: " + ", ".join(legacy_missing)
                 )
             base["message"] = "Datenbank bereit."
             return base
@@ -114,16 +128,17 @@ def list_result_runs(
     assay_key: str | None = None,
     charge: str | None = None,
     limit: int = 500,
+    offset: int = 0,
 ) -> dict[str, Any]:
     status = get_result_store_status(store_spec)
     if not status.get("available"):
-        return {"runs": [], "limit": limit, "truncated": False, "total_returned": 0}
+        return {"runs": [], "limit": limit, "offset": offset, "truncated": False, "total_returned": 0}
 
     path = _resolve_path(store_spec)
     columns = status.get("columns") or []
     select_cols = [col for col in KNOWN_RUN_COLUMNS if col in columns]
     if not select_cols:
-        return {"runs": [], "limit": limit, "truncated": False, "total_returned": 0}
+        return {"runs": [], "limit": limit, "offset": offset, "truncated": False, "total_returned": 0}
 
     where_parts: list[str] = []
     params: list[Any] = []
@@ -136,8 +151,8 @@ def list_result_runs(
 
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
     order_sql = "ORDER BY id DESC" if "id" in columns else ""
-    query = f"SELECT {', '.join(select_cols)} FROM runs {where_sql} {order_sql} LIMIT ?"
-    params.append(int(limit) + 1)
+    query = f"SELECT {', '.join(select_cols)} FROM runs {where_sql} {order_sql} LIMIT ? OFFSET ?"
+    params.extend((int(limit) + 1, max(0, int(offset))))
 
     with _connect_readonly(path) as conn:
         rows = conn.execute(query, params).fetchall()
@@ -150,9 +165,80 @@ def list_result_runs(
     return {
         "runs": runs,
         "limit": limit,
+        "offset": max(0, int(offset)),
         "truncated": truncated,
         "total_returned": len(runs),
     }
+
+
+def compute_report_id(
+    job_id: str = "",
+    *,
+    pdf_path: str = "",
+    created_at: str = "",
+    run_id: int | None = None,
+) -> str:
+    """Deterministic report id aligned with ``_group_runs_into_reports``."""
+    job_text = str(job_id or "").strip()
+    if job_text:
+        return job_text
+    normalized_path = _normalize_pdf_path(pdf_path)
+    basis = _legacy_report_id_basis(
+        normalized_path,
+        created_at_anchor=_canonical_created_at_iso(created_at),
+        source_row_id=int(run_id) if run_id is not None else None,
+    )
+    return _hash_legacy_report_id(basis)
+
+
+def list_report_summaries(store_spec: dict[str, Any], *, limit: int = 50) -> dict[str, Any]:
+    status = get_result_store_status(store_spec)
+    if not status.get("available"):
+        return {"reports": [], "limit": limit, "total_returned": 0}
+
+    path = _resolve_path(store_spec)
+    columns = status.get("columns") or []
+    select_cols = [col for col in KNOWN_RUN_COLUMNS if col in columns]
+    if not select_cols:
+        return {"reports": [], "limit": limit, "total_returned": 0}
+
+    with _connect_readonly(path) as conn:
+        grouped = _group_runs_into_reports(conn, select_cols, columns)
+
+    summaries: list[dict[str, Any]] = []
+    for report_id, runs in grouped.items():
+        summaries.append(_report_summary_from_runs(report_id, runs))
+    summaries.sort(
+        key=lambda item: (
+            str(item.get("latest_created_at") or ""),
+            str(item.get("report_id") or ""),
+        ),
+        reverse=True,
+    )
+    capped = summaries[: int(limit)]
+    return {"reports": capped, "limit": int(limit), "total_returned": len(capped)}
+
+
+def get_report_runs(store_spec: dict[str, Any], report_id: str) -> dict[str, Any] | None:
+    target = str(report_id or "").strip()
+    if not target:
+        return None
+    status = get_result_store_status(store_spec)
+    if not status.get("available"):
+        return None
+
+    path = _resolve_path(store_spec)
+    columns = status.get("columns") or []
+    select_cols = [col for col in KNOWN_RUN_COLUMNS if col in columns]
+    if not select_cols:
+        return None
+
+    with _connect_readonly(path) as conn:
+        grouped = _group_runs_into_reports(conn, select_cols, columns)
+    matched = grouped.get(target)
+    if not matched:
+        return None
+    return _report_detail_payload(target, matched)
 
 
 def get_result_run(store_spec: dict[str, Any], run_id: int) -> dict[str, Any] | None:
@@ -227,6 +313,182 @@ def _missing_core_columns(columns: list[str]) -> list[str]:
     return missing
 
 
+def _missing_legacy_report_columns(columns: list[str]) -> list[str]:
+    missing: list[str] = []
+    if "pdf_path" not in columns:
+        missing.append("pdf_path")
+    if "created_at" not in columns:
+        missing.append("created_at")
+    return missing
+
+
+def _normalize_pdf_path(pdf_path: str) -> str:
+    text = str(pdf_path or "").strip()
+    if not text:
+        return ""
+    return str(Path(text).resolve(strict=False))
+
+
+def _parse_created_at(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=_UTC)
+    return parsed.astimezone(_UTC)
+
+
+def _canonical_created_at_iso(value: Any) -> str | None:
+    parsed = _parse_created_at(value)
+    if parsed is None:
+        return None
+    return parsed.isoformat()
+
+
+def _legacy_report_id_basis(
+    normalized_path: str,
+    *,
+    created_at_anchor: str | None = None,
+    source_row_id: int | None = None,
+) -> str:
+    path = normalized_path or "unknown"
+    if created_at_anchor:
+        return f"legacy|{path}|{created_at_anchor}"
+    if source_row_id is not None:
+        return f"legacy|{path}|row|{int(source_row_id)}"
+    return f"legacy|{path}|unknown"
+
+
+def _hash_legacy_report_id(basis: str) -> str:
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _source_row_id(run: dict[str, Any], *, sqlite_rowid: int | None = None) -> int:
+    run_id = run.get("id")
+    if run_id is not None:
+        return int(run_id)
+    if sqlite_rowid is not None:
+        return int(sqlite_rowid)
+    internal = run.get("_source_rowid")
+    if internal is not None:
+        return int(internal)
+    raise ValueError("missing_source_row_identity")
+
+
+def _legacy_cluster_report_id(
+    normalized_path: str,
+    runs: list[dict[str, Any]],
+    *,
+    sqlite_rowid: int | None = None,
+) -> str:
+    parsed = [_parse_created_at(row.get("created_at")) for row in runs]
+    valid_times = [item for item in parsed if item is not None]
+    if len(valid_times) == len(runs) and valid_times:
+        anchor = min(valid_times).isoformat()
+        basis = _legacy_report_id_basis(normalized_path, created_at_anchor=anchor)
+    else:
+        basis = _legacy_report_id_basis(
+            normalized_path,
+            source_row_id=_source_row_id(runs[0], sqlite_rowid=sqlite_rowid),
+        )
+    return _hash_legacy_report_id(basis)
+
+
+def _group_runs_into_reports(
+    conn: sqlite3.Connection,
+    select_cols: list[str],
+    columns: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    rows = conn.execute(f"SELECT rowid, {', '.join(select_cols)} FROM runs").fetchall()
+    runs: list[dict[str, Any]] = []
+    for row in rows:
+        sqlite_rowid = int(row[0])
+        run = _row_to_run(dict(zip(select_cols, row[1:])))
+        run["_source_rowid"] = sqlite_rowid
+        runs.append(run)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+
+    has_job_id = "job_id" in columns
+    legacy_capable = "pdf_path" in columns and "created_at" in columns
+
+    job_groups: dict[str, list[dict[str, Any]]] = {}
+    legacy_runs: list[dict[str, Any]] = []
+    for run in runs:
+        job_id = str(run.get("job_id") or "").strip() if has_job_id else ""
+        if job_id:
+            job_groups.setdefault(job_id, []).append(run)
+        else:
+            legacy_runs.append(run)
+
+    for job_id, job_runs in job_groups.items():
+        grouped[job_id] = list(job_runs)
+
+    if not legacy_runs:
+        return grouped
+    if not legacy_capable:
+        return grouped
+
+    legacy_runs.sort(
+        key=lambda row: (
+            _normalize_pdf_path(str(row.get("pdf_path") or "")).casefold(),
+            _parse_created_at(row.get("created_at")) or _UTC_MIN,
+            _source_row_id(row),
+        )
+    )
+
+    current_cluster: list[dict[str, Any]] = []
+    current_path = ""
+    current_anchor: datetime | None = None
+
+    def flush_cluster() -> None:
+        nonlocal current_cluster, current_path, current_anchor
+        if not current_cluster:
+            return
+        report_id = _legacy_cluster_report_id(current_path, current_cluster)
+        grouped.setdefault(report_id, []).extend(current_cluster)
+        current_cluster = []
+        current_path = ""
+        current_anchor = None
+
+    for run in legacy_runs:
+        normalized_path = _normalize_pdf_path(str(run.get("pdf_path") or ""))
+        parsed = _parse_created_at(run.get("created_at"))
+        if not normalized_path or parsed is None:
+            flush_cluster()
+            report_id = _legacy_cluster_report_id(
+                normalized_path or "unknown",
+                [run],
+                sqlite_rowid=int(run["_source_rowid"]),
+            )
+            grouped.setdefault(report_id, []).append(run)
+            continue
+
+        if not current_cluster:
+            current_cluster = [run]
+            current_path = normalized_path
+            current_anchor = parsed
+            continue
+
+        delta = abs((parsed - current_anchor).total_seconds()) if current_anchor else LEGACY_REPORT_TIME_WINDOW_S + 1
+        if normalized_path == current_path and delta <= LEGACY_REPORT_TIME_WINDOW_S:
+            current_cluster.append(run)
+            if current_anchor is None or parsed < current_anchor:
+                current_anchor = parsed
+            continue
+
+        flush_cluster()
+        current_cluster = [run]
+        current_path = normalized_path
+        current_anchor = parsed
+
+    flush_cluster()
+    return grouped
+
+
 def _decode_json_field(raw: Any) -> tuple[Any, str | None]:
     if raw in (None, ""):
         return {}, None
@@ -245,6 +507,65 @@ def _result_date(payload: dict[str, Any]) -> str:
         if value not in (None, ""):
             return str(value)
     return ""
+
+
+def _report_created_at_bounds(runs: list[dict[str, Any]]) -> tuple[str, str]:
+    valid_times = [
+        parsed
+        for row in runs
+        if (parsed := _parse_created_at(row.get("created_at"))) is not None
+    ]
+    if valid_times:
+        earliest_dt = min(valid_times)
+        latest_dt = max(valid_times)
+        return earliest_dt.isoformat(), latest_dt.isoformat()
+    raw_values = [str(row.get("created_at") or "") for row in runs]
+    return min(raw_values), max(raw_values)
+
+
+def _report_summary_from_runs(report_id: str, runs: list[dict[str, Any]]) -> dict[str, Any]:
+    first = runs[0]
+    job_id = str(first.get("job_id") or "")
+    pdf_path = str(first.get("pdf_path") or "")
+    pdf_sha256 = str(first.get("pdf_sha256") or "")
+    assay_keys = sorted(
+        {str(row.get("assay_key") or "") for row in runs if row.get("assay_key")},
+        key=str.casefold,
+    )
+    device_ids = sorted(
+        {str(row.get("device_id") or "") for row in runs if row.get("device_id")},
+        key=str.casefold,
+    )
+    earliest, latest = _report_created_at_bounds(runs)
+    return {
+        "report_id": report_id,
+        "job_id": job_id,
+        "pdf_path": pdf_path,
+        "pdf_sha256": pdf_sha256,
+        "run_count": len(runs),
+        "assay_count": len(assay_keys),
+        "assay_keys": assay_keys,
+        "device_ids": device_ids,
+        "latest_created_at": latest,
+        "earliest_created_at": earliest,
+    }
+
+
+def _report_detail_payload(report_id: str, runs: list[dict[str, Any]]) -> dict[str, Any]:
+    summary = _report_summary_from_runs(report_id, runs)
+    summary["runs"] = sorted(
+        (_public_run_row(row) for row in runs),
+        key=lambda row: (
+            str(row.get("assay_key") or "").casefold(),
+            str(row.get("created_at") or ""),
+            int(row.get("id") or 0),
+        ),
+    )
+    return summary
+
+
+def _public_run_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key != "_source_rowid"}
 
 
 def _row_to_run(row: dict[str, Any]) -> dict[str, Any]:

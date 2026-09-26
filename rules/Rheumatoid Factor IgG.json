@@ -1,0 +1,213 @@
+{
+  "assay_name": "Rheumatoid Factor IgG",
+  "assay_key": "(4348)",
+  "lot_rule": {
+    "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
+  },
+  "extract_rules": {
+    "fields": [
+      {
+        "key": "PLATTE",
+        "regex": "Plattenname:\\s*(.+?)\\s+Zeit:",
+        "required": true
+      },
+      {
+        "key": "DATUM",
+        "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "required": true
+      },
+      {
+        "key": "ZEIT",
+        "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
+        "required": true
+      },
+      {
+        "key": "ANWENDER",
+        "regex": "Anwender:\\s*([^\\s]+)",
+        "required": true
+      },
+      {
+        "key": "TEST",
+        "regex": "Test:[^\\n]*?\\\\\\s*([^\\\\/]+\\.asy)\\s*\\(",
+        "required": false
+      },
+      {
+        "key": "CHARGE",
+        "regex": "Kit\\s+(E[0-9A-Za-z]+)\\s+\\d{6}",
+        "required": true
+      },
+      {
+        "key": "HALTBARKEIT",
+        "regex": "\\bBuffer\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": true,
+        "search_from": {
+          "line": 5
+        }
+      },
+      {
+        "key": "S1_MINIMUM",
+        "regex": "\\bS1\\b[^\\n]*?O\\.D\\.\\s*(\\S+)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 6
+        }
+      },
+      {
+        "key": "S1_SOLL",
+        "regex": "\\bS1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 6
+        }
+      },
+      {
+        "key": "S1_IST",
+        "regex": "\\bS1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "after": "Kombinierter Bericht"
+        }
+      },
+      {
+        "key": "S2_SOLL",
+        "regex": "\\bS2\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "S2_MINIMUM",
+        "regex": "\\bS2\\b[^\\n]*?O\\.D\\.\\s*(\\S+)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "S2_IST",
+        "regex": "(?:^|\\n)S2[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "after": "Kombinierter Bericht"
+        }
+      },
+      {
+        "key": "S3_SOLL",
+        "regex": "\\bS3\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 8
+        }
+      },
+      {
+        "key": "S3_IST",
+        "regex": "\\bS3\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "after": "Kombinierter Bericht"
+        }
+      },
+      {
+        "key": "PCQ1_IST",
+        "regex": "\\bPCQ1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*\\+",
+        "required": false,
+        "search_from": {
+          "after": "Kombinierter Bericht"
+        }
+      },
+      {
+        "key": "NCQ1_IST",
+        "regex": "\\bNCQ1\\b[^\\n]*?(\\S+)\\s*\\-",
+        "required": false,
+        "search_from": {
+          "after": "Kombinierter Bericht"
+        }
+      },
+      {
+        "key": "PCQ1_MINIMUM",
+        "regex": "PCQ[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*\\-",
+        "required": false,
+        "search_from": {
+          "line": 9
+        }
+      },
+      {
+        "key": "PCQ1_MAXIMUM",
+        "regex": "\\bPCQ1\\b[^\\n]*?\\-\\s*(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 9
+        }
+      },
+      {
+        "key": "PCQ1_SOLL",
+        "regex": "\\bPCQ1\\b[^\\n]*?(?<![\\d.,])((?=[\\d.,]{2,5}(?![\\d.,]))\\d+(?:[\\.,]\\d+)?)(?![\\d.,])",
+        "required": false,
+        "search_from": {
+          "line": 9
+        }
+      },
+      {
+        "key": "VALIDATION",
+        "regex": "(Validationskriterien\\s+(?:nicht\\s+)?erf(?:ü|ue)llt)",
+        "required": true
+      },
+      {
+        "key": "NCQ1_SOLL",
+        "regex": "\\bNCQ1\\b[^\\n]*?(?<![\\d.,])((?=[\\d.,]{1,2}(?![\\d.,]))\\d+(?:[\\.,]\\d+)?)(?![\\d.,])",
+        "required": false,
+        "search_from": {
+          "line": 9
+        }
+      },
+      {
+        "key": "NCQ1_MINIMUM",
+        "regex": "\\bNCQ1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*\\-",
+        "required": false,
+        "search_from": {
+          "line": 10
+        }
+      },
+      {
+        "key": "NCQ1_MAXIMUM",
+        "regex": "\\bNCQ1\\b[^\\n]*?\\-\\s*(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 10
+        }
+      }
+    ],
+    "dedupe_fields": []
+  },
+  "excel_rules": {
+    "excel_filename_template": "{assay_name}.xlsx",
+    "sheetname_template": "{lot_id}",
+    "column_mapping": {
+      "S2_IST": "S2_IST",
+      "S1_IST": "S1_IST",
+      "S3_IST": "S3_IST",
+      "PCQ1_IST": "PCQ1_IST",
+      "NCQ1_IST": "NCQ1_IST",
+      "PLATTE": "PLATTE",
+      "DATUM": "DATUM",
+      "ZEIT": "ZEIT",
+      "ANWENDER": "ANWENDER",
+      "TEST": "TEST",
+      "CHARGE": "CHARGE",
+      "HALTBARKEIT": "HALTBARKEIT",
+      "S1_MINIMUM": "S1_MINIMUM",
+      "S1_SOLL": "S1_SOLL",
+      "S2_SOLL": "S2_SOLL",
+      "S2_MINIMUM": "S2_MINIMUM",
+      "S3_SOLL": "S3_SOLL",
+      "PCQ1_MINIMUM": "PCQ1_MINIMUM",
+      "PCQ1_MAXIMUM": "PCQ1_MAXIMUM",
+      "PCQ1_SOLL": "PCQ1_SOLL",
+      "VALIDATION": "VALIDATION",
+      "NCQ1_SOLL": "NCQ1_SOLL",
+      "NCQ1_MINIMUM": "NCQ1_MINIMUM",
+      "NCQ1_MAXIMUM": "NCQ1_MAXIMUM"
+    }
+  }
+}

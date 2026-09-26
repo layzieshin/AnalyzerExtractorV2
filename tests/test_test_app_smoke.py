@@ -8,7 +8,30 @@ from interfaces.tk import test_app
 
 
 def test_test_app_sections_are_defined() -> None:
-    assert test_app.SECTION_KEYS == ("EXTRACTOR", "OPTIONS", "RULE SUITE", "LOGS", "DUPLIKATE", "DATENBANK", "ADMIN")
+    assert test_app.BASE_SECTION_KEYS == (
+        "EXTRACTOR",
+        "OPTIONS",
+        "RULE SUITE",
+        "LOGS",
+        "DUPLIKATE",
+        "DATENBANK",
+    )
+    assert test_app.SECTION_KEYS == test_app.BASE_SECTION_KEYS + (test_app.ADMIN_SECTION_KEY,)
+    assert test_app.resolve_visible_section_keys() == test_app.BASE_SECTION_KEYS
+
+
+def test_test_app_admin_tab_visible_when_env_set(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARE_SHOW_ADMIN", "1")
+    try:
+        app = test_app.TestApp(project_root=tmp_path)
+    except tk.TclError as e:
+        pytest.skip(f"Tk not available: {e}")
+    try:
+        assert set(app._tabs) == set(test_app.resolve_visible_section_keys())
+        assert "ADMIN" in app._tabs
+        assert hasattr(app, "tree_queue")
+    finally:
+        app.destroy()
 
 
 def test_test_app_class_constructable_when_tk_available(tmp_path) -> None:
@@ -19,7 +42,8 @@ def test_test_app_class_constructable_when_tk_available(tmp_path) -> None:
     try:
         assert app.project_root == tmp_path.resolve()
         assert app.project_root / "rules" / "index.json" == tmp_path.resolve() / "rules" / "index.json"
-        assert set(app._tabs) == set(test_app.SECTION_KEYS)
+        assert set(app._tabs) == set(test_app.resolve_visible_section_keys())
+        assert "ADMIN" not in app._tabs
     finally:
         app.destroy()
 
@@ -42,7 +66,7 @@ def test_test_app_extractor_uses_friendly_controls_and_columns(tmp_path) -> None
         assert "Ergebnisse suchen" in button_texts
         assert app.btn_pick_files.cget("text").startswith("Dateien")
         assert "Extraktion starten" in button_texts
-        assert "Erneut starten" in button_texts
+        assert "Fehler erneut verarbeiten" in button_texts
         assert app.btn_stop_extraction.cget("text") == "Extraktion stoppen"
         assert app.btn_stop_extraction.cget("state") == tk.DISABLED
         assert "Aktualisieren" in button_texts
@@ -64,7 +88,7 @@ def test_test_app_extractor_uses_friendly_controls_and_columns(tmp_path) -> None
         app.destroy()
 
 
-def test_main_passes_project_root_to_test_app(tmp_path, monkeypatch) -> None:
+def test_main_passes_project_root_to_legacy_test_app(tmp_path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class FakeApp:
@@ -74,11 +98,12 @@ def test_main_passes_project_root_to_test_app(tmp_path, monkeypatch) -> None:
         def mainloop(self) -> None:
             captured["mainloop"] = True
 
-    monkeypatch.setattr(test_app, "TestApp", FakeApp)
+    monkeypatch.setenv("ARE_LEGACY_UI", "1")
+    monkeypatch.setattr(test_app, "LegacyTestApp", FakeApp)
 
     test_app.main(project_root=tmp_path)
 
-    assert captured["project_root"] == tmp_path
+    assert captured["project_root"] == tmp_path.resolve()
     assert captured["mainloop"] is True
 
 

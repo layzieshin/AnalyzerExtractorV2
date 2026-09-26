@@ -31,6 +31,30 @@ def test_build_onedir_required_imports_include_test_app_modules() -> None:
     assert "gui_min_ext" not in required
 
 
+def test_build_onedir_desktop_runtime_manifest_is_preflight_required() -> None:
+    build = _load_build_onedir()
+    required = set(build.REQUIRED_IMPORTS)
+    for module_name in build.DESKTOP_RUNTIME_IMPORTS:
+        assert module_name in required
+
+
+def test_build_onedir_desktop_runtime_manifest_is_pyinstaller_hidden_import() -> None:
+    build = _load_build_onedir()
+    hidden = set(build.PYINSTALLER_HIDDEN_IMPORTS)
+    for module_name in build.DESKTOP_RUNTIME_IMPORTS:
+        assert module_name in hidden
+    assert "rule_editor_main" in hidden
+    assert "fitz" in hidden
+    assert "pymupdf" in hidden
+    assert "openpyxl" in hidden
+
+
+def test_build_onedir_desktop_runtime_imports_are_importable() -> None:
+    build = _load_build_onedir()
+    for module_name in build.DESKTOP_RUNTIME_IMPORTS:
+        importlib.import_module(module_name)
+
+
 def test_build_onedir_rules_copy_excludes_drafts(tmp_path: Path) -> None:
     build = _load_build_onedir()
     project = tmp_path / "proj"

@@ -101,6 +101,31 @@ def test_sqlite_writer_inserts_and_creates_duplicate_candidate(tmp_path: Path):
     assert comparison["test"]["same"] is False
 
 
+def test_same_frozen_job_write_returns_real_run_id_without_duplicate_candidate(tmp_path: Path):
+    sqlite_path = tmp_path / "results.sqlite3"
+    ruleset = RuleSet(
+        assay_key="(1111)",
+        ruleset_file="Test.json",
+        data={"assay_name": "AssayA", "excel_rules": {}},
+    )
+    record = AssayRecord(
+        assay_key="(1111)", lot_id="LOT1", dedupe_key="K1",
+        data={"value": "42"}, device_id="dev1", dedupe_version="v2",
+    )
+    kwargs = {
+        "job_id": "job-1",
+        "pdf_sha256": "a" * 64,
+        "assay_block_hash": "b" * 64,
+    }
+    first = write_record_sqlite(record, ruleset, str(sqlite_path), **kwargs)
+    resumed = write_record_sqlite(record, ruleset, str(sqlite_path), **kwargs)
+    assert first.status == "inserted"
+    assert resumed.status == "already_persisted"
+    assert resumed.run_id == first.run_id
+    assert resumed.existing_run_id is None
+    assert list_duplicate_candidates(str(sqlite_path)) == []
+
+
 def test_discard_duplicate_candidate_sets_deleted_and_writes_log(tmp_path: Path):
     sqlite_path = tmp_path / "results.sqlite3"
     ruleset = RuleSet(
