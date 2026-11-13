@@ -6,17 +6,22 @@
 .\.venv\Scripts\python.exe test_app_main.py
 ```
 
-Startet `AnalyzerDesktopApp` — Sidebar mit fuenf Ansichten:
+Startet `AnalyzerDesktopApp` — Sidebar mit sechs Ansichten:
 
 | Ansicht | Zweck |
 |---------|-------|
 | **Auswertung** | PDFs verarbeiten, Auto-Import-Status, letzte Vorgänge |
 | **Ergebnisse** | Berichte und Occurrences |
+| **Validierung** | Original-PDF links, offene Messungen und Erstvalidierung rechts |
 | **Regelwerke** | Inventar, Integritaetspruefung, Rule Editor oeffnen |
 | **Einstellungen** | Pfade, Geraet, Watch, SQLite |
 | **Diagnose** | Fehlerjobs, Duplikat-Klaerfaelle, Draft aus Kandidat |
 
 Orchestrierung ueber `src.application.api`; Hintergrundarbeit via `TkTaskRunner`.
+
+Seit Paket 3a werden neue Ergebnisse und append-only Validierungen ausschliesslich in SQLite gespeichert. Die Einstellungen bieten keine Excel-Auswahl. Das Original-PDF dient zur Pruefung; ein spaeterer PDF-Nachweis folgt separat. Alte `both`-/`excel`-Settings werden ohne Startup-Schreibzugriff als SQLite geladen; normales Speichern persistiert SQLite und erhaelt die anderen Werte. Vorhandene Arbeitsmappen, Runs, Validierungen und historische Exportplaene bleiben bestehen. Historische Exportfehler sind nur lesbare Diagnose; **Erneut versuchen** ist dafuer deaktiviert. Watch archiviert nach Queue-`DONE`, unabhaengig von menschlicher Validierung; bei SQLite-Fehlern nicht.
+
+Die Validierung maximiert das normale Fenster mit Titelleiste und stellt beim Verlassen die vorherige Groesse wieder her. Das eingebettete Original-PDF hat Seitenwechsel, Seitenanzeige, Zoom und Breitenanpassung. Archivierte PDFs werden ueber ihren aktuellen Importpfad geladen. Fehlende, mehrdeutige oder unlesbare Quellen erscheinen als sichtbarer Fehler; **PDF extern oeffnen** bleibt eine optionale Zusatzaktion. Arbeitsliste, Zaehler, Initialen und optionaler Kommentar gehoeren weiterhin zum bestehenden append-only Validierungsablauf.
 
 Weitere GUI-Dokumentation (Planungsstand / Inventar):
 
@@ -133,7 +138,7 @@ Busy-Loops begrenzt.
 
 ### Legacy: OPTIONS
 
-- Output-Modus (`excel` / `sqlite` / `both`), SQLite-Pfad, Watch-Ordner, Geraet
+- Effektiver Output-Modus `sqlite`, SQLite-Pfad, Watch-Ordner, Geraet. Alte Moduswerte sind nur Kompatibilitaetseingaben und aktivieren keinen Excel-Sink.
 - `Anzeigen` aktualisiert eine read-only Zusammenfassung der aktuellen Werte
 - Die fruehere Anzeige `Watch-Modus` wurde entfernt (hatte keine Wirkung auf die
   Auto-Suche; Steuerung erfolgt ueber `Automatische Suche starten/stoppen` im EXTRACTOR)

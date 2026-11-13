@@ -8,7 +8,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
+from src.dbwriter.api import discard_duplicate_candidate, list_duplicate_candidates
+from src.application.api import DesktopSettings, ResultsController
 from src.jobcontroller.api import submit
 from src.ruleresolver.api import validate_rules_integrity
 from src.rulesuite.api import activate_draft, create_draft, list_fields, preview_extract, set_field_regex
@@ -23,9 +24,7 @@ from src.testui.api import (
     classify_job_outcome,
     format_assay_data_detail,
     format_assay_overview_rows,
-    format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
-    format_duplicate_field_comparison,
     format_job_result_summary,
     format_partial_writes_note,
     format_rules_report,
@@ -97,7 +96,7 @@ class MinimalBatchGUI(tk.Tk):
         row.pack(fill="x", padx=8, pady=6)
 
         tk.Label(row, text="output_mode").pack(side="left")
-        dd_mode = tk.OptionMenu(row, self.var_output_mode, "both", "excel", "sqlite")
+        dd_mode = tk.OptionMenu(row, self.var_output_mode, "sqlite")
         dd_mode.pack(side="left", padx=(4, 8))
         self._register_action(dd_mode)
 
@@ -215,7 +214,7 @@ class MinimalBatchGUI(tk.Tk):
             height=4,
         )
         for col, title, width in (
-            ("assay_key", "Assay", 110),
+            ("assay_key", "Assay", 260),
             ("lot_id", "Lot", 80),
             ("ruleset", "Ruleset", 140),
             ("missing", "Missing", 90),
@@ -487,7 +486,9 @@ class MinimalBatchGUI(tk.Tk):
             return
         status = self.var_duplicate_status.get().strip() or "pending"
         try:
-            rows = list_duplicate_candidates(str(sqlite_path), status=status)
+            from dataclasses import asdict
+            controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+            rows = [asdict(row) for row in controller.list_duplicate_candidates(status=status)]
         except Exception as e:
             messagebox.showerror("Duplikate", str(e))
             return
@@ -503,7 +504,7 @@ class MinimalBatchGUI(tk.Tk):
                 values=(
                     summary.get("candidate_id", ""),
                     summary.get("status", ""),
-                    summary.get("assay_key", ""),
+                    summary.get("assay_name", "Assayname fehlt"),
                     summary.get("device_id", ""),
                     summary.get("detected_at", ""),
                     summary.get("existing_run_id", ""),
@@ -513,32 +514,36 @@ class MinimalBatchGUI(tk.Tk):
         self._log(f"Duplikate geladen: status={status}, count={len(rows)}")
 
     def on_duplicate_selected(self, _event: object = None) -> None:
+        from dataclasses import asdict
+        from interfaces.tk.view_models import format_duplicate_detail_lines
+
         candidate_id = self._selected_duplicate_id()
         if candidate_id is None:
             return
         sqlite_path = self._duplicate_sqlite_path()
         try:
-            detail = get_duplicate_candidate(str(sqlite_path), candidate_id)
+            controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+            detail = controller.get_duplicate_candidate_detail(candidate_id)
         except Exception as e:
             messagebox.showerror("Duplikate", str(e))
             return
         if not detail:
             self._set_duplicate_detail("(kein Kandidat)")
             return
-        self._duplicate_details[candidate_id] = detail
-        self._set_duplicate_detail(format_duplicate_candidate_detail(detail))
+        self._duplicate_details[candidate_id] = asdict(detail)
+        self._set_duplicate_detail(format_duplicate_detail_lines(detail))
         for row in self.tree_duplicate_fields.get_children():
             self.tree_duplicate_fields.delete(row)
-        for idx, cmp_row in enumerate(format_duplicate_field_comparison(detail)):
+        for idx, cmp_row in enumerate(detail.field_comparison):
             self.tree_duplicate_fields.insert(
                 "",
                 tk.END,
                 iid=f"{candidate_id}:{idx}",
                 values=(
-                    cmp_row.get("field", ""),
-                    cmp_row.get("existing", ""),
-                    cmp_row.get("candidate", ""),
-                    cmp_row.get("same", ""),
+                    cmp_row.field_key,
+                    cmp_row.existing_value,
+                    cmp_row.candidate_value,
+                    "Nein" if cmp_row.changed else "Ja",
                 ),
             )
 
@@ -549,8 +554,12 @@ class MinimalBatchGUI(tk.Tk):
             return
         detail = self._duplicate_details.get(candidate_id)
         if detail is None:
-            detail = get_duplicate_candidate(str(self._duplicate_sqlite_path()), candidate_id)
-            if detail:
+            from dataclasses import asdict
+            sqlite_path = self._duplicate_sqlite_path()
+            controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+            projected = controller.get_duplicate_candidate_detail(candidate_id)
+            if projected:
+                detail = asdict(projected)
                 self._duplicate_details[candidate_id] = detail
         candidate = detail.get("candidate") if isinstance(detail, dict) else None
         if not isinstance(candidate, dict) or candidate.get("status") != "pending":
@@ -581,9 +590,10 @@ class MinimalBatchGUI(tk.Tk):
 
     def _refresh_device_choices(self, *, log: bool = True) -> None:
         root = self._root_path()
-        devices = list_devices(root)
-        default_id = get_default_device_id(root)
-        status = get_device_config_status(root)
+        spec = {"driver": "sqlite", "path": str(self._duplicate_sqlite_path())}
+        devices = list_devices(root, store_spec=spec)
+        default_id = get_default_device_id(root, store_spec=spec)
+        status = get_device_config_status(root, store_spec=spec)
         self._device_choice_to_id = {}
         menu = self.device_menu["menu"]
         menu.delete(0, "end")
@@ -659,7 +669,7 @@ class MinimalBatchGUI(tk.Tk):
 
     def _read_submit_config(self) -> dict:
         return {
-            "output_mode": self.var_output_mode.get().strip() or "both",
+            "output_mode": "sqlite",
             "sqlite_path": self.var_sqlite_path.get().strip() or None,
             "lock_ttl_s": float(self.var_lock_ttl.get().strip() or "900"),
             "sqlite_busy_timeout_ms": int(self.var_sqlite_busy_timeout.get().strip() or "5000"),
@@ -798,7 +808,7 @@ class MinimalBatchGUI(tk.Tk):
                 tk.END,
                 iid=f"{storage_key}:{idx}",
                 values=(
-                    overview.get("assay_key", ""),
+                    overview.get("assay_display_label", "Assayname fehlt"),
                     overview.get("lot_id", ""),
                     overview.get("ruleset_file", ""),
                     overview.get("missing_required", ""),

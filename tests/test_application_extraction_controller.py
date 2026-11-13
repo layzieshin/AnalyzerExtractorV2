@@ -94,7 +94,8 @@ def test_list_processing_items_maps_dto_fields(tmp_path: Path) -> None:
     assert item.updated_at
 
 
-def test_process_next_uses_injected_fake_submit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["sqlite", "both", "excel"])
+def test_process_next_uses_injected_fake_submit(tmp_path: Path, mode: str) -> None:
     root = tmp_path / "proj"
     root.mkdir()
     pdf = root / "work.pdf"
@@ -113,11 +114,12 @@ def test_process_next_uses_injected_fake_submit(tmp_path: Path) -> None:
         )
 
     settings = create_desktop_services(root).settings
-    controller = ExtractionController(root, settings_provider=settings.load, submit_func=fake_submit)
+    from dataclasses import replace
+    controller = ExtractionController(root, settings_provider=lambda: replace(settings.load(), output_mode=mode), submit_func=fake_submit)
     result = controller.process_next()
 
     assert calls
-    assert calls[0]["output_mode"] == "both"
+    assert calls[0]["output_mode"] == "sqlite"
     assert isinstance(result, ProcessingOutcome)
     assert result.queue_status == "FAILED"
     assert result.message == "fake-boom"
@@ -280,7 +282,8 @@ def test_get_job_diagnosis_classifies_excel_output_after_save(tmp_path: Path) ->
     diagnosis = create_desktop_services(root).extraction.get_job_diagnosis(job.job_id)
     assert diagnosis is not None
     assert diagnosis.error_label == "Excel-Ausgabe"
-    assert diagnosis.friendly_message == "Ergebnis gespeichert – Excel-Ausgabe fehlgeschlagen"
+    assert diagnosis.friendly_message == "Historischer Ausgabeplan ist schreibgeschützt. Details bleiben zur Diagnose verfügbar."
+    assert diagnosis.retry_kind == "retired"
     assert diagnosis.technical_detail == technical
 
     excel_only = "excel_write_failed:(1111):disk full"
@@ -290,7 +293,7 @@ def test_get_job_diagnosis_classifies_excel_output_after_save(tmp_path: Path) ->
     assert friendly_processing_message(excel_only) == "Excel-Ausgabe fehlgeschlagen"
 
 
-def test_done_queue_job_exposes_export_only_excel_diagnosis(tmp_path: Path) -> None:
+def test_done_queue_job_exposes_read_only_historical_excel_diagnosis(tmp_path: Path) -> None:
     from src.jobqueue.api import claim_next_job, enqueue_pdf_job, mark_job_done
 
     root = tmp_path / "proj"
@@ -320,8 +323,8 @@ def test_done_queue_job_exposes_export_only_excel_diagnosis(tmp_path: Path) -> N
     diagnoses = create_desktop_services(root).extraction.list_job_diagnoses()
     assert len(diagnoses) == 1
     assert diagnoses[0].queue_status == "DONE"
-    assert diagnoses[0].retry_kind == "export_only"
-    assert diagnoses[0].friendly_message == "Validierung gespeichert – Excel-Ausgabe fehlgeschlagen"
+    assert diagnoses[0].retry_kind == "retired"
+    assert diagnoses[0].friendly_message == "Historischer Ausgabeplan ist schreibgeschützt. Details bleiben zur Diagnose verfügbar."
 
 
 def test_get_job_diagnosis_uses_block_label_when_normalized_dump_empty(tmp_path: Path) -> None:

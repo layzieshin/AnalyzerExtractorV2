@@ -53,6 +53,7 @@ class RulesView(ttk.Frame):
             height=14,
         )
         tree_frame.pack(fill="both", expand=True)
+        self._tree.column("assay", width=280, minwidth=200, stretch=True)
         self._empty = EmptyState(body, "Kein Regelwerk-Inventar geladen.")
 
     def render_inventory(self, items: Sequence[RulesetInventoryItem]) -> None:
@@ -69,7 +70,7 @@ class RulesView(ttk.Frame):
                 "end",
                 iid=iid,
                 values=(
-                    item.assay_name or item.assay_key,
+                    item.assay_name or "Assayname fehlt",
                     item.display_type,
                     str(item.field_count),
                     "Ja" if item.valid else "Nein",

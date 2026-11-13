@@ -85,7 +85,7 @@ class ManageMixin:
                 values=(
                     row.get("display_type", ""),
                     row.get("assay_key", ""),
-                    row.get("assay_name", ""),
+                    row.get("assay_name") or "Assayname fehlt",
                     row.get("field_count", 0),
                     row.get("modified_at", ""),
                     status,
@@ -314,6 +314,7 @@ class ManageMixin:
             on_open_in_editor=self._wizard_open_draft,
             on_activate_requested=self._wizard_activate_draft,
             start_intent="neutral" if intent == "neutral" else "new",
+            initial_draft_path=str(getattr(self, "current_draft_path", "") or "").strip() or None,
             on_session_closed=self._sync_editor_after_wizard,
         )
 
@@ -361,13 +362,13 @@ class ManageMixin:
             self._focus_loaded_workspace()
             self._reload_assays()
             self._refresh_ruleset_overview()
-            self._set_hint("Geführte Prüfung abgeschlossen. Der geladene Entwurf wurde neu eingelesen.")
+            self._set_hint("Entwurf zum Weiterbearbeiten neu eingelesen. Es wurde nichts aktiviert.")
             return
         if self._open_draft_in_editor(draft_path) not in {"loaded", "focus"}:
             return
         self._reload_assays()
         self._refresh_ruleset_overview()
-        self._set_hint("Geführte Prüfung abgeschlossen. Entwurf im Editor geladen.")
+        self._set_hint("Entwurf zum Weiterbearbeiten im Editor geladen. Es wurde nichts aktiviert.")
 
     def _wizard_activate_draft(self, draft_path: str) -> None:
         current = str(getattr(self, "current_draft_path", "") or "").strip()

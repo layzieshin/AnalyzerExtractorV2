@@ -135,5 +135,6 @@ def verify_job_content_sha256(
     _queue(claim_lock_ttl_s=claim_lock_ttl_s).verify_job_content_sha256(project_root, job_id)
 
 
-def list_jobs(project_root: str) -> List[QueueJob]:
-    return JobQueue().list_jobs(project_root)
+def list_jobs(project_root: str, *, create_missing: bool = True) -> List[QueueJob]:
+    """List queue records; create_missing=False performs no directory writes."""
+    return JobQueue().list_jobs(project_root, create_missing=create_missing)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.jobcontroller.api import get_job_evidence
 
 
@@ -17,6 +19,25 @@ def test_get_job_evidence_reports_missing_state(tmp_path: Path) -> None:
     assert evidence is not None
     assert evidence.state_available is False
     assert evidence.job_id == "missing-job"
+    assert evidence.error == ""
+    assert evidence.retry_kind == ""
+
+
+@pytest.mark.parametrize("payload", ["{broken", "[]"])
+def test_get_job_evidence_marks_unreadable_existing_state_non_retryable(tmp_path: Path, payload: str) -> None:
+    import hashlib
+
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    path = jobs / "job1.json"
+    path.write_text(payload, encoding="utf-8")
+    before = (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)
+    evidence = get_job_evidence(tmp_path, "job1")
+    assert evidence is not None
+    assert evidence.state_available is False
+    assert evidence.error == "job_state_unreadable"
+    assert evidence.retry_kind == "retired"
+    assert (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) == before
 
 
 def test_get_job_evidence_extracts_dump_paths(tmp_path: Path) -> None:

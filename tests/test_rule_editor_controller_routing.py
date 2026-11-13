@@ -428,7 +428,7 @@ def test_step_by_step_toolbar_routes_to_real_wizard() -> None:
     assert calls == ["neutral"]
 
 
-def test_guided_starts_ignore_loaded_and_selected_assays(monkeypatch) -> None:
+def test_guided_starts_keep_loaded_draft_and_ignore_inventory_selection(monkeypatch) -> None:
     wizard_calls: list[dict[str, object]] = []
     host = ManageMixin.__new__(ManageMixin)
     host.current_draft_path = r"I:\rules\drafts\loaded.draft.json"
@@ -445,8 +445,12 @@ def test_guided_starts_ignore_loaded_and_selected_assays(monkeypatch) -> None:
     host.on_open_wizard()
 
     assert [call["start_intent"] for call in wizard_calls] == ["neutral", "new"]
-    assert all("initial_draft_path" not in call for call in wizard_calls)
+    assert [call["initial_draft_path"] for call in wizard_calls] == [host.current_draft_path] * 2
     assert all("assay_display_to_key" not in call for call in wizard_calls)
+
+    host.current_draft_path = None
+    host.on_open_wizard(intent="neutral")
+    assert wizard_calls[-1]["initial_draft_path"] is None
 
 
 def test_dirty_editor_is_resolved_before_guided_start(monkeypatch) -> None:

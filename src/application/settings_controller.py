@@ -2,19 +2,25 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from src.runtime.api import (
     VALID_OUTPUT_MODES,
+    get_build_info as runtime_get_build_info,
     get_default_device_id,
     get_device_config_status,
     list_devices,
     load_runtime_config,
 )
+from src.qualitycontrol.api import (
+    MutationContext, QualityControlError, get_inventory as qc_get_inventory,
+    legacy_device_source, list_profiles, migrate_legacy_devices, save_inventory, save_profile,
+)
 
-from .errors import SettingsLoadError, SettingsSaveError, SettingsValidationError
-from .models import DesktopSettings, DeviceInventoryItem, DeviceInventoryStatus, WatchTimingSettings
+from .errors import QualityControlApplicationError, SettingsLoadError, SettingsSaveError, SettingsValidationError
+from .models import DesktopSettings, DeviceInventoryItem, DeviceInventoryStatus, QCConfigurationState, WatchTimingSettings
 from .presentation import normalize_scan_interval_s, normalize_stable_window_s
 
 _SETTINGS_FILE_NAME = "desktop_settings.json"
@@ -43,6 +49,9 @@ class SettingsController:
 
     def settings_path(self) -> Path:
         return self._project_root / "storage" / _SETTINGS_FILE_NAME
+
+    def get_build_info(self) -> dict[str, object]:
+        return runtime_get_build_info()
 
     def load(self) -> DesktopSettings:
         runtime = load_runtime_config(self._project_root)
@@ -84,7 +93,7 @@ class SettingsController:
         except ValueError as exc:
             raise SettingsValidationError(str(exc)) from exc
         self.validate(merged, require_watch_paths=merged.watch_enabled)
-        return merged
+        return replace(merged, output_mode="sqlite")
 
     def validate(self, settings: DesktopSettings, *, require_watch_paths: bool | None = None) -> None:
         if settings.output_mode not in VALID_OUTPUT_MODES:
@@ -106,14 +115,17 @@ class SettingsController:
         )
 
     def get_device_inventory(self) -> DeviceInventoryStatus:
-        status = get_device_config_status(self._project_root)
+        spec = {"driver": "sqlite", "path": self.load().sqlite_path}
+        status = get_device_config_status(self._project_root, store_spec=spec)
         devices = tuple(
             DeviceInventoryItem(
                 device_id=str(row.get("device_id") or ""),
                 display_name=str(row.get("display_name") or row.get("device_id") or ""),
                 active=bool(row.get("active", True)),
+                serial_number=str(row.get("serial_number") or ""), lnr=str(row.get("lnr") or ""), eva=str(row.get("eva") or ""),
+                incomplete=bool(row.get("incomplete")), legacy=bool(row.get("legacy")),
             )
-            for row in list_devices(self._project_root)
+            for row in list_devices(self._project_root, store_spec=spec)
         )
         return DeviceInventoryStatus(
             status=str(status.get("status") or ""),
@@ -121,11 +133,60 @@ class SettingsController:
             message=str(status.get("message") or ""),
             using_fallback=bool(status.get("using_fallback")),
             devices=devices,
-            default_device_id=get_default_device_id(self._project_root),
+            default_device_id=get_default_device_id(self._project_root, store_spec=spec),
         )
 
     def reload_device_inventory(self) -> DeviceInventoryStatus:
         return self.get_device_inventory()
+
+    def _qc_store(self, expected_path: str | None = None) -> dict[str, str]:
+        path = str(Path(self.load().sqlite_path).resolve())
+        if expected_path and str(Path(expected_path).resolve()) != path:
+            raise QualityControlApplicationError("Der Ergebnisspeicher wurde gewechselt. Bitte den Dialog schließen und neu laden.")
+        return {"driver": "sqlite", "path": path}
+
+    def get_qc_configuration(self) -> QCConfigurationState:
+        spec = self._qc_store()
+        try:
+            inventory = qc_get_inventory(spec, include_history=True, include_unregistered=True)
+            # Explicit editor draft only. These compatibility identities are
+            # not registered or written merely by discovering/browsing them.
+            inventory["snapshot"]["devices"].extend(inventory.get("unregistered_devices", []))
+            profiles = tuple(list_profiles(spec))
+            try:
+                source = legacy_device_source(self._project_root)
+                source_hash, message = source["sha256"], "Vorhandene Gerätedatei kann ausdrücklich übernommen werden."
+            except QualityControlError as exc:
+                source_hash, message = "", str(exc)
+            return QCConfigurationState(spec["path"], inventory, profiles, source_hash, message)
+        except QualityControlError as exc:
+            raise QualityControlApplicationError(str(exc)) from exc
+
+    def migrate_qc_devices(self, state: QCConfigurationState, operator_initials: str, request_id: str) -> dict[str, Any]:
+        spec = self._qc_store(state.store_path)
+        try:
+            return migrate_legacy_devices(spec, self._project_root, expected_source_sha256=state.legacy_source_sha256,
+                context=MutationContext(operator_initials, request_id))
+        except QualityControlError as exc:
+            raise QualityControlApplicationError(str(exc)) from exc
+
+    def save_qc_inventory(self, state: QCConfigurationState, snapshot: dict[str, Any], operator_initials: str,
+                          request_id: str) -> dict[str, Any]:
+        spec = self._qc_store(state.store_path)
+        try:
+            return save_inventory(spec, snapshot, expected_version_id=state.inventory["version_id"],
+                                  context=MutationContext(operator_initials, request_id))
+        except QualityControlError as exc:
+            raise QualityControlApplicationError(str(exc)) from exc
+
+    def save_qc_profile(self, state: QCConfigurationState, snapshot: dict[str, Any], *, expected_version_id: int,
+                        operator_initials: str, request_id: str) -> dict[str, Any]:
+        spec = self._qc_store(state.store_path)
+        try:
+            return save_profile(spec, snapshot, expected_version_id=expected_version_id,
+                expected_inventory_version_id=state.inventory["version_id"], context=MutationContext(operator_initials, request_id))
+        except QualityControlError as exc:
+            raise QualityControlApplicationError(str(exc)) from exc
 
     def open_output_folder(self, *, path_opener=None) -> str:
         from .desktop_actions import open_path
@@ -137,6 +198,7 @@ class SettingsController:
 
     def save(self, settings: DesktopSettings) -> DesktopSettings:
         self.validate(settings)
+        settings = replace(settings, output_mode="sqlite")
         path = self.settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {

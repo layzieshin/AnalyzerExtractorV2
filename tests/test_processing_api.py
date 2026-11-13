@@ -32,6 +32,18 @@ def _setup_job(tmp_path: Path) -> tuple[Path, Path]:
     return root, pdf
 
 
+@pytest.mark.parametrize("mode", ["sqlite", "both", "excel", "unknown"])
+def test_processing_normalizes_before_calling_injected_submit(tmp_path: Path, mode: str) -> None:
+    root, pdf = _setup_job(tmp_path)
+    seen = []
+    def submit_spy(*_args, **kwargs):
+        seen.append(kwargs["output_mode"])
+        return JobResult(job_id="x", pdf_path=str(pdf), status="DONE", details={})
+    result = process_next_pending(root, ProcessingConfig(output_mode=mode), worker_id="w", submit_func=submit_spy)
+    assert result.queue_status == "DONE"
+    assert seen == ["sqlite"]
+
+
 def test_adapter_reexports_match_processing_api(tmp_path: Path) -> None:
     root_a, _pdf_a = _setup_job(tmp_path / "a")
     root_b, _pdf_b = _setup_job(tmp_path / "b")
@@ -170,7 +182,11 @@ def test_process_next_marks_failed_on_submit_exception(tmp_path: Path) -> None:
     assert "worker_submit_error" in result.message
 
 
-def test_enqueue_list_retry_roundtrip(tmp_path: Path) -> None:
+@pytest.mark.parametrize("state_kind", ["missing", "new_failure", "unreadable", "non_object"])
+def test_enqueue_list_retry_roundtrip_preserves_unreadable_evidence(tmp_path: Path, monkeypatch, state_kind: str) -> None:
+    import hashlib
+    from src.processing import service
+
     root = tmp_path / "proj"
     root.mkdir()
     pdf = root / "retry.pdf"
@@ -190,8 +206,32 @@ def test_enqueue_list_retry_roundtrip(tmp_path: Path) -> None:
     )
     assert claimed.queue_status == "FAILED"
 
-    retried = retry_failed(root, job.job_id)
-    assert retried.status == "PENDING"
+    state_path = root / "jobs" / f"{job.job_id}.json"
+    payloads = {"new_failure": '{"status":"FAILED","error":"no_assay_detected"}', "unreadable": "{broken", "non_object": "[]"}
+    if state_kind != "missing":
+        state_path.write_text(payloads[state_kind], encoding="utf-8")
+    queue_path = root / "jobs" / "queue" / f"{job.job_id}.json"
+    def snapshot(path):
+        return (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) if path.exists() else None
+    state_before, queue_before = snapshot(state_path), snapshot(queue_path)
+    low_level_calls = []
+    real_retry = service.retry_failed_job
+    def low_level_retry(*args, **kwargs):
+        low_level_calls.append(job.job_id)
+        return real_retry(*args, **kwargs)
+    monkeypatch.setattr(service, "retry_failed_job", low_level_retry)
+
+    if state_kind in {"unreadable", "non_object"}:
+        with pytest.raises(ValueError, match="historical_output_plan_read_only"):
+            retry_failed(root, job.job_id)
+        assert low_level_calls == []
+        assert snapshot(queue_path) == queue_before
+        assert list_processing_jobs(root)[0].status == "FAILED"
+    else:
+        retried = retry_failed(root, job.job_id)
+        assert retried.status == "PENDING"
+        assert low_level_calls == [job.job_id]
+    assert snapshot(state_path) == state_before
 
 
 def test_config_from_runtime_defaults_uses_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

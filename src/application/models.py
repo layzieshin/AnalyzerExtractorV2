@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -139,6 +140,7 @@ class ResultStoreStatus:
 @dataclass(frozen=True)
 class ResultAssayItem:
     assay_key: str
+    assay_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,13 @@ class ResultRunItem:
     current_pdf_path: str = ""
     ingestion_id: str = ""
     path_status: str = ""
+    revision_id: int = 0
+    selection_token: str = ""
+    revision_history: tuple[dict[str, Any], ...] = ()
+    selection_history: tuple[dict[str, Any], ...] = ()
+    revision_error: str = ""
+
+    assay_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -255,6 +264,12 @@ class ReportRunOccurrence:
     current_validation: RunValidationItem | None = None
     validation_history: tuple[RunValidationItem, ...] = ()
     validation_ambiguous: bool = False
+    revision_id: int = 0
+    selection_token: str = ""
+    store_path: str = ""
+    reanalysis_pending: bool = False
+    missing_fields: tuple[str, ...] = ()
+    assay_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -286,6 +301,7 @@ class ReportSummaryItem:
     path_available: bool = False
     validation_status: str = ""
     report_status: str = ""
+    assay_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -299,6 +315,22 @@ class RunValidationItem:
     created_at_utc: str | None
     excel_export_status: str = "not_required"
     excel_export_error: str = ""
+    revision_id: int = 0
+    selection_id: int | None = None
+    selection_token: str = ""
+
+
+@dataclass(frozen=True)
+class ReportPdfPage:
+    """One bounded PDF page; image_data contains a standalone RGB PPM image."""
+
+    report_id: str
+    page_index: int
+    page_count: int
+    zoom: float
+    width: int
+    height: int
+    image_data: bytes
 
 
 @dataclass(frozen=True)
@@ -315,6 +347,47 @@ class ValidationQueueItem:
     created_at: str
     fields: tuple[ReportFieldValue, ...]
     validation_ambiguous: bool = False
+    revision_id: int = 0
+    selection_token: str = ""
+    store_path: str = ""
+    comparison: ReanalysisComparison | None = None
+    reanalysis_history: tuple[ReportFieldValue, ...] = ()
+    missing_fields: tuple[str, ...] = ()
+    revision_error: str = ""
+    assay_name: str = ""
+
+
+@dataclass(frozen=True)
+class ResultComparisonField:
+    field_key: str
+    old_value: str
+    new_value: str
+    changed: bool = False
+
+
+@dataclass(frozen=True)
+class ReanalysisComparison:
+    revision_id: int
+    fields: tuple[ResultComparisonField, ...]
+    metadata: tuple[ResultComparisonField, ...]
+    source_verified: bool
+    can_keep_old: bool
+    can_accept_new: bool
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class ReanalysisBatchItem:
+    report_id: str
+    run_id: int
+    revision_id: int | None
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class ReanalysisBatchResult:
+    items: tuple[ReanalysisBatchItem, ...]
+    store_path: str
 
 
 @dataclass(frozen=True)
@@ -345,6 +418,7 @@ class ReportDetail:
     path_available: bool = False
     validation_status: str = ""
     report_status: str = ""
+    store_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -372,6 +446,7 @@ class DuplicateCandidateItem:
     decision_note: str = ""
     dedupe_basis: dict[str, Any] = field(default_factory=dict)
     candidate_meta: dict[str, Any] = field(default_factory=dict)
+    assay_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -387,6 +462,7 @@ class DuplicateExistingRunItem:
     dedupe_version: str
     created_at: str
     dedupe_basis: dict[str, Any] = field(default_factory=dict)
+    assay_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -417,6 +493,7 @@ class AssayCandidateItem:
     reason: str
     confidence: str
     known_status: str = ""
+    assay_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -430,6 +507,19 @@ class DeviceInventoryItem:
     device_id: str
     display_name: str
     active: bool
+    serial_number: str = ""
+    lnr: str = ""
+    eva: str = ""
+    incomplete: bool = False
+    legacy: bool = False
+
+    @property
+    def choice_label(self) -> str:
+        return f"{self.display_name} ({self.device_id})" + (" · unvollständig" if self.incomplete else "")
+
+    @property
+    def choice_label(self) -> str:
+        return f"{self.display_name} ({self.device_id})" + (" · unvollständig" if self.incomplete else "")
 
 
 @dataclass(frozen=True)
@@ -440,3 +530,60 @@ class DeviceInventoryStatus:
     using_fallback: bool
     devices: tuple[DeviceInventoryItem, ...]
     default_device_id: str
+
+
+@dataclass(frozen=True)
+class QCConfigurationState:
+    store_path: str
+    inventory: dict[str, Any]
+    profiles: tuple[dict[str, Any], ...]
+    legacy_source_sha256: str = ""
+    legacy_message: str = ""
+
+
+@dataclass(frozen=True)
+class QCLotCase:
+    store_path: str
+    lot_key: str
+    device_id: str
+    device_name: str
+    assay_key: str
+    kit_lot: str
+    state: str
+    version_id: int
+    profile_version_id: int
+    profile_options: tuple[tuple[int, str], ...]
+    start_date: str = ""
+    assay_name: str = ""
+
+
+@dataclass(frozen=True)
+class QCLotDetail:
+    case: QCLotCase
+    source_manifest: dict[str, Any]
+    sd_references: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class QCAnalysisView:
+    case: QCLotCase
+    model_json: str
+    model_sha256: str
+    evidence_lot_version_id: int | None = None
+    pdf_sha256: str = ""
+
+    @property
+    def model(self) -> dict[str, Any]:
+        return json.loads(self.model_json)
+
+
+@dataclass(frozen=True)
+class QCReportVersion:
+    store_path: str
+    lot_key: str
+    version_id: int
+    created_at_utc: str
+    profile_version_id: int
+    model_sha256: str
+    pdf_sha256: str
+    source_count: int

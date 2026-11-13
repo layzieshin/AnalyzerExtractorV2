@@ -174,9 +174,10 @@ class JobQueue:
         finally:
             self._release_lock(lock_path)
 
-    def list_jobs(self, project_root: str) -> List[QueueJob]:
+    def list_jobs(self, project_root: str, *, create_missing: bool = True) -> List[QueueJob]:
         queue_dir = self._queue_dir(project_root)
-        queue_dir.mkdir(parents=True, exist_ok=True)
+        if create_missing:
+            queue_dir.mkdir(parents=True, exist_ok=True)
         jobs: List[QueueJob] = []
         for p in sorted(queue_dir.glob("*.json")):
             jobs.append(self._as_job(self._load(p)))

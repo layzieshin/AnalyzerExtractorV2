@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 from tkinter import ttk
 
 from interfaces.tk.view_models import (
+    format_timestamp,
     iter_report_occurrences,
     occurrence_field_rows,
     occurrence_list_rows,
@@ -71,6 +72,7 @@ class ResultsView(ttk.Frame):
             height=12,
         )
         tree_frame.pack(fill="both", expand=True, pady=(0, 8))
+        self._tree.column("assays", width=260, minwidth=200, stretch=True)
         self._tree.bind("<Double-1>", lambda _e: self._on_open_selected())
         self._empty_list = EmptyState(lbody, "Keine Ergebnisse vorhanden.")
         actions = ttk.Frame(lbody, style="CardInner.TFrame")
@@ -101,6 +103,7 @@ class ResultsView(ttk.Frame):
             height=6,
         )
         occ_frame.pack(fill="both", expand=True, pady=(0, 8))
+        self._occ_tree.column("assay", width=260, minwidth=200, stretch=True)
         self._occ_tree.bind("<<TreeviewSelect>>", self._handle_occurrence_select)
 
         ttk.Label(dbody, text="Felder der ausgewählten Messung", style="SectionTitle.TLabel").pack(anchor="w", pady=(0, 4))
@@ -148,7 +151,6 @@ class ResultsView(ttk.Frame):
             command=self._on_correct_validation,
         )
         self._btn_correct_validation.pack(side="left", padx=(8, 0))
-        self._set_validation_actions(can_save=False, can_correct=False)
 
     def _on_initials_edited(self, *_args: object) -> None:
         if self._suppress_initials:
@@ -180,6 +182,13 @@ class ResultsView(ttk.Frame):
     def validation_initials(self) -> str:
         return self._var_initials.get()
 
+    def validation_result_binding(self) -> tuple[str, str]:
+        selection = self._occ_tree.selection()
+        occurrence = self._occurrences.get(str(selection[0])) if selection else None
+        if occurrence is None:
+            return "", ""
+        return occurrence.selection_token, occurrence.store_path
+
     def validation_comment(self) -> str:
         return self._var_comment.get()
 
@@ -197,6 +206,10 @@ class ResultsView(ttk.Frame):
         for values in validation_history_rows(occurrence):
             self._validation_tree.insert("", "end", values=values)
         if occurrence is None or occurrence.run_id is None or occurrence.validation_ambiguous:
+            self._set_validation_actions(can_save=False, can_correct=False)
+            return
+        if occurrence.reanalysis_pending or occurrence.missing_fields:
+            self._lbl_validation_status.configure(text="Bitte Vergleich oder Nacharbeit in Validierung abschliessen.")
             self._set_validation_actions(can_save=False, can_correct=False)
             return
         has_current = occurrence.current_validation is not None

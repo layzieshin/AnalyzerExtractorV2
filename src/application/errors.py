@@ -29,9 +29,21 @@ class ReportNotFoundError(ApplicationError):
     """Requested report summary/detail is not available."""
 
 
+class PdfPreviewError(ApplicationError):
+    """A report PDF could not be rendered safely."""
+
+
 class ValidationInputError(ApplicationError):
     """Validation input or the addressed run cannot be accepted."""
 
 
 class ValidationConflictError(ApplicationError):
     """An existing validation must not be overwritten or guessed."""
+
+
+class ReanalysisError(ApplicationError):
+    """Reanalysis source, field contract or selected-state conflict."""
+
+
+class QualityControlApplicationError(ApplicationError):
+    """Device, profile or lot work needs a visible correction or refresh."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from pathlib import Path
 from typing import Any, Dict
@@ -35,7 +36,9 @@ class RuleResolver:
             raise RuleResolverError(f"RuleSet file not found: {path}")
 
         try:
-            data: Dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+            source_bytes = path.read_bytes()
+            source_text = source_bytes.decode("utf-8")
+            data: Dict[str, Any] = json.loads(source_text)
         except Exception as e:
             raise RuleResolverError(f"Cannot parse RuleSet JSON: {e}") from e
 
@@ -47,7 +50,8 @@ class RuleResolver:
                 raise RuleResolverError(f"RuleSet missing required section: {req}")
 
         _validate_runtime_ruleset(data)
-        return RuleSet(assay_key=assay_key, ruleset_file=ruleset_file, data=data)
+        return RuleSet(assay_key=assay_key, ruleset_file=ruleset_file, data=data,
+                       source_text=source_text, source_sha256=hashlib.sha256(source_bytes).hexdigest())
 
 
 def _validate_runtime_ruleset(data: Dict[str, Any]) -> None:

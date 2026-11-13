@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ProcessingConfig:
-    output_mode: str = "both"
+    output_mode: str = "sqlite"
     sqlite_path: str | None = None
     device_id: str | None = None
     queue_processing_ttl_s: float = 300.0
@@ -15,6 +15,10 @@ class ProcessingConfig:
     sqlite_busy_timeout_ms: int = 5000
     sqlite_retry_count: int = 3
     sqlite_retry_sleep_s: float = 0.2
+
+    def __post_init__(self) -> None:
+        # Legacy callers can still pass both/excel; workers never select Excel.
+        object.__setattr__(self, "output_mode", "sqlite")
 
 
 @dataclass(frozen=True)

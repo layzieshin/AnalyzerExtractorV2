@@ -11,6 +11,10 @@ class ResultValidationError(Exception):
     """Fachlicher Fehler der Run-Validierung."""
 
 
+class ValidationStateConflictError(ResultValidationError):
+    """The inspected result is stale, incomplete or still awaiting a choice."""
+
+
 class ValidationStoreMissingError(ResultValidationError):
     """Die Ergebnisspeicher-Datei ist nicht vorhanden."""
 
@@ -93,6 +97,10 @@ class RunValidation:
     comment: str
     supersedes_validation_id: int | None
     created_at_utc: str | None = None
+    revision_id: int = 0
+    selection_id: int | None = None
+    selection_token: str = ""
+    request_id: str = ""
 
 
 @dataclass(frozen=True)

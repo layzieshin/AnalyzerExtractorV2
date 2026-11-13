@@ -29,6 +29,7 @@ _EXCEL_USER_MESSAGES = frozenset(
 DESKTOP_VIEW_KEYS: tuple[str, ...] = (
     "dashboard",
     "results",
+    "statistics",
     "validation",
     "rules",
     "settings",
@@ -38,13 +39,14 @@ DESKTOP_VIEW_KEYS: tuple[str, ...] = (
 NAV_LABELS: dict[str, str] = {
     "dashboard": "Auswertung",
     "results": "Ergebnisse",
+    "statistics": "Statistik",
     "validation": "Validierung",
     "rules": "Regelwerke",
     "settings": "Einstellungen",
     "diagnostics": "Diagnose",
 }
 
-PRIMARY_NAV_KEYS: tuple[str, ...] = ("dashboard", "results", "validation", "rules")
+PRIMARY_NAV_KEYS: tuple[str, ...] = ("dashboard", "results", "statistics", "validation", "rules")
 SECONDARY_NAV_KEYS: tuple[str, ...] = ("settings", "diagnostics")
 
 DASHBOARD_RECENT_LIMIT = 10
@@ -122,7 +124,7 @@ def report_list_status(item: ReportSummaryItem) -> str:
 
 
 def report_summary_row_values(item: ReportSummaryItem) -> tuple[str, str, str, str, str]:
-    assay_text = ", ".join(item.assay_keys) if item.assay_keys else str(item.assay_count or 0)
+    assay_text = ", ".join(item.assay_names) if item.assay_names else "Assayname fehlt"
     device_text = ", ".join(item.device_ids) if item.device_ids else "-"
     return (
         item.file_name or "-",
@@ -409,7 +411,7 @@ def occurrence_list_rows(detail: ReportDetail) -> list[tuple[str, str, str, str,
         rows.append(
             (
                 occ_id,
-                group.assay_key or group.assay_display_label or "-",
+                occurrence.assay_name or group.assay_display_label or "Assayname fehlt",
                 occurrence.charge or occurrence.lot_id or "-",
                 occurrence.device_id or "-",
                 format_timestamp(occurrence.created_at),
@@ -478,8 +480,8 @@ def format_assay_candidate_lines(candidates: tuple[AssayCandidateItem, ...] | li
             " | ".join(
                 part
                 for part in (
-                    f"Assay: {candidate.assay_key}",
-                    f"Name: {candidate.assay_name_hint}",
+                    f"Assay: {candidate.assay_name or 'Assayname fehlt'}",
+                    f"Namenshinweis: {candidate.assay_name_hint}",
                     f"Status: {candidate.known_status}",
                     f"Konfidenz: {candidate.confidence}",
                     f"Grund: {candidate.reason}",
@@ -496,7 +498,7 @@ def format_duplicate_detail_lines(detail: DuplicateCandidateDetail) -> str:
     candidate = detail.candidate
     lines = [
         f"Kandidat-ID: {candidate.candidate_id}",
-        f"Assay: {candidate.assay_key}",
+        f"Assay: {candidate.assay_name or 'Assayname fehlt'}",
         f"Status: {candidate.status}",
         f"Bestehender Lauf-ID: {candidate.existing_run_id}",
         f"Dedupe-Key: {candidate.dedupe_key}",
@@ -519,7 +521,7 @@ def format_duplicate_detail_lines(detail: DuplicateCandidateDetail) -> str:
                 f"  Run-ID: {existing.run_id}",
                 f"  Job: {existing.job_id}",
                 f"  PDF: {existing.pdf_path}",
-                f"  Assay: {existing.assay_key}",
+                f"  Assay: {existing.assay_name or 'Assayname fehlt'}",
                 f"  Lot: {existing.lot_id}",
                 f"  Charge: {existing.charge}",
                 f"  Dedupe-Key: {existing.dedupe_key}",

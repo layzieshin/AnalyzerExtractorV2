@@ -5,7 +5,7 @@ import socket
 from pathlib import Path
 from typing import Any, Callable
 
-from src.jobcontroller.api import submit
+from src.jobcontroller.api import get_job_evidence, submit
 from src.jobqueue.api import (
     claim_next_job,
     enqueue_pdf_job,
@@ -86,6 +86,9 @@ def retry_failed(
     reason: str = "retry_requested",
     worker_id: str = "",
 ) -> ProcessingJob:
+    evidence = get_job_evidence(project_root, job_id)
+    if evidence is not None and evidence.retry_kind == "retired":
+        raise ValueError("historical_output_plan_read_only")
     job = retry_failed_job(str(project_root), job_id, reason=reason, worker_id=worker_id)
     return _as_processing_job(job)
 
@@ -138,7 +141,7 @@ def process_next_pending(
         res = effective_submit(
             job.pdf_path,
             str(root),
-            output_mode=config.output_mode,
+            output_mode="sqlite",
             sqlite_path=config.sqlite_path,
             lock_ttl_s=config.pipeline_lock_ttl_s,
             sqlite_busy_timeout_ms=config.sqlite_busy_timeout_ms,

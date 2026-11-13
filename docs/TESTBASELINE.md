@@ -4,6 +4,792 @@ Date: 2026-09-22 (Phase 2 / Gate 2 — technical closure)
 
 Purpose: reproducible reference point for the V2.1 GUI refactor orchestration. Supersedes the 2026-07-09 AP-1 baseline (`74 passed` is **obsolete**).
 
+## Current rebuild gates (2026-11-13)
+
+### Post-push duplicate comparison correction (2026-11-13): GATE_PASSED
+
+The authorized PR-review improvement uses the existing selected ResultStore
+projection for duplicate lot, payload and dedupe key/version/basis. One captured
+store supplies the complete detail read. Original job/PDF provenance and raw
+DbWriter history remain unchanged. Legacy and smoke displays use that same
+controller DTO and existing presenter, including their discard caches.
+
+Before product edits, the real public-API original L1/value 1 -> accepted
+L2/value 2 -> alias duplicate regression failed as expected: **1 failed in
+2.61s**. After the bounded fix, the following selection passed **7 tests,
+0 skips in 4.06s**, with `-B`, bytecode disabled and normal Windows rights:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m pytest -q tests/test_application_results_controller.py::test_duplicate_detail_follows_accepted_projection_not_original_or_pending_and_never_writes tests/test_application_results_controller.py::test_duplicate_detail_captures_one_store_with_same_ids_in_another_store tests/test_application_results_controller.py::test_duplicate_controller_list_detail_and_discard tests/test_application_results_controller.py::test_duplicate_field_comparison_preserves_falsy_values tests/test_test_app_smoke.py::test_duplicate_adapters_show_selected_projection_and_preserve_discard_cache --basetemp=.tmp/pytest-postpush-duplicate-20261113/green -o faulthandler_timeout=30 --tb=short -rs
+```
+
+Coverage includes pending newer revisions, 0/False/None, selected dedupe metadata,
+unchanged original/revision/SQLite bytes and mtimes, same-ID store switching,
+and both adapters' selection/discard paths. The seven-file freeze audit is
+`.tmp/postpush-duplicate-freeze-audit-20261113.json`, compared with the full
+`AnalyzerResultExtractorV2-POSTPUSH-REWORK-SAFETY-20261113` copy (copy 1 / compare
+0). Protected data/current build outputs and previous audits remain unchanged.
+Independent recheck and replacement full/build/visible qualification passed
+as recorded next. The writer ran no full suite/build/CUA/Git write; parent
+qualification is recorded separately.
+
+### Replacement technical qualification after PR correction: GATE_PASSED
+
+The sole independent reviewer returned GO, no findings: **7 passed, 0 skipped
+in 3.33s**. The canonical builder completed **1243 passed, 2 skipped in 416.84s**,
+then PyInstaller, bundled rules/structure checks and EXE startup. Skips: known
+Windows symlink privilege and one transient Tk library read error. The exact
+wizard test was subsequently rechecked: **2 passed, 0 skipped in 2.93s**, with
+no product/installation/environment repair and no repeated full suite.
+Log: `.tmp/final-postpush-duplicate-qualified-20261113.log`;
+Tk proof: `.tmp/final-postpush-tk-recheck-20261113.xml`.
+
+Replacement portable ZIP: **35,332,280 bytes / 720 entries**, SHA-256
+`e58175a053353e012ddeb382ba6f98fec08db7d73f92f2b2f6f00ccd0a635b8e`.
+EXE SHA-256: `a92658ba3592029b82894a46d1bb1c2f22bc29f5ed31e4947010f78978318d40`.
+All **197** raw product inputs match fingerprint
+`25c62844239fbc35c8e8a1cde4778a1985adb7638b716fd5abfd0d8ae18f0c52`.
+Fresh extraction, ZIP content/integrity and extracted EXE startup passed:
+`.tmp/p5-final-package-verification-20261112-5.json`.
+
+Actual extracted EXE: accepted L2/value 2 against candidate L2/value 2; equal
+0/False/empty values; selected dedupe metadata; original-job provenance; newer
+L3 remained pending. Statistics opened with selected L2. The EXE closed normally.
+The synthetic SQLite bytes, selected/original/history state and raw duplicate
+evidence stayed identical. Three screenshots and
+`.tmp/final-round5-visible-qualification-20261113.json` retain the proof.
+Earlier complete synthetic E2E and QC/PDF qualification are preserved; this
+correction changed no processing, persistence, QC mathematics or PDF code.
+
+Postbuild comparison: **12,524 protected files unchanged** outside the three
+authorized build targets, plus both nested local job files checked separately.
+No source exception was needed; `deploy_smoke` is preserved. Evidence:
+`.tmp/final-postpush-duplicate-release-protected-audit-20261113.json`.
+The preceding ZIP below is superseded for release and retained as evidence.
+Publication remains a separate authorized step; exact commit/actual merge/tag
+and asset identities belong to the PR/steward/release provenance. Human acceptance
+is separate. The documented sample-rule matrix remains 2 green / 0 yellow /
+9 red and does not qualify every supplied rule.
+
+### Predecessor technical qualification before PR correction (2026-11-13)
+
+Independent reviews: Statistics 50 passed / 0 skips / no findings; approved
+build-provenance correction 5 passed / 0 skips / no findings. The final canonical
+builder completed **1239 passed, 1 skipped in 195.71s**, rule-integrity validation,
+PyInstaller, bundled rules/structure checks and EXE startup smoke. The only skip
+requires Windows symlink privilege. No duplicate full regression followed.
+Log: `.tmp/final-statistics-provenance-qualified-20261113.log`.
+
+Fresh ZIP extraction and separate EXE startup passed. Portable ZIP: 35,331,506
+bytes / 720 entries; SHA-256
+`37d7bd82eeae0d6dc56f6b4007d7702d63bdf5418f52e13a11b1a8f381462cfa`.
+EXE SHA-256: `5ad605ea808746c61ff02cc10c6c9c540388dff98ab7160cb53ba66bd9c9d8de`.
+All **197** raw inputs match fingerprint
+`745d71cc60caac7a99e22ab21ec9dd011091056132b39b826f15e6d1a0b3c40c`;
+all inputs are tracked or explicitly planned. Both excluded local job files
+remain byte/size/mtime-identical. Earlier ZIPs are superseded for publication.
+
+Actual visible qualification used this fresh EXE and synthetic data only:
+separate Statistics navigation, frozen 19-measurement/two-control report,
+compact and optional explained PDF exports. The compact four-page copy is
+byte-exact to stored evidence. All eight explained pages have identical text
+and drawing streams to the already visually inspected version. Rule inventory
+tables display assay names. Right-click opens the existing test draft; its PDF
+finds 13/13 fields and PC_IST / NC_IST switching remains responsive. Results has
+no duplicate QC entry. Screenshots 42-49 are retained in
+`.tmp/final-qualification-20261112-2/screenshots-final`. Both EXE windows closed
+normally without saving or changing a rule/draft.
+
+The final public-API evidence audit passed **24 checks**: unchanged profile 1
+and reports 3/6/8, frozen SD baseline n=18, selected date/time profile and current
+19/38 measurement/control population. Evidence:
+`.tmp/final-display-pdf-ui-proof-20261113-110835-9a81487d.json`,
+`.tmp/final-round4-pdf-export-proof-20261113.json` and
+`.tmp/final-round4-visible-qualification-20261113.json`.
+The earlier complete synthetic import/archive/reanalysis/human-validation/QC/
+closure/restart qualification remains valid; this follow-up changed no backend,
+mathematics, PDF rendering or persistence code.
+
+Postbuild preservation: **12,523** protected files outside the three authorized
+build replacements and the separately approved builder-source edit are exact;
+both nested runtime job files are separately exact. `deploy_smoke` is preserved.
+Audit: `.tmp/final-statistics-provenance-release-protected-audit-20261113.json`.
+This is technical qualification; human acceptance is separate. The sample-rule
+matrix retains its documented 2 green / 0 yellow / 9 red baseline and does not
+qualify every supplied assay against every PDF. Git publication follows as a
+separate authorized step; exact pushed/merged/tagged revisions and asset checks
+are recorded in the PR and release provenance manifest. Raw Windows hashes and
+Git clean-filter blob hashes are distinct.
+
+### Build-provenance runtime exclusion (historical writer checkpoint; subsequent GO)
+
+The user explicitly approved excluding local runtime/work metadata while
+preserving the two existing `interfaces/tk/jobs` files. The full copy
+`I:\Projekte\AnalyzerResultExtractorV2-BUILD-PROVENANCE-SAFETY-20261113`
+completed copy exit 1 / comparison exit 0 before writes. Exactly the builder's
+existing `_product_inputs`, its existing test file and the two gate documents
+are in scope. The package scan now filters relative directory components with
+casefold for reserved runtime/cache/work directories. Source/static assets,
+new code without a Git index, the separate static rule tree and the existing
+resolved-root escape guard remain. No data, cleanup target or build flow changes.
+
+Executed focused command: `python -B -m pytest -q tests/test_packaging_build.py
+-k "fingerprint or nested_runtime or input_escape or manifest_records or failed_canonical"
+--basetemp=.tmp/pytest-build-provenance-20261113/focused
+-o faulthandler_timeout=30 --tb=short -rs`, bytecode disabled, normal Windows
+rights via `require_escalated`: **5 passed, 9 deselected, 0 skipped in 1.04s**.
+Synthetic nested directories under all three packages remain byte-/mtime-intact
+when scanned; runtime changes do not change the fingerprint, while code/assets/
+rules/new untracked source do. A simulated resolved symlink/junction escape
+fails before external payload reading, without requiring Windows link privilege.
+The existing failed-preflight check still prevents cleanup/build.
+
+The actual read-only scan changed **199 to 197** inputs, removing exactly the
+two known local job files. StatisticsView remains included. A read-only Git
+inventory confirms every remaining input is tracked or a planned new file;
+the input algorithm itself does not use Git. Both local files match the new
+safety copy's SHA/size/mtime. Current product fingerprint:
+`745d71cc60caac7a99e22ab21ec9dd011091056132b39b826f15e6d1a0b3c40c`.
+
+Freeze audit: `.tmp/build-provenance-freeze-audit-20261113.json`. The authorized
+builder source is the sole permitted packaging-tree delta; all other protected
+files/build outputs, local runtime files and the twelve non-gate Statistics
+files remain unchanged. No full suite, build, CUA/E2E or Git write was run.
+Independent review and final canonical full/build subsequently passed; see the
+final technical qualification above. This writer checkpoint is historical.
+
+### Dedicated Statistics navigation (2026-11-13, independent GO)
+
+The user's explicit request for an own Statistics tab authorizes seven views.
+The existing QC state/widgets/chart/source/history/PDF actions were moved once
+from ResultsView to StatisticsView; the Results QC entry and internal back-to-
+report switch were removed. Results retains report lists/details/validation.
+The same ResultsController, four services and `qc-lots`/`qc-sources` TaskRunner
+callbacks/store/generation guards remain. No math, PDF, schema, rules, backend API
+or builder change is part of this package.
+
+Verified full safety copy:
+`I:\Projekte\AnalyzerResultExtractorV2-STATISTICS-NAV-SAFETY-20261113`,
+copy exit 1 / closed comparison exit 0. Scope is the approved 14 files, including
+one new UI view, existing shell/navigation/results view, three affected test
+files and six P0/gate documents. Tests used `python -B -m pytest -q --tb=short -rs
+-o faulthandler_timeout=30`, bytecode disabled, normal Windows rights through
+`require_escalated`, below `.tmp/pytest-statistics-nav-20261113/`:
+
+| Executed selection | Result | Basetemp suffix |
+|---|---|---|
+| Existing 40 architecture gates; Statistics declarations/deferred store guard; report binding; seven-view minimum size; six existing QC source/status/chart/history/close/export cases | **48 passed, 2 failed in 18.20s** | `focused` |
+| Three affected test-adapter cases after adapting the old report-back expectation | **1 passed, 1 failed, 1 skipped in 4.31s** | `fixed` |
+| Statistics deferred/store guard, isolated | **1 passed, 0 skipped in 1.86s** | `final-guard` |
+| Statistics state/actions/footer, isolated | **1 passed, 0 skipped in 3.79s** | `final-state` |
+
+The failures were test coupling only: a SimpleNamespace treated as a dataclass,
+an obsolete Results-only back action, then Tk's missing-attribute forwarding on
+the uninitialized shell stub. These test adapters were corrected. The single
+known Tcl `init.tcl` initialization skip passed in isolation. All 50 selected
+cases have passing executions; overlapping runs are not summed. No unchanged
+math/PDF suite, full run, build, CUA or E2E was replayed.
+
+The parent's existing 24-check GUI proof and 4-page compact/8-page explained PDF
+inspection qualify the predecessor; they are not proof of this new navigation.
+Fresh source/protected audit:
+`.tmp/statistics-nav-freeze-audit-20261113.json` against this exact full copy;
+previous safety/audit evidence and runtime files remain preserved. Independent
+Statistics review subsequently returned GO: **50 passed, zero skips, no findings**.
+The parent final canonical full/build/visible follow-up follows the separately
+approved build-provenance correction above.
+
+### Assay names and compact control PDF (2026-11-13, final test-only recheck pending)
+
+The user approved full assay names in human tables, compact default control
+reports with optional interpretation, and each control's own graph/value section.
+The verified full copy is
+`I:\Projekte\AnalyzerResultExtractorV2-DISPLAY-PDF-SAFETY-20261113`:
+97,352 files / 95,042 directories / 2.361 GiB, copy exit 1 / comparison exit 0.
+
+Selected revision names precede original provenance, stored public Writer/Splitter
+evidence and the active catalog through the existing RuleSuiteController.
+Pending candidates do not rename current results; missing names are explicit,
+filename hints are labelled, duplicate selections retain index/key identity and
+technical keys stay internal. No architecture allowlist was expanded.
+New QC presentation metadata is frozen separately from unchanged source/SD/math.
+Renderer v2 uses separate control pages/continuations and frozen operator/bound
+validator/UTC data. Date-only sources show no invented time, including on axes.
+Default export remains archive-byte-exact; the strict boolean option renders a
+separate explained print only from the stored model. Existing evidence is unchanged.
+
+Focused commands used `.venv/Scripts/python.exe -B -m pytest -q`,
+`PYTHONDONTWRITEBYTECODE=1`, `--tb=short -o faulthandler_timeout=30` and the following
+roots below `.tmp/pytest-display-pdf-20261113/`. Runs overlap and are not summed.
+
+| Executed selection | Result | Basetemp suffix |
+|---|---|---|
+| Results/RulesController files; actual profile callback; duplicate-name legacy selection | **49 passed, 0 skipped, 7.66s** | `names-run` |
+| Selected/original/job/catalog name case and unchanged architecture-gate file | **41 passed, 0 skipped, 5.38s** | `name-owner-arch` |
+| Compact/explained real PDF; duplicate-name profile selection; human table projections; hidden RuleEditor key column | **4 passed, 0 skipped, 17.76s** | `presentation` |
+| Final compact/explained pagination case plus baseline-center PDF | **2 passed, 0 skipped, 11.88s** | `final-qa-pdf` |
+| Archived exact/derived print, boolean validation, spawn metadata, actual close/history/export and v1/v2 reader | **12 passed, 0 skipped, 13.08s** | `final-export-contract` |
+| Irrational calculated display/raw-value geometry, isolated Tk process | **1 passed, 0 skipped, 6.96s** | `final-irrational` |
+| Frozen chart selection/zoom/pan/reset, isolated Tk process | **1 passed, 0 skipped, 3.12s** | `final-chart` |
+| Actual legacy DB/name/run-identity read; candidate-name projections; v1/v2 reader | **5 passed, 0 skipped, 3.40s** | `final-legacy-names` |
+
+During implementation an indentation collection failure and a missing basetemp
+parent were corrected. An intermediate wider affected slice had **56 passed,
+2 failed, 1 skipped** (66.43s): the failures assumed contiguous text across
+wrapped table columns; the existing Tk initialization skip passed in isolation.
+Checks now use extracted span geometry for raw values/reasons. The later
+axis/time/presentation command had **3 passed, 1 failed** (31.27s), solely because
+the optional appendix's date heading still included time wording; this was
+corrected and the final compact/extended case passed. Earlier PDF assertions also
+exposed wrapping, appendix/control-page classification and date-only explanatory
+text; corrected focused outputs above replace those provisional layouts.
+
+The parent independently read all **4 compact + 15 explained pages** with pypdf,
+rendered/visually checked every compact page and appendix pages 5/15 with Poppler,
+and checked the one-page SOLL100/center91/SD1 baseline example. Final evidence:
+`.tmp/display-pdf-final-poppler-qa-20261113/inspection.json`.
+Compact SHA256 `6f7475064cb38ca43d9e5bb6d3652fcd5cc8781d359a8a3672179a6c343ea6ce`;
+explained SHA256 `6895adee8a7718f4e9f31c660fc68dda9741a1ed81b43e5960d5bd623d5febbf`.
+Provisional QA was preserved and is not the final layout evidence.
+
+Freeze audit: `.tmp/display-pdf-freeze-audit-20261113.json`, against the fresh
+full copy. All allowed source deltas/hashes and protected-tree byte/size/mtime
+comparison are recorded there, including current build outputs and every
+packaging file. Prior audits remain unchanged. This writer ran no full suite,
+build, CUA/E2E or Git action. Material review and one parent canonical full/build
+with final visible qualification remain pending.
+
+#### Final test-only contract alignment
+
+The parent's valid Windows-rights canonical full ran **1 failed, 1235 passed,
+1 skipped in 280.18s**. The sole failure was the legacy candidate test indexing
+visible column 0 by technical keys, contrary to the approved name-only contract.
+Its fixture also registered an index entry without an actual rule/name. A bounded
+independent escalation confirmed a stale test and no product defect. The earlier
+private-temp WinError-5 attempt was interrupted before cleanup/build; source,
+ACL and configuration were unchanged.
+
+The unchanged full copy
+`I:\Projekte\AnalyzerResultExtractorV2-FINAL-DISPLAY-PDF-RELEASE-SAFETY-20261113`
+contained the exact pre-edit test SHA256
+`52ccd4b976699de72c13853eab0245e5fd47d41d35daa64cafcf1402a50d5d10`,
+verified again before this first test-only write. Only that test and these two
+gate documents change. The fixture now has a genuinely valid active rule with
+a proven full name distinct from its filename hint; assertions cover visible
+name/missing-name/hint, hidden key/status/IID selection, and unchanged index/rule
+bytes and mtimes. No product code, renderer or existing PDF is changed.
+
+Focused `python -B -m pytest -q --tb=short -rs -o faulthandler_timeout=30`,
+`PYTHONDONTWRITEBYTECODE=1`, normal Windows execution via `require_escalated`,
+used `.tmp/pytest-display-pdf-final-test-alignment-20261113/`:
+selectors were `tests/test_test_app_smoke.py::test_test_app_preview_assay_candidates_shows_known_and_unknown`,
+`tests/test_test_app_smoke.py::test_test_app_create_draft_from_known_candidate_is_blocked`
+and `tests/test_test_app_smoke.py::test_test_app_create_draft_from_unknown_candidate_creates_header_draft`,
+first under `candidates`, then only the first selector under `candidate-fixed`.
+the candidate-preview plus known/unknown draft-identity cases gave **1 failed,
+2 passed, 0 skipped in 3.45s** because the new test initially retained `.asy` in
+the already-normalized hint. Correcting only those two expectations, the sole
+affected preview case reran **1 passed, 0 skipped in 1.58s** under `candidate-fixed`.
+No unchanged cases were rerun, and this writer ran no full/build/CUA/Git.
+Audit: `.tmp/display-pdf-final-test-alignment-freeze-audit-20261113.json` against
+that exact full copy, with three-file delta and unchanged product/protected hashes.
+Independent test-only recheck and the parent's final canonical full/build remain
+pending. This is not another product rework or a self-approved gate.
+
+#### Names/PDF Rework 2: one confirmed P2 status finding
+
+Rework 1's original two findings were independently fixed. A new confirmed P2
+showed the renderer could call no selected rules/no eligible values unremarkable.
+The fresh full safety copy is
+`I:\Projekte\AnalyzerResultExtractorV2-DISPLAY-PDF-REWORK2-SAFETY-20261113`:
+98,071 files / 95,737 directories / 2.383 GiB, copy exit 1 / comparison exit 0.
+
+Only the existing renderer's status sentence changes: intentional empty selection
+says "keine Regeln ausgewählt"; no frozen eligible control points says
+"nicht auswertbar". The unremarkable sentence requires an existing selected
+canonical `pass`/`not_triggered` finding. Otherwise availability/reasons and actual
+warnings/rejections remain explicit. QMMA/Rili applicability is not a Westgard
+availability test. No rules, statistics, models, source eligibility, SD handling,
+actor binding or previously stored PDF bytes are changed.
+
+Executed commands used `python -B -m pytest -q --tb=short -rs
+-o faulthandler_timeout=30`, bytecode disabled, with fresh roots below
+`.tmp/pytest-display-pdf-rework2-20261113/`:
+
+| Executed selection in `tests/test_qualitycontrol_pdf.py` | Result | Basetemp suffix |
+|---|---|---|
+| Public stored two-control close/export case; selected normal/warning/rejection/n0 cases; empty population; unavailable SD and exact export | **7 passed, 0 skipped in 19.40s** | `status` |
+| Existing compact/extended control pagination and frozen-baseline-center PDF cases | **2 passed, 0 skipped in 12.55s** | `essential-pdfs` |
+
+The public stored case has c1 n=0, c2 n=1 and `enabled_rules=[]`; open/atomic
+close/exact export succeed while both pages explicitly show empty selection and
+c1 also shows missing eligible values. The actually evaluated normal case remains
+unremarkable even when QMMA's relative applicability is off. Canonical model,
+source, stored evidence and DB bytes/mtime preservation are checked.
+Main fresh PDF: `status/test_stored_two_control_report0/stored-control-status.pdf`.
+Normal/warning/rejection/n0 reports and fresh compact/info/baseline reports remain
+under the same fresh test root. Renderer SHA256:
+`bb173a9e656c57234a90ead488433ede8e16be0be4d64803bbad42ed4256f633`.
+
+Parent fresh PDF QA passed: pypdf read all **8 reports / 26 pages**; Poppler
+confirmed both stored-status pages and the n0 case visually. Normal, warning,
+rejection, no values and no selected rules remain distinct. All four compact
+page PNGs are pixel-/byte-identical to the previously inspected renderings.
+Evidence: `.tmp/display-pdf-rework2-final-poppler-qa-20261113/inspection.json`
+and `compact-pixel-comparison.json`. Compact PDF SHA256:
+`63594a8feca27ce445bd0ad511b5adf99950d32e731bf450b754a3df3b743e89`;
+explained PDF SHA256:
+`37ab93e845f91df352fbc96c11e99d1f433959a6f75cf1ac1b38f045377b124b`.
+
+Audit: `.tmp/display-pdf-rework2-freeze-audit-20261113.json`, comparing the four
+allowed files against the fresh Rework-2 copy and cumulative scope against the
+original display/PDF copy. Prior audits/QA and build artifacts are preserved.
+No further source owner, mathematics group, full suite, build, CUA/E2E or Git
+action was used. Independent Rework-2 recheck and the parent's one
+canonical full/build remain pending.
+
+#### Names/PDF Rework 1: exactly two P2 findings (subsequently fixed)
+
+The first independent review found malformed public JobEvidence name containers
+could abort result listing, and unavailable combined timestamps hid otherwise
+known frozen date/time raw fields. The fresh full safety copy is
+`I:\Projekte\AnalyzerResultExtractorV2-DISPLAY-PDF-REWORK1-SAFETY-20261113`:
+97,874 files / 95,614 directories / 2.377 GiB, copy exit 1 / comparison exit 0.
+
+The ResultsController now accepts only list containers, matching dict entries
+and nonempty string names; unusable optional names continue through the existing
+Writer/Splitter/catalog/missing-name fallback. Critical result errors remain
+visible. PDF display uses known frozen `measurement_date_raw` and
+`measurement_time_raw` when `measured_at` is unavailable. Existing field reasons
+mark the affected raw value "Ungültig"; its known counterpart is preserved and
+missing fields remain "Nicht erfasst". There is no reparsing, guessed timestamp,
+source/model/statistics/schema change or altered actor binding.
+
+Both commands used `python -B -m pytest -q --tb=short -rs
+-o faulthandler_timeout=30`, bytecode disabled, with fresh roots below
+`.tmp/pytest-display-pdf-rework1-20261113/`:
+
+| Executed selection | Result | Basetemp suffix |
+|---|---|---|
+| `test_application_results_controller.py::test_real_job_name_evidence_ignores_unusable_shapes_and_preserves_result_errors` (10 real public-read cases), existing name-priority case, `test_qualitycontrol_pdf.py::test_real_pdf_preserves_frozen_raw_date_time_counterparts_without_interpretation` | **12 passed, 0 skipped in 8.86s** | `findings` |
+| Existing compact/explained control pages, frozen-baseline center, unavailable QMMA, actual no-SD evidence/byte-exact export, archived v1/v2 exact/derived prints | **6 passed, 0 skipped in 37.02s** | `essential-pdfs` |
+
+Fresh raw-field PDFs are under `findings/test_real_pdf_preserves_frozen0/`:
+`raw-date-time-fields.pdf` and `raw-date-only-fields.pdf`. Fresh compact/explained,
+baseline-center and unavailable examples are under the corresponding test
+directories in `essential-pdfs/`. Prior layouts/QA and archives remain unchanged;
+the preceding initial-package QA is historical, not fresh Rework-1 QA.
+New source/protected audit: `.tmp/display-pdf-rework1-freeze-audit-20261113.json`,
+against the fresh Rework-1 snapshot, including cumulative comparison to the
+original display/PDF snapshot and preservation hashes for previous audits.
+Exactly the two owners, their two test files and the two gate documents are in
+scope. No full suite, mathematics group, build, CUA/E2E or Git action was run.
+The original two Rework-1 findings were independently confirmed fixed; the new
+status finding and Rework-2 checkpoint are recorded above. Parent canonical
+full/build remains pending; this is not a self-approved gate.
+
+### Final profile-management escalation correction (2026-11-13)
+
+A legitimate unindexed Trash rule `(5f03)` blocked profile management because
+the shell enumerated all lifecycle inventory but resolved every field list via
+the active index. This is a bounded escalation correction, not a third normal P5
+rework. The verified full safety copy is
+`I:\Projekte\AnalyzerResultExtractorV2-FINAL-PROFILE-FIX-SAFETY-20261113`:
+97,329 files, 95,022 directories, 2.361 GiB, copy exit 1 / comparison exit 0.
+
+Only the existing shell call now requests `list_inventory(kind="active")`.
+No archive/profile/rule data is removed or rewritten; active-rule errors remain
+visible. The existing worker/stale-dialog test and a real lifecycle-inventory /
+callback / mapped-dialog regression ran with bytecode writes disabled:
+**2 passed, 0 skipped in 3.32s**, `-B -m pytest`, `-q --tb=short
+-o faulthandler_timeout=20 --basetemp .tmp/pytest-final-profile-escalation-20261113`.
+The real case preserves Draft/Inactive/History/Trash bytes/mtimes, loads active
+field mappings and confirms a broken active rule still raises its error.
+Scope: shell, existing QC application tests and these two gate documents only.
+Audit: `.tmp/final-profile-escalation-freeze-audit-20261113.json` against the fresh
+copy: exactly four allowed existing files changed, none added/removed, and all
+13,262 protected files match bytes/size/mtime (output 8,843; packaging 2,063;
+config/storage absent on both sides). Prior audits are preserved.
+No full/build/CUA/Git was run by this writer.
+Independent recheck subsequently passed **2 passed, 0 skipped in 2.30s**.
+The parent's canonical full/rebuild now follows the separate presentation package.
+
+| Package | Independent review | Single post-GO full regression | Rules integrity |
+|---|---|---|---|
+| P1: draft selection and continuation | GO after two reworks | **828 passed, 2 skipped** | PASS |
+| P2: embedded PDF validation | GO after one rework | **869 passed, 2 skipped**, 135.82s | PASS |
+| P3a: new processing without Excel | GO after two reworks; final independent slice **132 passed** | **954 passed, 3 skipped**, 158.23s | PASS |
+| P3b: true reanalysis/result revisions | GO after one rework; independent slices **123 + 161 passed**, rework **37 passed** | **1008 passed, 2 skipped**, 145.97s | PASS |
+| P4: unified devices/control profiles/lots | GO after one rework; independent core **73**, QC UI **12**, desktop **80**, architecture **40**; final recheck **15 passed** | **1052 passed, 2 skipped**, 151.51s | PASS |
+| P5 plus approved time field: technical qualification; final visible follow-up pending | SD-origin recheck **49 passed**; axis recheck **2 passed**; time-field review **34 passed, 0 skipped**, 8.85s | **1201 passed, 2 skipped**, 140.62s, inside final canonical builder | PASS |
+
+P2 total inventory: 871 cases; P3a: 957 cases (**+86**). Skip classes remain
+local Tcl/Tk initialization and Windows symlink privilege. P3a full-suite command:
+`.\.venv\Scripts\python.exe -m pytest -q -rs --basetemp .tmp\pytest-package3a-gate-20261112-1`.
+
+Visible synthetic Windows checks passed for P2 maximization, equal PDF/workflow
+panes, page navigation, zoom, fit width, case switching and window restoration.
+P3a settings visibly present SQLite/PDF storage without an Excel selection.
+Screenshots were observed in the orchestrator's computer-use transcript; separate
+PNG evidence files were not recorded for these checks. The source GUI was closed.
+This is agent verification, not a recorded human operator sign-off.
+
+P3b's single post-GO full command was
+`.\.venv\Scripts\python.exe -m pytest -q -rs --basetemp .tmp\pytest-p3b-gate-20261112-1`.
+Inventory: **1010 cases**, +53 versus P3a's 957. Known skips: local Tcl/Tk
+initialization and Windows symlink privilege. Rules integrity passed with all
+five lists empty. The independent protected-data audit found zero content/mtime
+differences; the full-rights output comparison confirmed 8,843 files on each side.
+Root's exact SHA-256 source/doc comparison against P3B-SAFETY counted 36 changed
+files including the execution record. See its P3b gate for scope details.
+
+P4's single post-GO command was
+`.\.venv\Scripts\python.exe -m pytest -q -rs -o faulthandler_timeout=60 --basetemp .tmp\pytest-p4-gate-20261112-1`.
+Inventory: **1054 cases**, +44 versus P3b. The completed full run did not hang.
+Skips were one Tk library load (`ttk/scale.tcl`) and Windows symlink privilege.
+Rules validation exited 0 with all five lists empty. One-shot Watchdog and Worker
+entrypoints exited 0 in `.tmp/p4-adapter-smoke-20261112` (watch disabled, no jobs).
+The two review defects were fixed without altering IDs or migration evidence;
+15 independent recheck tests passed without skips. Protected audit: 13,258 files,
+zero content/size/mtime differences. P4 source scope: 29 project files, including
+documentation, with the bounded six-file rework contained within that scope.
+
+### Final technical qualification (2026-11-13)
+
+The canonical command was `.\.venv\Scripts\python.exe -B packaging/build_onedir.py`,
+with `PYTEST_ADDOPTS=-rs --basetemp=.tmp/pytest-final-release-20261113` and
+`PYTHONDONTWRITEBYTECODE=1`. Its single post-final-GO regression passed **1201 / 2
+skipped** in **140.62s** before any cleanup. Inventory: **1203**, +149 versus P4.
+Skips: Windows symlink privilege and a local Tk `ttk/altTheme.tcl` load in
+`test_rule_editor_phase6_layout.py`. The earlier candidate's **1167 / 2** run
+preceded the visible axis finding and approved time extension; this final rerun
+qualifies those subsequent changes, rather than duplicating an unchanged run.
+
+Build, bundle integrity/rules and automatic EXE smoke passed. Independent fresh
+ZIP extraction/checksum inspection and startup smoke passed: **720 files**,
+**35,317,905 bytes**, ZIP SHA-256
+`17c1ac2b53bacd7b745ae826236d31d6e4abfe53534b4c32e8370bd28505174b`;
+raw product-input fingerprint
+`e520033b3dbd8b6bea4177cebd11bd43c7b63138ac6fcfa7253dcc725694d6f8`.
+Rules validation returned five empty lists. One-shot Watchdog/Worker exited 0 in
+`.tmp/final-release-adapter-smoke-20261113` (disabled/empty).
+
+The final read-only sample matrix (`rules_matrix_main.py --mode preview
+--no-write-report`) returned **2 green / 0 yellow / 9 red**, exit 1. Seven assays
+remain absent from the two sample PDFs. The other two now fail with
+`configured_fields_empty` instead of the historical optional-field warning:
+`(6bd7)` lacks eight configured fields and `(42d4)` lacks `SOLL_S3,FILE_NAME`.
+This reflects the approved rule that every configured extraction field must be
+populated; it does not establish that those existing rules work on these samples.
+Rules and sample PDFs were unchanged. Log:
+`.tmp/final-release-rule-matrix-20261113.log`. The older **2/2/7** matrix records
+below remain historical; they are not the current sample result.
+
+Full pre-build snapshot: `I:\Projekte\AnalyzerResultExtractorV2-FINAL-RELEASE-SAFETY-20261113`,
+94,506 files, 92,165 directories, 2.140 GiB; copy exit 1/comparison exit 0.
+Post-build SHA/size/mtime comparison excluded only the three authorized build
+targets: **12,524 remaining protected files unchanged**, including 8,843 output
+files and `deploy_smoke`. Product-input bytes still match build metadata.
+Local evidence: `.tmp/final-release-build-20261113.log`,
+`.tmp/p5-final-package-verification-20261112-2.json`,
+`.tmp/final-release-protected-audit-20261113.json` (SHA-256
+`3ffd9bf2da438da9c812aaec8f088f3e41a9140af393fa381a0efacb853bb55a`).
+
+Earlier final-workflow qualification retained 26 screenshots, three real UI
+validations including whole-result reanalysis, 64 backend checks and an actual
+packaged PDF closure/export/restart/history check. The final artifact still needs
+the targeted visible time-field/axis/PDF follow-up; automatic smoke is not that
+evidence. Git/merge/release and human operator sign-off remain unrecorded.
+
+P5's historical implementation checkpoints follow.
+See [the execution record](REBUILD_EXECUTION_2026-11-12.md).
+All older gate labels and pending-review statements below describe their
+historical checkpoint only; the table above is the current rebuild baseline.
+
+## P5 writer checkpoint (2026-11-12, independent review pending)
+
+Scope: immutable Decimal QC analysis and shared chart/PDF model, classic-six-v1,
+real bounded-spawn PDF rendering, explicit successor-lot closure, frozen report
+history/exact no-overwrite export, existing Results UI, version 2.0.0 and honest
+build metadata. Five QC tables, four controllers/services and six views remain.
+The optional separate extracted time-field extension is not approved or
+implemented in this checkpoint. Existing explicit date/timestamp mappings and
+honest same-day ambiguity handling remain.
+
+The fresh full snapshot is
+`I:\Projekte\AnalyzerResultExtractorV2-P5-SAFETY-20261112`: 90,799 files,
+88,812 directories, 1.866 GiB rounded; copy comparison exit 0 before writes.
+HEAD remains `5ae98ea9919215e5aea00232f215ae3f8c0dd1e2`.
+Commands use `.\.venv\Scripts\python.exe -m pytest`, fresh synthetic `.tmp/`
+basetemps for file fixtures and authorized normal Windows rights. These
+executed slices overlap; their counts must not be summed into a regression total.
+
+| Scope | Executed result | Basetemp under `.tmp/` |
+| --- | --- | --- |
+| Initial complete `tests/test_qualitycontrol_analysis.py` vector slice | **52 passed, 0 skipped in 0.66s** | pure in-memory vectors; no file fixtures |
+| Actual PDF generation, large multipage document, atomic evidence/export, timeout cleanup and frozen baseline center | **4 passed, 0 skipped in 19.85s** | `pytest-p5-stage2-green-20261112` |
+| Same PDF component file after parent layout findings were corrected | **4 passed, 0 skipped in 19.22s** | `pytest-p5-stage2-layout-fixed-20261112` |
+| Complete small analysis file including excluded-observation history barrier, plus configured-limit/unavailable PDF case | **54 passed, 0 skipped in 3.62s** | `pytest-p5-stage2-parameters-20261112` |
+| New Application close/history/export and render-failure/source-race cases | **2 passed, 0 skipped in 3.89s** | `pytest-p5-stage3-controller-20261112` |
+| Architecture plus affected chart/history/source-generation cases | **43 passed, 0 skipped in 6.63s** | `pytest-p5-stage3-ui-fixed-20261112` |
+| Explicit witness/export shell actions | **2 passed, 0 skipped in 1.62s** | `pytest-p5-stage3-actions-20261112` |
+| Runtime version, packaging metadata/preflight-before-cleanup and shell-title payload | **22 passed, 0 skipped in 2.12s** | `pytest-p5-stage4-20261112` |
+| Affected `tests/test_desktop_ui_v21.py` file | **79 passed, 2 skipped in 10.85s** | `pytest-p5-stage4-title-ui-20261112` |
+
+Earlier component attempts are not green gate evidence: the first combined
+PDF/analysis run had 53 passed / 2 failed (large-report timeout and absent
+pdftotext executable). Cached glyph metrics/file-based exchange bounded the
+large report; text checks now use an isolated MuPDF process. Subsequent focused
+attempts exposed/fixed a missing µ glyph and an assertion that failed on valid
+line wrapping. The initial App/architecture selection had 54 passed, one Tcl
+skip and two architecture failures: the UI's timestamp string replacement was
+replaced by the existing presenter API. The green affected slice is above.
+Final desktop skips were local Tcl/Tk library initialization, not assertion
+passes. No full suite was run by the writer.
+
+The parent independently rendered all **44 PDF pages** (38 + 2 + 2 + 2) with
+Poppler at 110 dpi, extracted all four documents with independent pypdf and
+inspected eight representative page images. Stage-2 visual QA is **GO** after
+bounded layout corrections: table separators, whole control/chart blocks,
+source-bound table continuation, wrapped reference URLs, Originalstand label,
+configured QMMA 10% bound, µg/L and baseline n. SOLL 100 versus frozen mean 91 /
+SD 1 / QMMA 6% and no-SD/no-value unavailability were independently confirmed.
+Artifacts: `.tmp/p5-poppler-qa-layout-fixed-20261112/`; generated PDFs remain in
+the named component-test roots. This is component verification, not final E2E.
+
+Source/protected-tree evidence against the exact P5 snapshot is recorded in
+`.tmp/p5-freeze-audit-20261112.json`: **27 source/doc/test files** (four added,
+23 changed, none missing). The full protected inventory contains **13,258 files**:
+**13,256 have zero byte/size/mtime differences**, `packaging/build_onedir.py`
+is the one authorized source edit, and the exact file
+`packaging/__pycache__/build_onedir.cpython-314.pyc` is the one separately
+approved generated-bytecode difference from the authorized test import. No
+cache pattern or other packaging artifact is excluded; deploy_smoke remains
+unchanged. Counts: rules 22, input 2, jobs 2,302, output 8,843, build 14, dist 16,
+unchanged packaging 2,057, plus the two identified packaging files. `config/`
+and `storage/` are absent on both sides; no real devices.json was created.
+The first full audit remains unchanged in
+`.tmp/p5-freeze-audit-before-cache-restore-20261112.json`; despite that preparatory
+filename no cache restoration occurred. Both cache versions are preserved as
+hash evidence/copies under `.tmp`. After the narrow exception was approved,
+packaging alone was rechecked; the complete first comparison covers the other
+protected groups. The P4 audits and full P5 snapshot are preserved.
+`git diff --check` returned 0 (existing line-ending notices only).
+
+Status: **IMPLEMENTED / FOCUSED_CHECKS_PASSED / INDEPENDENT_REVIEW_PENDING**.
+P5 full regression, current rules gate, actual cleanup/build, final visible
+packaged E2E, Git writes, release and human acceptance: **NOT RUN by the writer**.
+Builder failure tests inject failures and touch only synthetic temporary targets;
+they are not a real build or permission to claim a release-qualified artifact.
+
+### P5 review rework 1: SD origin compatibility (independent recheck pending)
+
+The first independent P5 review failed on one P1: a frozen SD could remain
+available after changing its unit or measured-variable interpretation. The
+review reported no other material findings. The parent verified a fresh full
+snapshot before authorizing this bounded correction:
+`I:\Projekte\AnalyzerResultExtractorV2-P5-REWORK1-SAFETY-20261112`, 91,167 files,
+89,109 directories, 1.897 GiB rounded, copy comparison exit 0. HEAD is unchanged.
+
+New models use `arev2-qc-analysis-v2`. Pure analysis receives a separately read
+and frozen origin context. Unit/IST/number-interpretation mismatches or missing
+origin leave SD unavailable with an explicit UI/PDF reason; QMMA stays available.
+Profile names, dates, groups, rules, relative limits, SOLL and MIN/MAX do not
+impose a blanket version restriction. Existing raw references and manifests are
+unchanged. The only approved P4-owner extension is `_freeze_sd` recording the
+current profile version for **new** manual references before hashing their ID.
+Older manual references use an unbroken immutable lot history or fail closed.
+Archived supported v1 models/PDFs remain exact and are never recalculated.
+
+All following commands used the venv, `-q --tb=short -o faulthandler_timeout=20`,
+synthetic stores and normal Windows rights. Runs overlap and are not a full suite.
+
+| Selected scope | Result | Basetemp under `.tmp/` |
+| --- | --- | --- |
+| Full small analysis file + 20 public profile/lot semantic cases + initial three legacy-origin cases | **89 passed, 0 skipped in 6.48s** | `pytest-p5-rework1-core-20261112` |
+| Origin-read race; Results with two stores/same IDs; real archived-v1 PDF; existing atomic-close/render-race cases; small mismatch/baseline PDFs | **8 passed, 0 skipped in 12.48s** | `pytest-p5-rework1-app-pdf-20261112` |
+| Architecture and existing P4 optional/manual/baseline freezing case | **41 passed, 0 skipped in 5.08s** | `pytest-p5-rework1-boundaries-20261112` |
+| Final raw-reference hash guard: four legacy cases plus unit-change/redeclaration and Results guards | **8 passed, 18 deselected, 0 skipped in 3.36s** | `pytest-p5-rework1-refhash-20261112` |
+
+The genuine mismatch PDF's extracted text confirms QMMA 6 B and
+"SD gehört zu einer anderen Einheit", unavailable SD bands/Westgard and v2
+algorithm identity. A separate real v1 evidence/PDF was loaded after profile/unit
+change and explicit reopening without calling the analyzer, then exported with
+identical original JSON/hash/bytes. No unchanged 44-page QA set was repeated.
+The temporary final-qualification helper was not executed or modified.
+
+Rework source/protected hashes are recorded separately in
+`.tmp/p5-rework1-freeze-audit-20261112.json`; the initial P5 audit, original P5
+snapshot and fresh Rework-1 snapshot are preserved. Against Rework-1 safety,
+**17 existing files changed, none added/removed**; cumulative original-P5 scope
+is **29 files: four new and 25 changed**. The full-rights Rework-1 audit verified
+**zero byte/size/mtime differences across all 13,258 protected files**, including
+8,843 output and all 2,059 packaging files. This comparison includes the builder
+and its already generated bytecode, unchanged since the fresh rework snapshot;
+the original P5 audit's two explicit differences remain separately recorded.
+`config/` and `storage/` are absent on both sides. The acceptance helper SHA-256
+matches the fresh snapshot and remains unexecuted. The new real PDF is
+`.tmp/pytest-p5-rework1-app-pdf-20261112/test_real_pdf_explains_incompa0/incompatible-sd-report.pdf`.
+Review recheck, full suite,
+current rules gate, actual builder/cleanup, final E2E and Git/release remain
+**NOT RUN by the writer**. This checkpoint is not a passed P5 gate.
+
+### P5 review rework 2: visible date-axis bounds (independent recheck pending)
+
+The parent verified the fresh full snapshot
+`I:\Projekte\AnalyzerResultExtractorV2-P5-REWORK2-SAFETY-20261112`: 94,338 files,
+92,110 directories, 2.135 GiB, copy exit 1 / comparison exit 0. The correction
+changes only the existing UI/PDF date-axis labels: visible ordinal xlo/xhi,
+controlled unrepresentable dates, true right-edge PDF alignment, no date labels
+for an empty point series. Model/statistics/version IDs and old PDFs are unchanged.
+
+Exactly two targeted checks ran with `-q --tb=short -o faulthandler_timeout=20`
+and `.tmp/pytest-p5-rework2-axis-20261112`: **2 passed, 0 skipped in 16.14s**.
+The Canvas case checks actual labels after zoom/pan/reset and date boundaries;
+the small real PDF case verifies padded endpoints, text geometry and empty/date-
+edge cases. No broad suite, build, Git or E2E was run by this writer. Separate
+protection/source evidence: `.tmp/p5-rework2-freeze-audit-20261112.json`.
+Normal-rights SHA/size/mtime comparison found **zero differences across all
+13,262 protected files**, including 8,843 output and 2,063 packaging files;
+config/storage are absent on both sides. Exactly the six authorized existing
+source/test/doc files changed, with none added/removed. The Rework-1 audit is
+preserved unchanged. Small PDF examples are `axis-visible.pdf`, `axis-date-edge.pdf`
+and `axis-empty.pdf` in the basetemp's `test_real_pdf_axis_uses_visibl0` directory.
+
+Parent-reported prior acceptance: **1167 passed, 2 environment skips in 187.08s**,
+builder/ZIP, three visible validations including a new revision, 64 backend E2E
+checks and a real packaged PDF closure. This is predecessor evidence, not proof
+of this patch. After this focused recheck passes, a fresh snapshot/separate task
+will implement the user's newly approved optional extracted time field; it is
+not implemented by Rework 2. The parent will combine the final full/build gate
+after both steps. Git remains NO-GO until the remaining gates pass.
+
+### Optional extracted time field checkpoint (2026-11-13, review pending)
+
+RW2 independently passed two checks without skips in 9.17s. The parent then
+verified the fresh full `I:\Projekte\AnalyzerResultExtractorV2-P5-TIMEFIELD-SAFETY-20261112`
+snapshot: 94,368 files, 92,119 directories, 2.136 GiB, copy exit 1 / parity exit 0.
+The explicitly approved optional field/format pair is implemented in the existing
+profile/source/dialog owners. Old normalized no-map profiles contain no new
+keys; separate time is strict, never inferred or replaced by midnight. SD,
+analysis, model/API/schema/store/builder, existing snapshots and PDFs are unchanged.
+
+Executed focused checks (synthetic roots, normal Windows rights):
+
+| Scope / command suffix for `.\.venv\Scripts\python.exe -m pytest` | Result |
+| --- | --- |
+| `tests/test_qualitycontrol_profiles_lots.py tests/test_application_qualitycontrol.py tests/test_qualitycontrol_pdf.py -k "optional_time or measurement_dates_have_no_import" -q --tb=short -o faulthandler_timeout=20 --basetemp .tmp/pytest-p5-timefield-20261113` | **33 passed, 1 failed, 73 deselected in 11.18s**; only the PDF phrase assertion failed because table columns interleave wrapped text |
+| `tests/test_qualitycontrol_pdf.py::test_optional_time_pdf_names_errors_and_preserves_old_profile_sd_and_evidence -q --tb=short -o faulthandler_timeout=20 --basetemp .tmp/pytest-p5-timefield-pdf-20261113` | **1 passed, 0 skipped in 5.66s**, after accepting the valid line/column wrapping; no product change |
+
+Coverage includes pair/format conflicts, date/time and DATUM/ZEIT, %H:%M,
+%H:%M:%S and %H%M, missing/blank/24:00/format errors, reverse run IDs with same-day
+2_2s and 4_1s, equal-time/no-map/unknown-time barriers, blank/default/load/save
+dialog fields, readable source/PDF reasons and unchanged old profile/SD/PDF evidence.
+The parent also verified its real unchanged-DB legacy golden; DB SHA/mtime and
+complete profile/manifest/token matched, recorded in
+`.tmp/final-qualification-20261112-2/timefield-legacy-after.json`.
+The two owner hashes remain identical to that check. A deliberately new profile
+version still changes head/token normally; no stale guard was weakened.
+
+Separate audit: `.tmp/p5-timefield-freeze-audit-20261112.json`; earlier audits and
+all snapshots remain unchanged. Exactly 13 authorized existing files changed,
+none were added/removed. Normal-rights comparison found zero byte/size/mtime
+differences across 13,262 protected files (output 8,843; packaging 2,063;
+config/storage absent on both sides). The final small PDF is
+`.tmp/pytest-p5-timefield-pdf-20261113/test_optional_time_pdf_names_e0/optional-time-errors.pdf`.
+Review/final full/build/visible follow-up are
+parent-owned and pending; this writer ran no full suite, build, Git or E2E.
+
+## Historical P3b implementation checkpoint (superseded by passed gate above)
+
+The green predecessor remains P3a. This is bounded writer verification, **not a
+P3b passed gate**. HEAD is unchanged. The exclusive writer started only after the
+full `I:\Projekte\AnalyzerResultExtractorV2-P3B-SAFETY-20261112` copy and dry-run
+comparison. No Git writes, rule JSON changes, live runtime/product writes, full
+suite, E2E or build were performed for this checkpoint.
+
+All commands below use `.\.venv\Scripts\python.exe -m pytest`, `-q`, and the
+named fresh `.tmp\` basetemp. Slices overlap; their counts must not be summed.
+
+| Focused scope | Basetemp | Executed result |
+|---|---|---|
+| `test_result_revisions`, `test_dbwriter`, `test_resultvalidation`, `test_resultstore` | `pytest-p3b-owner1-20261112` | **54 passed**, 4.57s |
+| `test_jobcontroller_reanalysis`, field completeness, dual output, export retry, resolver, extractor | `pytest-p3b-source1-20261112` | **89 passed**, 6.44s |
+| Revisions + reanalysis + new Application reanalysis + validation, after completion/source/store fixes | `pytest-p3b-contracts-final2-20261112` | **48 passed**, 8.25s |
+| Revision owner including alias/ingestion races and post-alias rollback; genuine second-assay sink failure; displayed Results binding | `pytest-p3b-atomic-checks-20261112` | **18 passed**, 4.18s |
+| Final legacy failed-queue expectation and both Results save/correct displayed-token cases | `pytest-p3b-final-targets-20261112` | **3 passed**, 1.47s |
+
+The UI/PDF/architecture slice `pytest-p3b-ui-final-20261112` executed **129 passed,
+1 skipped** plus three new fixture setup failures. The latter were corrected
+without product changes and each passed in exact targeted reruns: **2 passed**
+in `pytest-p3b-ui-fixtures-20261112`, and the displayed-occurrence case in the
+18-case atomic slice above. The earlier 50/50 minimum-size layout finding was
+fixed with a bounded grid; its exact two-test retest passed in
+`pytest-p3b-layoutfix-20261112`. Known Tk initialization remains the skip cause.
+
+The compatibility slice `pytest-p3b-compatibility-20261112` covered existing
+JobController SQLite/retired export/field tests, RuleResolver, Extractor,
+ResultStore, DbWriter, ResultsController, JobQueue and architecture: **184 passed**
+and one now-obsolete assertion allowed a new validation on a FAILED queue. Its
+fixture now preserves old legacy validation metadata while asserting new-action
+rejection; that exact case passed in the final three-case slice. No failing
+assertion remains unresolved in these executed slices.
+
+New qualification includes verified initial source copies, full PDF/block/rule
+hashes and bytes, original device, frozen legacy descriptors, unchanged original
+rows/job plans, optional-field rework, whole old/new selection, complete reads
+beyond 500 rows, one captured store despite live settings changes, idempotency,
+stale-screen rejection, real SQLite writer races, alias collision/rollback and
+restart, read-only legacy access, actual spawned parsing plus timeout/crash
+cleanup, focused multiselection/PDF targeting and separate validation.
+
+Restricted Windows temp access first produced WinError 5. The identical focused
+owner command was rerun with normal user rights; subsequent bounded commands used
+those rights. No ACL was changed. Final independent review, protected-data audit,
+one post-GO full regression and any final operator/EXE qualification remain with
+the orchestrator. This record makes no human acceptance claim.
+
+## Historical Package 3a implementation checkpoint (superseded by current gates above)
+
+Current contract: new processing, validation and correction are SQLite-only.
+Legacy `both`/`excel` inputs normalize before processing; historical output plans
+remain read-only and no longer expose an executable Excel retry. Workbook fixtures
+are checked by SHA-256 and mtime, with writer spies and no new XLSX/temp/lock files.
+SQLite crash recovery, stable ledger IDs, append-only validation across restart,
+and queue-DONE archive eligibility remain covered.
+
+| Focused slice | Result |
+|---|---|
+| Runtime, settings, application services, UI characterization | **54 passed** in **1.65s** |
+| JobController, Processing, DBWriter, ResultValidation, ResultsController | **98 passed** in **12.89s** |
+| Extraction, Watch/Worker, existing harness/unit smoke, desktop, architecture | **238 passed, 1 skipped** in **78.75s** (known Tk environment variance) |
+| Rules integrity (schema compatibility; no rule JSON edited) | **PASS**, all five integrity lists empty |
+| Pre-Package-3a snapshot SHA-256 comparison | **0 differences** across **13,226 files** in rules, input, output, jobs, storage, locks and both packaging output trees |
+
+Checkpoint review returned `GATE_FAILED` with two findings: malformed V2 SQLite
+plans could be overwritten, and two LegacyTestApp actions bypassed the protected
+Processing retry boundary. Rework 1 adds shared structural plan validation and
+routes both legacy actions through that boundary. Its bounded checks completed
+with **67 passed** (plan corruption/recovery + Processing), **8 passed, 1 skipped**
+(legacy retry actions; known Tk variance), and **40 passed** (architecture).
+Plan/SQLite/queue bytes and mtime remain unchanged in all 32 corrupt-plan cases;
+valid SQLite crash recovery and normal new-failure retries remain green.
+Independent re-review is pending; these checks do not approve the package.
+
+Rework 2 makes existing unreadable or non-object job JSON explicitly non-retryable
+through the existing Evidence boundary. Processing and both LegacyTestApp actions
+refuse it without calling the low-level queue retry or changing queue/state bytes
+or mtime. Missing states and normal new failures remain retryable. Bounded checks:
+**28 passed** (Evidence/Processing/direct unreadable-submit preservation),
+**12 passed** (both legacy actions), and **40 passed** (architecture).
+Final independent review is pending; no full regression or package approval is implied.
+
+Tests use isolated temporary project roots and normal Windows rights. The initial
+restricted-token attempt could not create pytest's shared temp root (WinError 5);
+no ACL was changed. No full suite, E2E execution or packaging was run for this
+implementation checkpoint. Independent review and post-review gates are pending.
+The gate records below remain historical evidence and are not a Package-3a approval.
+
 **Latest evaluated gate:** Gate 7 is `GATE_PASSED` on 2026-09-24. The final focused lifecycle slice completed with **158 passed**, the independent checkpoint review returned **GO**, and the single post-review full regression completed with **665 passed, 1 skipped**. Repository and isolated-root rules integrity passed; the visible isolated Windows/Tk flow confirmed History/Trash inventory, History-to-Draft, Inactive-to-Draft, read-only Trash, and non-overwriting cancellation. Gates 4–6 remain `GATE_PASSED`. The Phase 2 table below remains the historical Gate 2 record.
 
 ## Current evidence (Phase 2 / Gate 2 — authoritative)
@@ -743,3 +1529,106 @@ existing `RuleSuiteController`; the Phase-5 fail-closed activation snapshot rema
 | Detailed report | [`GATE7_REPORT_2026-09-24.md`](GATE7_REPORT_2026-09-24.md) |
 
 **Status:** `GATE_PASSED`.
+
+## Historical P4 writer checkpoint (subsequently GATE_PASSED)
+
+P4 adds the unified versioned SQLite device/QC owner, explicit legacy migration,
+profile/source/lot revisions and supplied immutable PDF-evidence publication.
+Existing Settings/Results controllers and views organize configuration/lot work;
+four controllers, four service fields and six views remain. P5 statistics and
+PDF generation are not implemented by this package. UI close is disabled with
+the explicit label "Abschluss mit PDF-Auswertung folgt".
+
+All commands below used `.\.venv\Scripts\python.exe -m pytest`, synthetic
+temporary roots and the indicated repository-local basetemp. These are separate
+executed runs and must not be added into a fictitious regression total.
+
+| Run / selected tests | Executed result | Basetemp under `.tmp/` |
+| --- | --- | --- |
+| Stage 1: `tests/test_qualitycontrol_inventory.py tests/test_runtime_devices.py tests/test_application_settings_controller.py tests/test_jobcontroller_dual_output.py -q --tb=short` | **52 passed in 2.10s** | `pytest-p4-stage1-fixed-20261112` |
+| Stage 2: `tests/test_qualitycontrol_profiles_lots.py tests/test_qualitycontrol_inventory.py tests/test_runtime_devices.py -q --tb=short` | **32 passed in 5.91s** | `pytest-p4-stage2-20261112` |
+| First Stage-3 checkpoint: `tests/test_architecture_gates.py tests/test_application_settings_controller.py tests/test_application_results_controller.py tests/test_desktop_ui_v21.py tests/test_test_app_smoke.py tests/test_qualitycontrol_inventory.py tests/test_qualitycontrol_profiles_lots.py -q --tb=short` | **269 passed, 2 skipped in 55.28s** (before final bounded UI/compatibility refinements) | `pytest-p4-stage3-first-20261112` |
+| Final isolated desktop file: `tests/test_desktop_ui_v21.py -vv -x -o faulthandler_timeout=20 --tb=short` | **78 passed, 2 skipped in 9.24s** | `pytest-p4-stage3-ui-diagnosis-20261112` |
+| New QC application/UI file: `tests/test_application_qualitycontrol.py -vv -x -o faulthandler_timeout=20 --tb=short` | **10 passed, 1 skipped in 7.61s** (before adding the later historical-ID case) | `pytest-p4-stage3-qcui-diagnosis-20261112` |
+| Final compatibility and skipped-dialog slice: `tests/test_qualitycontrol_inventory.py tests/test_runtime_devices.py tests/test_jobcontroller_dual_output.py tests/test_application_qualitycontrol.py::test_qc_form_save_is_visible_at_small_mapped_size[lot] -q --tb=short -o faulthandler_timeout=20` | **23 passed in 2.80s**, including the previously skipped mapped lot dialog | `pytest-p4-stage3-regression-20261112` |
+| Final smoke/architecture slice: `tests/test_test_app_smoke.py tests/test_architecture_gates.py -q --tb=short -o faulthandler_timeout=20` | **100 passed in 28.19s** | `pytest-p4-stage3-smoke-20261112` |
+| Later historical identity: `tests/test_application_qualitycontrol.py::test_historical_id_arriving_after_setup_is_visible_draft_until_explicit_save tests/test_qualitycontrol_inventory.py -q --tb=short` | **12 passed in 2.27s** | `pytest-p4-stage3-late-identities-20261112` |
+
+The initial restricted Stage-1 attempt produced fixture setup errors and was
+aborted without a completed result. Targeted runs then used the authorized
+normal Windows rights. The first such Stage-1 run had 50 passed / 2 failed:
+the old Settings test still assumed implicit JSON authority, and an actual
+file-disappearance test encountered a Windows open-file handle from existing
+ResultStore readers. The test contracts/lifetime setup were corrected; no
+foreign ResultStore implementation was rewritten.
+
+A combined final Stage-3 run (QC application + profile/lot + inventory +
+architecture + desktop + smoke) stopped producing output and was explicitly
+interrupted without a final result. Isolated files subsequently completed as
+listed above. This is **not evidence of a product hang being fixed**. Tcl-load
+skips reported unavailable `init.tcl`, `icons.tcl`, or `ttk/sizegrip.tcl` under
+the Python 3.14 / Tk 8.6 installation; `TCL_LIBRARY`/`TK_LIBRARY` were not set.
+The new lot-dialog skip was separately rerun and passed. The final visible EXE
+and single-Tk user acceptance remain separate later work.
+
+Acceptance cases include migration rollback/idempotency, exact store overrides,
+historical identifiers and no fabricated identifiers, one authority, no-write
+browsing, immutable complete profile/control history, explicit dates/numbers,
+603-row source population, individual validation ambiguity, source/config race
+rechecks, closed-lot/late-data/reopen, optional/manual/frozen baseline SD without
+calculation, atomic supplied model/PDF evidence, and preserving old PDF bytes.
+Two stores with identical local IDs cannot receive actions from stale dialogs;
+late background responses are discarded. Mapped Tk checks cover reachable
+Save actions at 640x420, Settings at 960x620, and state-aware lot actions.
+
+The fresh full safety snapshot is
+`I:\Projekte\AnalyzerResultExtractorV2-P4-SAFETY-20261112` (87,940 files,
+84,807 directories, 1.713 GiB). HEAD stayed
+`5ae98ea9919215e5aea00232f215ae3f8c0dd1e2`. The exclusive writer's full-rights
+audit found **0 byte/size/mtime differences across 13,258 protected files**:
+rules 22, input 2, jobs 2,302, output 8,843, build 14, dist 16, packaging 2,059.
+`storage/` and `config/` are absent on both sides; no real `devices.json` was
+created or migrated. Per-file source SHA-256 and protected-tree evidence live
+in `.tmp/p4-freeze-audit-20261112.json`, against this exact P4 snapshot.
+
+At this historical writer checkpoint the independent/post-review gates had not
+yet run. They subsequently passed for P4 as recorded in the current gate table;
+these old implementation notes do not supersede that GATE_PASSED status.
+
+### Historical P4 review rework 1 (two P2 findings resolved; P4 passed)
+
+The independent review identified two bounded compatibility defects. The writer
+corrected only `src/runtime/devices.py` and the existing QC profile dialog in
+`interfaces/tk/widgets/dialogs.py`, with corresponding existing tests and these
+checkpoint notes.
+
+Automatic device resolution now uses the stored default only when that device
+is active; otherwise it uses the first active inventory entry, or the existing
+DEFAULT_DEVICE sentinel when none is active. The migrated stored default and
+source evidence are not rewritten. Explicit historical selected IDs remain
+resolvable. The original P4 inactive-default test had inverted the pre-P4
+selection contract; its corrected active/no-active cases also verify unchanged
+JSON/SQLite bytes and mtimes.
+
+The profile device selector no longer collapses aliases sharing both display
+name and SN/LNR/EVA. Ordinary unique names remain short; collisions show the
+identifying attributes and, where necessary, the stable device ID. No new
+attribute uniqueness rule is imposed. The mapped regression case verifies that
+both IDs remain visible/selectable and both existing profiles load and save
+without reassignment.
+
+Executed smallest affected slice:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_runtime_devices.py tests/test_application_qualitycontrol.py::test_profile_device_options_keep_alias_ids_with_identical_name_and_serial -q --tb=short -o faulthandler_timeout=20 --basetemp .tmp/pytest-p4-rework1-20261112
+```
+
+Result: **6 passed, 0 skipped in 4.26s**, under authorized normal Windows rights,
+using synthetic temporary sources/stores. No broad regression, E2E or build was
+repeated. The fresh Rework-1 audit again found **0 byte/size/mtime differences
+across all 13,258 protected files**, including 8,843 output files; `config/` and
+`storage/` remain absent on both sides. The separate evidence is
+`.tmp/p4-rework1-freeze-audit-20261112.json`; the initial
+`.tmp/p4-freeze-audit-20261112.json` is preserved. HEAD stayed unchanged.
+Independent recheck and the parent's post-review gates subsequently passed;
+see the current P4 gate above.

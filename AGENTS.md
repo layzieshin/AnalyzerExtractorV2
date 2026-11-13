@@ -38,13 +38,17 @@ No `__main__.py` packages. CLI subcommands for rule authoring are defined in `in
 
 ## Public API surfaces
 
-Nineteen modules expose `src/<name>/api.py`: `parser`, `normalizer`, `assaychooser`, `ruleresolver`, `contentsplitter`, `extractor`, `writer`, `dbwriter`, `jobcontroller`, `jobqueue`, `watchdog`, `rulesuite`, `runtime`, `testui`, `assaycandidate`, `resultstore`, `processing`, `application`, `ingestion`. UI formatting/presenters for adapters: `src/testui/api.py`. Embedding contract: [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
+Twenty-one modules expose `src/<name>/api.py`: `parser`, `normalizer`, `assaychooser`, `ruleresolver`, `contentsplitter`, `extractor`, `writer`, `dbwriter`, `jobcontroller`, `jobqueue`, `watchdog`, `rulesuite`, `runtime`, `testui`, `assaycandidate`, `resultstore`, `resultvalidation`, `qualitycontrol`, `processing`, `application`, `ingestion`. UI formatting/presenters for adapters: `src/testui/api.py`. Embedding contract: [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
 
 New views should orchestrate through `src.application.api` (four controllers: extraction, results, rules, settings). Queue/worker processing is owned by `src.processing.api`; `interfaces/common/queue_worker.py` is a thin compatibility re-export only.
 
+QC/device authority is `src.qualitycontrol.api`, in the same explicitly selected SQLite store as Results. Runtime device APIs are lazy compatibility delegates requiring keyword `store_spec`; no JSON/default-database authority or implicit migration. SettingsController/SettingsView own device/profile configuration; ResultsController/StatisticsView own lot/source work, immutable analysis, report history and exact PDF export. QC's internal `analysis.py` owns Decimal calculations; `pdf_report.py` renders the same frozen model in a fresh bounded spawn process. MuPDF stays out of the application/Tk threads. Four controllers and seven views remain; the explicitly requested Statistics navigation moves the existing QC flow without adding a controller or persistence owner. Runtime `get_build_info` reads code/bundle version metadata independently of `ARE_HOME`.
+
+SD use requires frozen origin context from the same explicit QC store. `get_sd_reference_context` reads immutable profile/history evidence; `analyze_lot` stays pure and freezes that additional context without changing raw P4 references or source manifests. New manual references bind their creation profile; legacy manual references require a complete origin chain. Compare the measured variable/unit/number interpretation, not every profile edit. Unsupported origins leave SD unavailable while QMMA remains independent; archived v1 models/PDFs stay exact.
+
 ## UI ownership (Tkinter)
 
-- **Product shell** — `AnalyzerDesktopApp` in `interfaces/tk/test_app.py`; five views (`dashboard`, `results`, `rules`, `settings`, `diagnostics`). Default start via `test_app_main.py` → `run_entry` → `main()`. No duplicate shell.
+- **Product shell** — `AnalyzerDesktopApp` in `interfaces/tk/test_app.py`; seven views (`dashboard`, `results`, `statistics`, `validation`, `rules`, `settings`, `diagnostics`). Default start via `test_app_main.py` → `run_entry` → `main()`. No duplicate shell. `ValidationView` owns the PDF/workflow split; preview I/O/rendering is behind `ResultsController`. `StatisticsView` exclusively presents lots, QMMA, charts and QC report history/export; `ResultsView` presents report lists/details.
 - **Legacy Test-App** — `LegacyTestApp` (`TestApp`) in the same module; opt-in via `ARE_LEGACY_UI=1|true|yes`. Tabbed `BASE_SECTION_KEYS` UI; optional `ADMIN` tab only when `ARE_SHOW_ADMIN=1|true|yes` (legacy-only).
 - **Rule Editor** — `rule_editor/` + `rule_editor_main.py`; reachable from the Rules view and via `ARE_START_RULE_EDITOR=1` on the packaged EXE.
 - **Legacy smoke** — `gui_min*.py` for direct submit only; not the packaging entry.

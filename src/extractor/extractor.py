@@ -9,7 +9,10 @@ from .model import AssayRecord
 
 
 class ExtractionError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, missing_fields: tuple[str, ...] = (), partial_data: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.missing_fields = missing_fields
+        self.partial_data = dict(partial_data or {})
 
 
 class Extractor:
@@ -90,7 +93,8 @@ class Extractor:
             out[key] = value
 
         if empty_keys:
-            raise ExtractionError(f"configured_fields_empty: {','.join(empty_keys)}")
+            raise ExtractionError(f"configured_fields_empty: {','.join(empty_keys)}",
+                                  missing_fields=tuple(empty_keys), partial_data=out)
 
         return out
 

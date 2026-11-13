@@ -26,7 +26,7 @@ Optionale One-Shot-Checks:
 ## 2) Wichtige Konfiguration
 
 - `ARE_HOME=<writable-root>` (optional; empfohlen fuer isolierte Deployments)
-- `ARE_OUTPUT_MODE=both|excel|sqlite`
+- `ARE_OUTPUT_MODE=sqlite` (Default und einziger effektiver neuer Ausgabemodus; alte `both`-/`excel`-Werte wirken als SQLite, unbekannte Environment-Werte fallen sicher auf SQLite zurueck)
 - `ARE_SQLITE_PATH=<pfad>`
 - `ARE_DEVICE_ID=<device_id>` (optional; leer = Runtime-Default)
 - `ARE_WATCH_STABLE_WINDOW_S=1.0`
@@ -38,6 +38,8 @@ Optionale One-Shot-Checks:
 - `ARE_SQLITE_RETRY_COUNT=3`
 - `ARE_SQLITE_RETRY_SLEEP_S=0.2`
 - `ARE_REJECT_INVALID_RUNS=1`
+
+Neue Verarbeitung und Validierung schreiben keine Excel-Dateien. Alte Desktop-Settings mit `both`/`excel` werden ohne Startup-Mutation als SQLite geladen; normales Speichern persistiert SQLite und erhaelt die uebrigen Werte. Vorhandene Arbeitsmappen und historische Ausgabeplaene bleiben unveraendert.
 
 ### Watch-Einstellungen (DesktopSettings / `storage/desktop_settings.json`)
 
@@ -86,9 +88,9 @@ Queue-Jobs tragen additiv `content_sha256` (voller SHA-256-Hex, Phase-2-Scope).
 - Ursache: Job wurde mehrfach geclaimt und ist wiederholt fehlgeschlagen.
 - Mechanismus: Nach `ARE_QUEUE_MAX_ATTEMPTS` (Default 5) bleibt der Queue-Job auf `FAILED`; Watchdog requeued ihn nicht mehr.
 - Maßnahme: Fehlerursache beheben, dann explizit reaktivieren:
-  - Headless/API: `src.jobqueue.api.retry_failed_job(...)`
+  - Headless/API: `src.processing.api.retry_failed(...)` (historische Exportplaene werden abgewiesen)
   - Test-App: **Erneut starten** in der Arbeitsliste
-  - Alternativ: Queue-Eintrag manuell loeschen oder `attempts` zuruecksetzen (nur mit Bedacht)
+  - Historische Exportplaene bleiben zur Diagnose bestehen; nicht loeschen, um eine Re-Extraktion zu erzwingen.
 
 ### B) Pipeline-Lock blockiert Job (`reason=locked`)
 - Ursache: verwaiste `locks/<job_id>.lock`.
@@ -108,11 +110,14 @@ Queue-Jobs tragen additiv `content_sha256` (voller SHA-256-Hex, Phase-2-Scope).
 
 - `FAILED` Queue-Jobs werden **nicht** durch erneutes Enqueue (Watchdog-Scan, erneutes Vormerken) automatisch reaktiviert.
 - Explizite Reaktivierung nur ueber:
-  - `src.jobqueue.api.retry_failed_job(...)` (API)
+  - `src.processing.api.retry_failed(...)` (API; sperrt historische Exportplaene)
   - Test-App: **Erneut starten** fuer ausgewaehlte fehlgeschlagene Jobs
 - Stale `PROCESSING` wird nach TTL wieder auf `PENDING` gesetzt (Recovery, kein manueller Retry).
 - `SKIPPED:locked` wird im Worker als `PENDING` mit `deferred:*` zurueckgestellt.
 - `SKIPPED:already_done` wird als `DONE` uebernommen.
+- Historische V2-/unversionierte/unbekannte Exportplaene werden weder fortgesetzt noch migriert oder automatisch abgeschlossen. Bei erneutem `submit` bleiben sie unveraendert und liefern ausser bei bereits `DONE` terminal `FAILED: historical_output_plan_read_only`; sie laufen nicht in eine `PENDING`-Schleife.
+- Die stillgelegten `release_validated_run`-/`retry_excel_export`-APIs liefern ohne Dateischreibzugriff `SKIPPED: excel_export_retired`.
+- Watch-Archivierung folgt Queue-`DONE`, unabhaengig von spaeterer menschlicher Validierung; SQLite-`FAILED` archiviert nicht.
 
 ## 6) Release-Gate (minimal)
 
@@ -125,4 +130,4 @@ Vor Release müssen mindestens folgende Checks grün sein:
 4. Manuelle Stichprobe von:
    - Queue-Status
    - `jobs/<job_id>.json`
-   - Excel/SQLite Output
+   - SQLite-Ergebnis und unveraenderte historische Dateien

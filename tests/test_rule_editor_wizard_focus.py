@@ -1,6 +1,7 @@
 import json
 import tkinter as tk
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,20 @@ class _Var:
 
     def set(self, value) -> None:
         self.value = value
+
+
+@pytest.fixture
+def tk_root():
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk not available: {exc}")
+    try:
+        root.geometry("200x100+20+20")
+        root.update_idletasks()
+        yield root
+    finally:
+        root.destroy()
 
 
 def _write_min_template(root: Path) -> None:
@@ -99,15 +114,12 @@ def test_wizard_maps_complete_first_step_before_modal_grab(monkeypatch) -> None:
     try:
         root.geometry("200x100+20+20")
         root.update_idletasks()
-        try:
-            wizard = NewRulesetWizard(
-                root,
-                rules=object(),
-                on_open_in_editor=lambda _path: None,
-                on_activate_requested=lambda _path: None,
-            )
-        except tk.TclError as exc:
-            pytest.skip(f"Tk not available: {exc}")
+        wizard = NewRulesetWizard(
+            root,
+            rules=object(),
+            on_open_in_editor=lambda _path: None,
+            on_activate_requested=lambda _path: None,
+        )
 
         assert observed_at_grab["title"] == "Schritt 1 von 4: PDF und Ziel"
         assert observed_at_grab["title_manager"] == "pack"
@@ -118,8 +130,8 @@ def test_wizard_maps_complete_first_step_before_modal_grab(monkeypatch) -> None:
         assert int(observed_at_grab["title_width"]) > 1
         assert int(observed_at_grab["card_width"]) > 1
         assert _target_widget_states(wizard) == {
-            "rad_mode_new": tk.DISABLED,
-            "rad_mode_existing": tk.DISABLED,
+            "rad_mode_new": tk.NORMAL,
+            "rad_mode_existing": tk.NORMAL,
             "ent_assay_key": tk.DISABLED,
             "ent_assay_name": tk.DISABLED,
             "list_drafts": tk.DISABLED,
@@ -154,10 +166,10 @@ def test_wizard_maps_complete_first_step_before_modal_grab(monkeypatch) -> None:
         )
         wizard = started
         assert _target_widget_states(started) == {
-            "rad_mode_new": tk.DISABLED,
-            "rad_mode_existing": tk.DISABLED,
-            "ent_assay_key": tk.DISABLED,
-            "ent_assay_name": tk.DISABLED,
+            "rad_mode_new": tk.NORMAL,
+            "rad_mode_existing": tk.NORMAL,
+            "ent_assay_key": tk.NORMAL,
+            "ent_assay_name": tk.NORMAL,
             "list_drafts": tk.DISABLED,
         }
         started.var_pdf.set("sample.pdf")
@@ -262,7 +274,7 @@ def test_stepwise_nonempty_match_contract_accepts_zero_only() -> None:
     assert NewRulesetWizard._row_has_nonempty_value({"matched": False, "value": "x", "error": None}) is False
 
 
-def test_stepwise_finish_requires_real_preview(monkeypatch) -> None:
+def test_stepwise_activation_requires_real_preview(monkeypatch) -> None:
     from rule_editor.wizard import NewRulesetWizard
 
     calls: list[tuple[str, str, str | None]] = []
@@ -288,7 +300,7 @@ def test_stepwise_finish_requires_real_preview(monkeypatch) -> None:
     wizard.draft_path = "draft.json"
     wizard.assay_text = "Assay text"
     wizard._normalized_pdf_text = "Assay text"
-    wizard.var_finish_action = _Var("editor")
+    wizard.var_finish_action = _Var("activate")
     wizard.var_pdf = _Var("sample.pdf")
     wizard.var_reference_pdf = _Var("")
     wizard.var_key = _Var("(1111)")
@@ -297,7 +309,7 @@ def test_stepwise_finish_requires_real_preview(monkeypatch) -> None:
     wizard._rules.validate_draft = lambda _path: {"ok": True, "errors": []}
     wizard._rules.diff_draft_vs_active = lambda _key, _path: {"mode": "create"}
     wizard.destroy = lambda: opened.append("destroyed")
-    wizard._on_open_in_editor = opened.append
+    wizard._on_open_in_editor = lambda _path: pytest.fail("activation must not open the editor")
     wizard._on_activate_requested = opened.append
     monkeypatch.setattr(
         "rule_editor.wizard.messagebox.showerror",
@@ -330,7 +342,7 @@ def test_stepwise_existing_rule_requires_reference_pdf(monkeypatch) -> None:
     wizard.draft_path = "draft.json"
     wizard.assay_text = "Assay text"
     wizard._normalized_pdf_text = "Assay text"
-    wizard.var_finish_action = _Var("editor")
+    wizard.var_finish_action = _Var("activate")
     wizard.var_pdf = _Var("failing.pdf")
     wizard.var_reference_pdf = _Var("")
     wizard.var_key = _Var("(1111)")
@@ -348,7 +360,7 @@ def test_stepwise_existing_rule_requires_reference_pdf(monkeypatch) -> None:
     assert warnings and "Referenz-PDF" in warnings[0]
 
 
-class _List:
+class _SummaryList:
     def __init__(self) -> None:
         self.rows: list[str] = []
 
@@ -389,7 +401,6 @@ def _target_wizard(rules: object):
     wizard._pdf_request_id = 0
     wizard._closed = False
     wizard._busy = False
-    wizard.list_drafts = _List()
     return wizard
 
 
@@ -440,7 +451,7 @@ def test_new_rule_creates_template_draft_only_after_pdf() -> None:
     assert not hasattr(wizard._rules, "create_draft_from_ruleset")
 
 
-def test_existing_mode_lists_only_drafts_and_does_not_create() -> None:
+def test_existing_mode_lists_only_drafts_and_does_not_create(tk_root) -> None:
     class _Item:
         def __init__(self, kind: str, key: str, path: str) -> None:
             self.kind = kind
@@ -469,21 +480,519 @@ def test_existing_mode_lists_only_drafts_and_does_not_create() -> None:
             raise AssertionError("existing mode must not create a draft")
 
     wizard = _target_wizard(_Rules())
+    wizard.list_drafts = tk.Listbox(tk_root, state=tk.DISABLED)
     wizard._refresh_draft_choices()
-    assert wizard.list_drafts.rows == ["(d1)  (d1)"]
+    assert wizard.list_drafts.get(0, tk.END) == ("(d1)  (d1)",)
+    assert wizard.list_drafts.cget("state") == tk.DISABLED
 
     wizard.var_mode.set("existing")
+    wizard._apply_target_control_states()
+    assert wizard.list_drafts.cget("state") == tk.NORMAL
+    assert wizard._pdf_ready() is False
+    assert wizard._commit_target() is False
+    assert wizard.draft_path is None
+
+    wizard.list_drafts.selection_set(0)
+    wizard._on_draft_selected()
+    assert wizard._pending_draft_path == "drafts/d1.json"
+    assert wizard.draft_path == "drafts/d1.json"
+    assert wizard.var_key.get() == "(d1)"
+    assert wizard.var_name.get() == "Entwurf"
+    assert wizard._commit_target() is False
+
     wizard.var_pdf.set("problem.pdf")
     wizard._normalized_pdf_text = "PDF"
     wizard.assay_text = "PDF"
     wizard._pdf_fingerprint = "problem.pdf"
-    assert wizard._commit_target() is False
-    assert wizard.draft_path is None
-
-    wizard._pending_draft_path = "drafts/d1.json"
     assert wizard._commit_target() is True
     assert wizard.draft_path == "drafts/d1.json"
     assert [field["key"] for field in wizard._fields] == ["date", "value"]
+
+
+@pytest.mark.parametrize("state", [tk.NORMAL, tk.DISABLED])
+def test_real_draft_list_refresh_preserves_state_selection_and_clears_stale_rows(tk_root, state: str) -> None:
+    other = SimpleNamespace(kind="draft", path="other.draft.json", assay_key="(1111)", assay_name="Other")
+    wanted = SimpleNamespace(kind="draft", path="wanted.draft.json", assay_key="(1111)", assay_name="Wanted")
+
+    class _Rules:
+        items = [other, wanted]
+        fail = False
+
+        def list_inventory(self, *, kind: str) -> list:
+            assert kind == "draft"
+            if self.fail:
+                raise RuntimeError("inventory unavailable")
+            return self.items
+
+    rules = _Rules()
+    wizard = _target_wizard(rules)
+    wizard._pending_draft_path = wanted.path
+    wizard.list_drafts = tk.Listbox(tk_root)
+    wizard.list_drafts.insert(tk.END, "stale row")
+    wizard.list_drafts.configure(state=state)
+
+    wizard._refresh_draft_choices()
+    assert wizard.list_drafts.get(0, tk.END) == ("(1111)  Other", "(1111)  Wanted")
+    assert wizard.list_drafts.curselection() == (1,)
+    assert wizard.list_drafts.cget("state") == state
+    assert [choice["path"] for choice in wizard._draft_choices] == [other.path, wanted.path]
+
+    rules.items = [wanted]
+    wizard._refresh_draft_choices()
+    assert wizard.list_drafts.get(0, tk.END) == ("(1111)  Wanted",)
+    assert wizard.list_drafts.curselection() == (0,)
+    assert wizard.list_drafts.cget("state") == state
+    assert [choice["path"] for choice in wizard._draft_choices] == [wanted.path]
+
+    rules.fail = True
+    wizard._refresh_draft_choices()
+    assert wizard.list_drafts.size() == 0
+    assert wizard._draft_choices == []
+    assert wizard.list_drafts.cget("state") == state
+    assert "inventory unavailable" in wizard.var_status.get()
+
+
+@pytest.mark.parametrize("initial_draft_path", ["a.draft.json", None])
+def test_failed_draft_selection_restores_loaded_context_or_disables_continuation(
+    tk_root, monkeypatch, initial_draft_path: str | None
+) -> None:
+    from rule_editor.wizard import NewRulesetWizard
+
+    errors: list[str] = []
+    opened: list[str] = []
+
+    class _Rules:
+        def list_inventory(self, *, kind: str) -> list:
+            assert kind == "draft"
+            return [
+                SimpleNamespace(kind="draft", path="a.draft.json", assay_key="(a)", assay_name="A"),
+                SimpleNamespace(kind="draft", path="b.draft.json", assay_key="(b)", assay_name="B"),
+            ]
+
+        def load_draft(self, path: str) -> dict:
+            if path == "b.draft.json":
+                raise RuntimeError("B cannot be loaded")
+            assert path == "a.draft.json"
+            return {
+                "assay_key": "(a)",
+                "assay_name": "A",
+                "extract_rules": {"fields": [{"key": "value", "regex": ""}]},
+            }
+
+        def diff_draft_vs_active(self, key: str, path: str) -> dict:
+            assert (key, path) == ("(a)", "a.draft.json")
+            return {"mode": "create"}
+
+        def validate_draft(self, path: str) -> dict:
+            assert path == "a.draft.json"
+            return {"ok": False, "errors": ["unfinished"]}
+
+    monkeypatch.setattr(
+        "rule_editor.wizard.messagebox.showerror",
+        lambda _title, message, **_kwargs: errors.append(str(message)),
+    )
+    wizard = NewRulesetWizard(
+        tk_root,
+        rules=_Rules(),
+        initial_draft_path=initial_draft_path,
+        on_open_in_editor=opened.append,
+        on_activate_requested=lambda _path: pytest.fail("a failed draft switch must not activate"),
+    )
+    try:
+        wizard.var_mode.set("existing")
+        wizard.list_drafts.selection_clear(0, tk.END)
+        wizard.list_drafts.selection_set(1)
+        wizard._on_draft_selected()
+
+        assert errors == ["B cannot be loaded"]
+        assert wizard._pending_draft_path == initial_draft_path
+        assert wizard.draft_path == initial_draft_path
+        if initial_draft_path:
+            assert wizard.list_drafts.curselection() == (0,)
+            assert (wizard.var_key.get(), wizard.var_name.get()) == ("(a)", "A")
+            assert wizard.btn_continue_draft.cget("state") == tk.NORMAL
+            wizard.btn_continue_draft.invoke()
+            assert wizard._step == 3
+            wizard.btn_next.invoke()
+            assert opened == [initial_draft_path]
+        else:
+            assert wizard.list_drafts.curselection() == ()
+            assert wizard.btn_continue_draft.cget("state") == tk.DISABLED
+            wizard.btn_continue_draft.invoke()
+            assert wizard._step == 0
+            assert opened == []
+    finally:
+        if not wizard._closed:
+            wizard.destroy()
+
+
+@pytest.mark.parametrize("start_intent", ["neutral", "new"])
+def test_loaded_draft_is_preselected_and_can_continue_without_pdf(tk_root, start_intent: str) -> None:
+    from rule_editor.wizard import NewRulesetWizard
+
+    opened: list[str] = []
+    activated: list[str] = []
+    closed: list[str | None] = []
+    checks: list[str] = []
+    target = "loaded.draft.json"
+
+    class _Rules:
+        def list_inventory(self, *, kind: str) -> list:
+            assert kind == "draft"
+            return [
+                SimpleNamespace(kind="draft", path="other.draft.json", assay_key="(1111)", assay_name="Other"),
+                SimpleNamespace(kind="draft", path=target, assay_key="(1111)", assay_name="Loaded"),
+            ]
+
+        def load_draft(self, path: str) -> dict:
+            assert path == target
+            return {
+                "assay_key": "(1111)",
+                "assay_name": "Loaded",
+                "extract_rules": {"fields": [{"key": "value", "regex": ""}]},
+            }
+
+        def diff_draft_vs_active(self, key: str, path: str) -> dict:
+            assert (key, path) == ("(1111)", target)
+            checks.append("diff")
+            return {"mode": "update"}
+
+        def validate_draft(self, path: str) -> dict:
+            assert path == target
+            checks.append("structure")
+            return {"ok": False, "errors": ["unfinished draft"]}
+
+        def create_authoring_proof(self, *_args, **_kwargs) -> dict:
+            pytest.fail("continuing a draft must not create activation proof")
+
+    wizard = NewRulesetWizard(
+        tk_root,
+        rules=_Rules(),
+        initial_draft_path=target,
+        start_intent=start_intent,
+        on_open_in_editor=opened.append,
+        on_activate_requested=activated.append,
+        on_session_closed=closed.append,
+    )
+    try:
+        assert isinstance(wizard.list_drafts, tk.Listbox)
+        assert wizard.list_drafts.size() == 2
+        assert wizard.list_drafts.curselection() == (1,)
+        assert wizard.list_drafts.cget("state") == tk.NORMAL
+        assert wizard.var_mode.get() == "existing"
+        assert (wizard.var_key.get(), wizard.var_name.get()) == ("(1111)", "Loaded")
+        assert wizard.draft_path == target
+        assert wizard._pdf_ready() is False
+        assert checks == []
+
+        wizard.btn_continue_draft.invoke()
+        assert wizard._step == 3
+        assert wizard.var_finish_action.get() == "editor"
+        assert checks == ["diff", "structure"]
+        assert "weiterbearbeitet" in wizard.lbl_required_summary.cget("text")
+        assert wizard.var_reference_pdf.get() == ""
+        wizard.btn_back.invoke()
+        assert wizard._step == 0
+        assert wizard.draft_path == target
+        assert wizard.list_drafts.curselection() == (1,)
+        assert wizard._pdf_ready() is False
+        wizard.btn_continue_draft.invoke()
+        assert wizard._step == 3
+        wizard.btn_next.invoke()
+        assert opened == [target]
+        assert closed == [target]
+        assert activated == []
+        assert checks == ["diff", "structure", "diff", "structure"]
+    finally:
+        if not wizard._closed:
+            wizard.destroy()
+
+
+def test_draft_selection_loads_identity_and_fields_once_even_if_a_second_read_would_fail(tk_root, monkeypatch) -> None:
+    from rule_editor.wizard import NewRulesetWizard
+
+    loads: list[str] = []
+    errors: list[str] = []
+
+    class _Rules:
+        def list_inventory(self, *, kind: str) -> list:
+            assert kind == "draft"
+            return [
+                SimpleNamespace(kind="draft", path="a.draft.json", assay_key="(a)", assay_name="A"),
+                SimpleNamespace(kind="draft", path="b.draft.json", assay_key="(b)", assay_name="B"),
+            ]
+
+        def load_draft(self, path: str) -> dict:
+            loads.append(path)
+            if loads.count(path) > 1:
+                raise RuntimeError("second read failed")
+            identity = "a" if path == "a.draft.json" else "b"
+            return {
+                "assay_key": f"({identity})",
+                "assay_name": identity.upper(),
+                "extract_rules": {"fields": [{"key": f"{identity}_field", "regex": ""}]},
+            }
+
+    monkeypatch.setattr(
+        "rule_editor.wizard.messagebox.showerror",
+        lambda _title, message, **_kwargs: errors.append(str(message)),
+    )
+    wizard = NewRulesetWizard(tk_root, rules=_Rules(), initial_draft_path="a.draft.json")
+    try:
+        assert loads == ["a.draft.json"]
+        wizard.list_drafts.selection_clear(0, tk.END)
+        wizard.list_drafts.selection_set(1)
+        wizard._on_draft_selected()
+
+        assert loads == ["a.draft.json", "b.draft.json"]
+        assert errors == []
+        assert wizard.list_drafts.curselection() == (1,)
+        assert wizard._pending_draft_path == wizard.draft_path == "b.draft.json"
+        assert (wizard.var_key.get(), wizard.var_name.get()) == ("(b)", "B")
+        assert wizard._fields == [{"key": "b_field", "regex": ""}]
+        assert wizard.btn_continue_draft.cget("state") == tk.NORMAL
+    finally:
+        wizard.destroy()
+
+
+@pytest.mark.parametrize("via_navigation", [False, True])
+def test_existing_draft_field_testing_commits_one_consistent_read(via_navigation: bool) -> None:
+    loads: list[str] = []
+    fields = [{"key": "b_first", "regex": "first"}, {"key": "b_second", "regex": "second"}]
+
+    class _Rules:
+        def load_draft(self, path: str) -> dict:
+            loads.append(path)
+            if len(loads) > 1:
+                raise RuntimeError("second read failed")
+            return {"assay_key": "(b)", "assay_name": "B", "extract_rules": {"fields": fields}}
+
+        def derive_assay_block(self, text: str, key: str, name: str) -> str:
+            assert (text, key, name) == ("NORMALIZED", "(b)", "B")
+            return "BLOCK B"
+
+    wizard = _target_wizard(_Rules())
+    wizard.draft_path = "a.draft.json"
+    wizard._pending_draft_path = "b.draft.json"
+    wizard.var_mode.set("existing")
+    wizard.var_key.set("(a)")
+    wizard.var_name.set("A")
+    wizard._fields = [{"key": "a_field"}]
+    wizard.var_pdf.set("sample.pdf")
+    wizard._pdf_fingerprint = "sample.pdf"
+    wizard._normalized_pdf_text = "NORMALIZED"
+    shown: list[int] = []
+    wizard._step = 0
+    wizard._show_step = shown.append
+    wizard._show_current_field = lambda: None
+
+    if via_navigation:
+        wizard._on_next()
+        assert shown == [1]
+    else:
+        assert wizard._commit_existing_draft() is True
+
+    assert loads == ["b.draft.json"]
+    assert wizard._pending_draft_path == wizard.draft_path == "b.draft.json"
+    assert (wizard.var_key.get(), wizard.var_name.get()) == ("(b)", "B")
+    assert wizard._fields == fields
+    assert wizard.assay_text == "BLOCK B"
+    assert wizard._derived_for == ("existing", "(b)", "B")
+
+
+def test_failed_existing_draft_preparation_keeps_previous_identity_fields_and_text() -> None:
+    loads: list[str] = []
+
+    class _Rules:
+        def load_draft(self, path: str) -> dict:
+            loads.append(path)
+            return {"assay_key": "(b)", "assay_name": "B", "extract_rules": {"fields": [{"key": "b_field"}]}}
+
+        def derive_assay_block(self, *_args) -> str:
+            raise RuntimeError("derive failed")
+
+    wizard = _target_wizard(_Rules())
+    wizard._pending_draft_path = wizard.draft_path = "a.draft.json"
+    wizard.var_mode.set("existing")
+    wizard.var_key.set("(a)")
+    wizard.var_name.set("A")
+    wizard._fields = [{"key": "a_field"}]
+    wizard.assay_text = "BLOCK A"
+    wizard._derived_for = ("existing", "(a)", "A")
+    wizard.var_pdf.set("sample.pdf")
+    wizard._pdf_fingerprint = "sample.pdf"
+    wizard._normalized_pdf_text = "NORMALIZED"
+
+    assert wizard._load_existing_draft("b.draft.json") is False
+
+    assert loads == ["b.draft.json"]
+    assert wizard._pending_draft_path == wizard.draft_path == "a.draft.json"
+    assert (wizard.var_key.get(), wizard.var_name.get()) == ("(a)", "A")
+    assert wizard._fields == [{"key": "a_field"}]
+    assert wizard.assay_text == "BLOCK A"
+    assert wizard._derived_for == ("existing", "(a)", "A")
+    assert "derive failed" in wizard.var_status.get()
+
+
+@pytest.mark.parametrize("regex", ["", r"Missing:\s*(\S+)", "("])
+def test_unfinished_field_edits_are_saved_before_continuing_to_summary(tmp_path: Path, regex: str) -> None:
+    from src.rulesuite.api import update_field as update_draft_field
+
+    path = tmp_path / "unfinished.draft.json"
+    path.write_text(json.dumps({"extract_rules": {"fields": [{"key": "value", "regex": "old"}]}}), encoding="utf-8")
+
+    class _Rules:
+        load_draft = staticmethod(load_draft)
+        update_field = staticmethod(update_draft_field)
+
+        def test_regex(self, *_args, **_kwargs) -> dict:
+            pytest.fail("saving an unfinished field must not require a match")
+
+    wizard = _target_wizard(_Rules())
+    wizard.draft_path = str(path)
+    wizard._reload_fields()
+    wizard._step = 1
+    wizard.var_f_key.set("value")
+    wizard.var_f_regex.set(regex)
+    wizard.var_f_mode.set("after")
+    wizard.var_f_after.set("anchor")
+    wizard.var_finish_action = _Var("activate")
+    shown: list[int] = []
+    wizard._show_step = shown.append
+
+    wizard._on_continue_draft()
+
+    assert shown == [3]
+    assert wizard.var_finish_action.get() == "editor"
+    saved = load_draft(str(path))["extract_rules"]["fields"][0]
+    assert saved["regex"] == regex
+    assert saved["search_from"] == {"after": "anchor"}
+
+
+def test_failed_unfinished_field_save_keeps_form_and_does_not_leave_fields(monkeypatch) -> None:
+    class _Rules:
+        def update_field(self, *_args, **_kwargs) -> str:
+            raise RuntimeError("save failed")
+
+    wizard = _target_wizard(_Rules())
+    wizard.draft_path = "draft.json"
+    wizard._fields = [{"key": "value", "regex": "old"}]
+    wizard._step = 1
+    wizard.var_f_key.set("value")
+    wizard.var_f_regex.set("unfinished change")
+    shown: list[int] = []
+    errors: list[str] = []
+    wizard._show_step = shown.append
+    monkeypatch.setattr(
+        "rule_editor.wizard.messagebox.showerror",
+        lambda _title, message, **_kwargs: errors.append(str(message)),
+    )
+
+    wizard._on_continue_draft()
+
+    assert shown == []
+    assert errors == ["save failed"]
+    assert wizard.var_f_regex.get() == "unfinished change"
+    assert wizard._fields == [{"key": "value", "regex": "old"}]
+
+
+def test_custom_step_reaches_summary_without_confirmed_fields() -> None:
+    wizard = _target_wizard(object())
+    wizard._step = 2
+    wizard.draft_path = "draft.json"
+    wizard._all_fields_confirmed = lambda: pytest.fail("summary must allow unfinished fields")
+    shown: list[int] = []
+    wizard._show_step = shown.append
+
+    wizard._on_next()
+
+    assert shown == [3]
+
+
+@pytest.mark.parametrize(
+    ("step", "pdf_ready", "expected_step"),
+    [(3, False, 0), (2, False, 0), (1, False, 0), (3, True, 2), (2, True, 1)],
+)
+def test_back_navigation_enters_field_testing_only_with_loaded_pdf(
+    step: int, pdf_ready: bool, expected_step: int
+) -> None:
+    wizard = _target_wizard(object())
+    wizard._step = step
+    wizard._fields = [{"key": "value"}]
+    wizard._pdf_ready = lambda: pdf_ready
+    wizard._reload_fields = lambda: None
+    shown: list[int] = []
+    field_visits: list[str] = []
+    wizard._show_step = shown.append
+    wizard._show_current_field = lambda: field_visits.append("field")
+
+    wizard._on_back()
+
+    assert shown == [expected_step]
+    assert field_visits == (["field"] if expected_step == 1 else [])
+
+
+def test_editor_continuation_retains_draft_without_any_activation_checks(tmp_path: Path) -> None:
+    path = tmp_path / "unfinished.draft.json"
+    path.write_text('{"extract_rules":{"fields":[]}}', encoding="utf-8")
+    before = path.read_bytes()
+    wizard = _target_wizard(object())
+    wizard.draft_path = str(path)
+    wizard.var_finish_action = _Var("editor")
+    wizard._pdf_ready = lambda: pytest.fail("continuation must not require a PDF")
+    wizard._all_fields_confirmed = lambda: pytest.fail("continuation must not require field hits")
+    opened: list[str] = []
+    closed: list[str | None] = []
+    wizard._on_open_in_editor = opened.append
+    wizard._on_session_closed = closed.append
+    wizard._on_activate_requested = lambda _path: pytest.fail("continuation must never activate")
+    wizard.destroy = lambda: None
+
+    wizard._finish()
+
+    assert wizard._closed is True
+    assert opened == [str(path)]
+    assert closed == [str(path)]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("blocker", ["pdf", "structure", "structure_error", "mode"])
+def test_activation_stays_blocked_on_missing_pdf_or_readiness_errors(monkeypatch, blocker: str) -> None:
+    proofs: list[str] = []
+    messages: list[str] = []
+
+    class _Rules:
+        def validate_draft(self, _path: str) -> dict:
+            if blocker == "structure_error":
+                raise RuntimeError("validation failed")
+            return {"ok": blocker != "structure", "errors": ["unfinished"]}
+
+        def diff_draft_vs_active(self, *_args) -> dict:
+            return {"mode": "unknown"}
+
+        def create_authoring_proof(self, *_args, **_kwargs) -> dict:
+            proofs.append("proof")
+            return {}
+
+    wizard = _target_wizard(_Rules())
+    wizard.draft_path = "draft.json"
+    wizard.var_finish_action = _Var("activate")
+    wizard._pdf_ready = lambda: blocker != "pdf"
+    wizard._all_fields_confirmed = lambda: True
+    wizard._shutdown = lambda _action: pytest.fail("activation must remain blocked")
+    monkeypatch.setattr(
+        "rule_editor.wizard.messagebox.showwarning",
+        lambda _title, message, **_kwargs: messages.append(str(message)),
+    )
+    monkeypatch.setattr(
+        "rule_editor.wizard.messagebox.showerror",
+        lambda _title, message, **_kwargs: messages.append(str(message)),
+    )
+
+    wizard._finish()
+
+    assert proofs == []
+    assert len(messages) == 1
 
 
 def test_configured_fields_are_checked_in_order_and_empty_blocks_save() -> None:
@@ -603,7 +1112,7 @@ def test_update_reference_must_differ_and_create_skips_it(monkeypatch) -> None:
     wizard.var_reference_pdf = _Var(r"I:\pdfs\problem.pdf")
     wizard._pdf_fingerprint = r"I:\pdfs\problem.pdf"
     wizard.var_key = _Var("(1111)")
-    wizard.var_finish_action = _Var("editor")
+    wizard.var_finish_action = _Var("activate")
     wizard._on_session_closed = None
     wizard._on_open_in_editor = lambda _path: None
     wizard._on_activate_requested = lambda _path: proofs.append(("activated", None))
@@ -621,7 +1130,7 @@ def test_update_reference_must_differ_and_create_skips_it(monkeypatch) -> None:
     wizard._rules.mode = "create"
     wizard.var_reference_pdf.set(r"I:\pdfs\problem.pdf")
     wizard._finish()
-    assert proofs == [(r"I:\pdfs\problem.pdf", None)]
+    assert proofs == [(r"I:\pdfs\problem.pdf", None), ("activated", None)]
 
 
 def test_proof_is_blocked_until_every_configured_field_hits(monkeypatch) -> None:
@@ -873,7 +1382,7 @@ def test_fulltext_warning_stays_visible_and_proof_explains_split(monkeypatch) ->
     wizard.var_name = _Var("Neu")
     wizard.var_pdf = _Var("sample.pdf")
     wizard.var_reference_pdf = _Var("")
-    wizard.var_finish_action = _Var("editor")
+    wizard.var_finish_action = _Var("activate")
     wizard.var_custom_count = _Var("")
     wizard.draft_path = "draft.json"
     wizard.assay_text = "FULL"
@@ -887,7 +1396,7 @@ def test_fulltext_warning_stays_visible_and_proof_explains_split(monkeypatch) ->
     wizard.btn_back = _Config()
     wizard.btn_next = _Config()
     wizard._card_frames = {"fields": _Card(), "custom": _Card(), "finish": _Card()}
-    wizard.list_summary = _List()
+    wizard.list_summary = _SummaryList()
     wizard.lbl_mode_summary = _Config()
     wizard.frm_reference = type("Frame", (), {"pack_forget": lambda self: None})()
     wizard.lbl_required_summary = _Config()

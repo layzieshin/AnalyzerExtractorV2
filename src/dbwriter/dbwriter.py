@@ -10,6 +10,7 @@ from src.extractor.api import AssayRecord
 from src.ruleresolver.api import RuleSet
 
 from .model import DbWriteResult
+from .revisions import ensure_revision_schema, identity_owners
 
 
 class DbWriter:
@@ -25,6 +26,7 @@ class DbWriter:
         busy_timeout_ms: int = 5000,
         retry_count: int = 3,
         retry_sleep_s: float = 0.2,
+        source_provenance: dict[str, object] | None = None,
     ) -> DbWriteResult:
         path = Path(sqlite_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +36,7 @@ class DbWriter:
             conn = sqlite3.connect(str(path))
             try:
                 conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+                conn.execute("BEGIN IMMEDIATE")
                 self._ensure_schema(conn)
                 result = self._insert_or_candidate(
                     conn,
@@ -44,6 +47,7 @@ class DbWriter:
                     pdf_sha256,
                     assay_block_hash,
                     str(path),
+                    source_provenance,
                 )
                 conn.commit()
                 return result
@@ -62,6 +66,8 @@ class DbWriter:
         raise RuntimeError("sqlite_write_failed_unknown")
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -127,6 +133,7 @@ class DbWriter:
             )
             """
         )
+        ensure_revision_schema(conn)
 
     def _ensure_columns(self, conn: sqlite3.Connection, columns: dict[str, str]) -> None:
         existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
@@ -144,11 +151,17 @@ class DbWriter:
         pdf_sha256: str,
         assay_block_hash: str,
         sqlite_path: str,
+        source_provenance: dict[str, object] | None = None,
     ) -> DbWriteResult:
         payload = json.dumps(record.data, ensure_ascii=False)
         basis_payload = json.dumps(record.dedupe_basis, ensure_ascii=False)
         created_at = datetime.now(timezone.utc).isoformat()
-        cur = conn.execute(
+        owners = identity_owners(conn, record.assay_key, record.dedupe_key)
+        if len(owners) > 1:
+            raise ValueError("duplicate_identity_ownership_ambiguous")
+        cur = None
+        if not owners:
+            cur = conn.execute(
             """
             INSERT OR IGNORE INTO runs (
                 job_id, pdf_path, assay_key, lot_id, dedupe_key,
@@ -172,7 +185,13 @@ class DbWriter:
                 created_at,
             ),
         )
-        if cur.rowcount:
+        if cur is not None and cur.rowcount:
+            provenance = dict(source_provenance or {})
+            provenance.setdefault("ruleset", ruleset.data)
+            provenance.setdefault("ruleset_file", ruleset.ruleset_file)
+            provenance.setdefault("device_id", record.device_id)
+            conn.execute("INSERT INTO run_source_provenance (run_id, snapshot_json) VALUES (?, ?)",
+                         (int(cur.lastrowid), json.dumps(provenance, ensure_ascii=False, sort_keys=True, allow_nan=False)))
             return DbWriteResult(
                 sqlite_path=sqlite_path,
                 table_name="runs",
@@ -180,12 +199,15 @@ class DbWriter:
                 run_id=int(cur.lastrowid),
             )
 
+        if not owners:
+            return DbWriteResult(sqlite_path=sqlite_path, table_name="runs", status="skipped")
+
         existing = conn.execute(
             """
             SELECT id, job_id, pdf_sha256, assay_block_hash, payload_json
-            FROM runs WHERE assay_key = ? AND dedupe_key = ?
+            FROM runs WHERE id = ?
             """,
-            (record.assay_key, record.dedupe_key),
+            (next(iter(owners)),),
         ).fetchone()
         if existing is None:
             return DbWriteResult(sqlite_path=sqlite_path, table_name="runs", status="skipped")

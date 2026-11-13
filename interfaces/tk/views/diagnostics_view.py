@@ -29,6 +29,7 @@ class DiagnosticsView(ttk.Frame):
         self._on_show_duplicate = on_show_duplicate
         self._on_discard_duplicate = on_discard_duplicate
         self._candidates_by_id: dict[str, AssayCandidateItem] = {}
+        self._diagnoses_by_job: dict[str, JobDiagnosisItem] = {}
         self._build()
 
     def _build(self) -> None:
@@ -54,7 +55,9 @@ class DiagnosticsView(ttk.Frame):
         diag_actions = ttk.Frame(dbody, style="CardInner.TFrame")
         diag_actions.pack(fill="x")
         ttk.Button(diag_actions, text="Details", command=self._on_show_diagnosis).pack(side="left")
-        ttk.Button(diag_actions, text="Erneut versuchen", command=self._on_retry_job).pack(side="left", padx=(8, 0))
+        self._btn_retry = ttk.Button(diag_actions, text="Erneut versuchen", command=self._on_retry_job, state="disabled")
+        self._btn_retry.pack(side="left", padx=(8, 0))
+        self._diag_tree.bind("<<TreeviewSelect>>", self._on_diagnosis_selected)
         ttk.Button(diag_actions, text="Draft aus Kandidat", command=self._on_create_draft).pack(side="left", padx=(8, 0))
 
         ttk.Label(dbody, text="Assay-Kandidaten", style="SectionTitle.TLabel").pack(anchor="w", pady=(8, 4))
@@ -62,10 +65,11 @@ class DiagnosticsView(ttk.Frame):
         cand_frame, self._candidate_tree = create_scrollable_tree(
             dbody,
             cand_columns,
-            ("Assay", "Name", "Status", "Konfidenz"),
+            ("Assay", "Namenshinweis", "Status", "Konfidenz"),
             height=4,
         )
         cand_frame.pack(fill="both", expand=True, pady=(0, 8))
+        self._candidate_tree.column("assay", width=260, minwidth=200, stretch=True)
         self._lbl_context = ttk.Label(dbody, text="", style="Muted.TLabel", wraplength=700)
         self._lbl_context.pack(anchor="w")
 
@@ -85,6 +89,7 @@ class DiagnosticsView(ttk.Frame):
             height=5,
         )
         dup_frame.pack(fill="both", expand=True, pady=(0, 8))
+        self._dup_tree.column("assay", width=260, minwidth=200, stretch=True)
         self._dup_empty = EmptyState(dup_body, "Keine ausstehenden Klärfälle.")
         dup_actions = ttk.Frame(dup_body, style="CardInner.TFrame")
         dup_actions.pack(fill="x")
@@ -94,6 +99,11 @@ class DiagnosticsView(ttk.Frame):
     def selected_job_id(self) -> str:
         selection = self._diag_tree.selection()
         return str(selection[0]) if selection else ""
+
+    def _on_diagnosis_selected(self, _event: object = None) -> None:
+        item = self._diagnoses_by_job.get(self.selected_job_id())
+        retryable = item is not None and item.queue_status == "FAILED" and item.retry_kind == "full_processing"
+        self._btn_retry.configure(state="normal" if retryable else "disabled")
 
     def selected_candidate(self) -> AssayCandidateItem | None:
         selection = self._candidate_tree.selection()
@@ -111,10 +121,12 @@ class DiagnosticsView(ttk.Frame):
             return None
 
     def render_diagnoses(self, items: Sequence[JobDiagnosisItem]) -> None:
+        self._diagnoses_by_job = {item.job_id: item for item in items}
         for row in self._diag_tree.get_children():
             self._diag_tree.delete(row)
         if not items:
             self._diag_empty.pack(anchor="w", pady=(8, 0))
+            self._on_diagnosis_selected()
             return
         self._diag_empty.pack_forget()
         for item in items:
@@ -124,6 +136,7 @@ class DiagnosticsView(ttk.Frame):
                 iid=item.job_id,
                 values=(item.file_name, item.error_label, item.friendly_message or item.technical_detail),
             )
+        self._on_diagnosis_selected()
 
     def render_candidates(self, candidates: Sequence[AssayCandidateItem]) -> None:
         for row in self._candidate_tree.get_children():
@@ -137,7 +150,7 @@ class DiagnosticsView(ttk.Frame):
                 "end",
                 iid=iid,
                 values=(
-                    candidate.assay_key,
+                    candidate.assay_name or "Assayname fehlt",
                     candidate.assay_name_hint,
                     candidate.known_status,
                     candidate.confidence,
@@ -157,5 +170,5 @@ class DiagnosticsView(ttk.Frame):
                 "",
                 "end",
                 iid=str(item.candidate_id),
-                values=(item.assay_key, item.status, item.detected_at),
+                values=(item.assay_name or "Assayname fehlt", item.status, item.detected_at),
             )

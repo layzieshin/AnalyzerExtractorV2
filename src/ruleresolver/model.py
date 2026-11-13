@@ -6,3 +6,5 @@ class RuleSet:
     assay_key: str
     ruleset_file: str
     data: Dict[str, Any]
+    source_text: str = ""
+    source_sha256: str = ""
