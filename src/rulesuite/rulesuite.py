@@ -26,7 +26,7 @@ from . import regex_tools
 from .diffing import collect_diffs
 from .errors import RuleSuiteError
 from .history import snapshot_existing_active_ruleset
-from .json_io import _read_json_object, _safe_filename, _safe_key, _write_json_atomic
+from .json_io import _read_json_object, _safe_filename, _safe_key, _write_json_atomic, _write_bytes_atomic
 from .lifecycle import rulesuite_draft_lock, rulesuite_lifecycle_lock
 from .validation import _validate_draft_data
 
@@ -592,24 +592,65 @@ class RuleSuite:
             "data": record.data,
         }
 
-    def activate_draft(self, project_root: str, assay_key: str, draft_path: str) -> Path:
-        with rulesuite_lifecycle_lock(project_root):
+    def _verified_activation_snapshot(self, project_root, assay_key, draft_path, *, assay_name=None):
+        from .authoring_readiness import AuthoringReadinessError, verify_authoring_proof
+
+        path = Path(draft_path)
+        raw = path.read_bytes()
+        report = verify_authoring_proof(project_root, assay_key, draft_path)
+        if not report.get("ok"):
+            raise AuthoringReadinessError(",".join(report.get("errors", [])) or "authoring_proof_invalid")
+        proof = report["proof"]
+        data = json.loads(raw)
+        if hashlib.sha256(raw).hexdigest() != proof.get("draft_sha256") or path.read_bytes() != raw:
+            raise AuthoringReadinessError("authoring_proof_draft_changed")
+        if assay_name is not None and str(data.get("assay_name") or "").strip() != assay_name.strip():
+            raise AuthoringReadinessError("authoring_proof_assay_name_mismatch")
+        if str(data.get("assay_key") or "").strip() != assay_key.strip():
+            raise AuthoringReadinessError("authoring_proof_assay_key_mismatch")
+        for name in ("index", "active_ruleset"):
+            original, expected = proof.get(name + "_path"), proof.get(name + "_sha256")
+            if original and hashlib.sha256(Path(original).read_bytes()).hexdigest() != expected:
+                raise AuthoringReadinessError(f"authoring_proof_{name}_changed")
+        return data, raw, proof
+
+    def activate_draft(self, project_root: str, assay_key: str, draft_path: str, *, require_authoring_proof: bool = False) -> Path:
+        with rulesuite_lifecycle_lock(project_root), rulesuite_draft_lock(draft_path):
             root = Path(project_root)
             rs = resolve_ruleset(assay_key, str(root / "rules"), str(root / "rules" / "index.json"))
             target = root / "rules" / rs.ruleset_file
-            source_data = self.load_draft(draft_path)
+            raw = None
+            if require_authoring_proof:
+                source_data, raw, proof = self._verified_activation_snapshot(project_root, assay_key, draft_path)
+                if proof.get("mode") != "update" or target.resolve() != Path(proof["active_ruleset_path"]):
+                    from .authoring_readiness import AuthoringReadinessError
+                    raise AuthoringReadinessError("authoring_proof_active_binding_changed")
+            else:
+                source_data = self.load_draft(draft_path)
             check = _validate_draft_data(source_data)
             if not check["ok"]:
                 raise RuleSuiteError(f"draft_invalid: {check['errors']}")
             snapshot_existing_active_ruleset(target)
-            _write_json_atomic(target, source_data)
+            if raw is not None:
+                _write_bytes_atomic(target, raw)
+            else:
+                _write_json_atomic(target, source_data)
             return target
 
-    def activate_new_draft(self, project_root: str, assay_key: str, assay_name: str, draft_path: str) -> Path:
-        with rulesuite_lifecycle_lock(project_root):
-            return self._activate_new_draft_unlocked(project_root, assay_key, assay_name, draft_path)
+    def activate_new_draft(self, project_root: str, assay_key: str, assay_name: str, draft_path: str,
+                           *, require_authoring_proof: bool = False) -> Path:
+        with rulesuite_lifecycle_lock(project_root), rulesuite_draft_lock(draft_path):
+            source_data, raw = None, None
+            if require_authoring_proof:
+                source_data, raw, proof = self._verified_activation_snapshot(project_root, assay_key, draft_path, assay_name=assay_name)
+                if proof.get("mode") != "create":
+                    from .authoring_readiness import AuthoringReadinessError
+                    raise AuthoringReadinessError("authoring_proof_mode_changed")
+            return self._activate_new_draft_unlocked(project_root, assay_key, assay_name, draft_path,
+                verified_data=source_data, verified_bytes=raw)
 
-    def _activate_new_draft_unlocked(self, project_root: str, assay_key: str, assay_name: str, draft_path: str) -> Path:
+    def _activate_new_draft_unlocked(self, project_root: str, assay_key: str, assay_name: str, draft_path: str,
+                                     *, verified_data=None, verified_bytes=None) -> Path:
         root = Path(project_root)
         rules_dir = root / "rules"
         index_path = rules_dir / "index.json"
@@ -619,7 +660,7 @@ class RuleSuite:
         if not assay_key_clean or not assay_name_clean:
             raise RuleSuiteError("assay_key and assay_name are required")
 
-        source_data = self.load_draft(draft_path)
+        source_data = self.load_draft(draft_path) if verified_data is None else deepcopy(verified_data)
         source_data["assay_key"] = assay_key_clean
         source_data["assay_name"] = assay_name_clean
         check = _validate_draft_data(source_data)
@@ -652,7 +693,10 @@ class RuleSuite:
         if target.exists():
             raise RuleSuiteError(f"ruleset_file_exists: {ruleset_file}")
 
-        _write_json_atomic(target, source_data)
+        if verified_bytes is None:
+            _write_json_atomic(target, source_data)
+        else:
+            _write_bytes_atomic(target, verified_bytes)
         assays.append({"assay_key": assay_key_clean, "ruleset_file": ruleset_file})
         _write_json_atomic(index_path, index)
         return target

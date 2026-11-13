@@ -264,3 +264,6 @@ class DraftMixin:
             self._selected_field_key = None
         if hasattr(self, "_field_form_is_new"):
             self._field_form_is_new = False
+        refresh = getattr(self, "_refresh_authoring_status", None)
+        if callable(refresh):
+            refresh(adopt_paths=True)

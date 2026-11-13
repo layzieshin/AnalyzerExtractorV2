@@ -295,6 +295,7 @@ def _fake_services() -> SimpleNamespace:
             get_device_inventory=lambda: SimpleNamespace(devices=()),
             get_watch_timing=lambda: SimpleNamespace(scan_interval_s=3.0, stable_window_s=2.0),
             get_build_info=lambda: {"version": "2.0.0", "status": "available"},
+            get_qc_assay_configuration=lambda: SimpleNamespace(store_path="db.sqlite3", assay_rows=(), assays=(), catalog_error=""),
             reload_device_inventory=lambda: SimpleNamespace(devices=()),
             open_output_folder=lambda: "/output",
         ),
@@ -377,6 +378,8 @@ def _make_app_stub(*, current_view: str = "results", services: object | None = N
             mark_saved_generation=lambda _generation: None,
             collect_settings=lambda **_kwargs: SimpleNamespace(watch_enabled=False),
             set_status_message=lambda _message: None,
+            selected_qc_configuration=lambda: None,
+            render_qc_configuration=lambda _state: None,
         ),
         "diagnostics": SimpleNamespace(),
     }

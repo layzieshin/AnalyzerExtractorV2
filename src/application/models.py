@@ -533,12 +533,30 @@ class DeviceInventoryStatus:
 
 
 @dataclass(frozen=True)
+class QCAssayConfigurationItem:
+    assay_key: str
+    assay_name: str
+    device_id: str = ""
+    device_name: str = ""
+    profile_id: str = ""
+    profile_name: str = ""
+    profile_version_id: int = 0
+    level_count: int = 0
+    status: str = "QK noch nicht eingerichtet"
+    issues: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class QCConfigurationState:
     store_path: str
     inventory: dict[str, Any]
     profiles: tuple[dict[str, Any], ...]
     legacy_source_sha256: str = ""
     legacy_message: str = ""
+    assays: tuple[tuple[str, str], ...] = ()
+    field_choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    assay_rows: tuple[QCAssayConfigurationItem, ...] = ()
+    catalog_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -555,6 +573,10 @@ class QCLotCase:
     profile_options: tuple[tuple[int, str], ...]
     start_date: str = ""
     assay_name: str = ""
+    last_usage: str = ""
+    chronology_status: str = "unavailable"
+    close_available: bool = False
+    close_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -562,6 +584,9 @@ class QCLotDetail:
     case: QCLotCase
     source_manifest: dict[str, Any]
     sd_references: dict[str, Any]
+    chronology_json: str = ""
+    chronology_sha256: str = ""
+    source_changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -575,6 +600,21 @@ class QCAnalysisView:
     @property
     def model(self) -> dict[str, Any]:
         return json.loads(self.model_json)
+
+
+@dataclass(frozen=True)
+class QCLotClosePreview:
+    detail: QCLotDetail
+    analysis: QCAnalysisView
+    chronology_json: str
+    chronology_sha256: str
+    witness_kit_lot: str
+    witness_source_token: str
+    pdf_bytes: bytes
+    pdf_sha256: str
+    renderer_id: str
+    page_count: int
+    block_reason: str = ""
 
 
 @dataclass(frozen=True)

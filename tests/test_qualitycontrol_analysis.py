@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 from dataclasses import FrozenInstanceError
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
@@ -258,7 +261,7 @@ def test_sd_origin_defines_unit_and_measured_parameter_without_disabling_qmma(ki
     assert series["sd"] == {"available": False, "reason": reason} and not series["bands"]
     assert result["points"][0]["z"] is None and last_rule(result, "1_3s")["status"] == "unavailable"
     assert refs == before == result["sd_references"] and result["source_manifest"] == source
-    assert result["algorithm_id"] == "arev2-qc-analysis-v2"
+    assert result["algorithm_id"] == "arev2-qc-analysis-v4"
     assert result["sd_reference_context"]["references"]["c1"]["origin_profile_snapshot"] == origin["profile_snapshot"]
 
 
@@ -296,7 +299,9 @@ def test_unproven_sd_context_is_unavailable_not_a_guess(context_problem):
 
 @pytest.mark.parametrize("renderer", ["arev2-qc-pdf-v1", "arev2-qc-pdf-v2"])
 def test_legacy_model_reader_never_adds_context_or_reinterprets_v1(renderer):
-    old = model(["1"], sd=False)
+    # Synthetic compatibility variation of a genuine pre-P2 frozen model.
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "qc_pre_p2_schema1_v2.json").read_text(encoding="utf-8"))
+    old = json.loads(fixture["model_json"])
     old["algorithm_id"] = "arev2-qc-analysis-v1"
     old["renderer_id"] = renderer
     old.pop("sd_reference_context")
@@ -306,3 +311,77 @@ def test_legacy_model_reader_never_adds_context_or_reinterprets_v1(renderer):
     unsupported = copy.deepcopy(old)
     unsupported["algorithm_id"] = "unknown-algorithm"
     assert not QCAnalysis.freeze(unsupported).is_supported
+
+
+@pytest.mark.parametrize('values,target,mean,sd,cv', [
+    (['100', '100', '100', '112'], '100', '103', '6', Decimal(600) / 103),
+    (['60','63','63','62','63','61','62','62','57','58','60'], '63', '61', None, None),
+    (['5', '5'], '5', '5', '0', Decimal(0)),
+    (['-1', '1'], '0', '0', None, None),
+    (['-3', '-1'], '-2', '-2', None, None),
+    (['7'], '7', '7', None, None),
+    ([], '7', None, None, None),
+])
+def test_p4_frozen_descriptive_uses_eligible_sample_not_reference_sd(values, target, mean, sd, cv):
+    result = model(values, targets=target, sd=False)
+    series = result['computed_series'][0]
+    summary = series['descriptive']
+    assert summary['version'] == 'qc-descriptive-v1' and summary['n'] == len(values)
+    assert summary['mean']['value'] == mean
+    assert summary['mean']['available'] is bool(values)
+    assert summary['sample_sd']['available'] is (len(values) >= 2)
+    if sd is not None:
+        assert summary['sample_sd']['value'] == sd
+    if cv is not None:
+        assert abs(Decimal(summary['cv_percent']['value']) - cv) < Decimal('1e-24')
+    assert summary['cv_percent']['available'] is (len(values) >= 2 and Decimal(mean) > 0)
+    assert not series['sd']['available'] and series['bands'] == []
+    assert any(line['kind'] == 'mean' and line['value'] == mean for line in series['chart']['reference_lines']) is bool(values)
+    for point in result['points']:
+        absolute = abs(Decimal(point['parsed']['IST']) - Decimal(target))
+        assert Decimal(point['deviation']['absolute']['value']) == absolute
+        assert point['deviation']['relative_percent']['available'] is (Decimal(target) > 0)
+    if target == '63':
+        assert abs(Decimal(summary['sample_sd']['value']) - Decimal('2.0493901531919196766')) < Decimal('1e-18')
+        assert abs(Decimal(summary['cv_percent']['value']) - Decimal('3.3596559888392125846')) < Decimal('1e-18')
+
+
+def test_p4_descriptive_cancellation_budget_and_excluded_outlier():
+    offset = 10 ** 120
+    source = manifest([str(offset), str(offset + 2), '99999999999999999999999999999999999'], targets=str(offset))
+    excluded = source['included'].pop()
+    excluded['reasons'] = ['validation_missing']
+    source['excluded'].append(excluded)
+    source['population'][-1]['reasons'] = ['validation_missing']
+    source.update(included_count=2, excluded_count=1)
+    source['source_token'] = content_hash({key: value for key, value in source.items() if key != 'source_token'})
+    result = analyze_lot(source, {}).to_dict()
+    summary = result['computed_series'][0]['descriptive']
+    assert summary['n'] == 2 and summary['mean']['value'] == str(offset + 1)
+    assert abs(Decimal(summary['sample_sd']['value']) - Decimal(2).sqrt()) < Decimal('1e-27')
+    point = result['points'][-1]
+    assert not point['eligible'] and not point['deviation']['absolute']['available']
+    assert point['deviation']['relative_percent']['reason'] == 'point_ineligible'
+
+
+@pytest.mark.parametrize('format_string,measured,precision,time', [
+    ('%Y-%m-%d', '2026-11-13T00:00:00', 'day', None),
+    ('%Y-%m-%d %H', '2026-11-13T12:00:00', 'hours', '12'),
+    ('%Y-%m-%d %H:%M', '2026-11-13T12:34:00', 'minutes', '12:34'),
+    ('%Y-%m-%d %H:%M:%S', '2026-11-13T12:34:56', 'seconds', '12:34:56'),
+    ('%Y-%m-%d %S', '2026-11-13T00:00:56', 'day', None),
+    ('%Y-%m-%d %H:%S', '2026-11-13T12:00:56', 'hours', '12'),
+])
+def test_p4_display_precision_is_frozen_contiguous_and_position_is_stable(format_string, measured, precision, time):
+    source = manifest(['100'], targets='100', dates=[measured])
+    source['profile_snapshot']['measurement_date_format'] = format_string
+    source['population'][0]['measurement_date_raw'] = datetime.fromisoformat(measured).strftime(format_string)
+    source['source_token'] = content_hash({key: value for key, value in source.items() if key != 'source_token'})
+    result = analyze_lot(source, {}).to_dict()
+    point = result['points'][0]
+    assert point['position'] == 1
+    assert point['measurement']['date'] == '2026-11-13'
+    assert (point['measurement']['precision'], point['measurement']['time']) == (precision, time)
+    assert result['computed_series'][0]['period'] == {'start_date':'2026-11-13','end_date':'2026-11-13','unknown_date_count':0}
+    frozen = result['computed_series'][0]['chart']['points'][0]
+    assert frozen['measurement'] == point['measurement'] and frozen['deviation'] == point['deviation']

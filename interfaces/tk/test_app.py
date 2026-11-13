@@ -1683,6 +1683,8 @@ class AnalyzerDesktopApp(tk.Tk):
             on_manage_devices=lambda: self._open_qc_configuration("devices"),
             on_migrate_devices=lambda: self._open_qc_configuration("migrate"),
             on_manage_profiles=lambda: self._open_qc_configuration("profiles"),
+            on_new_qc_profile=lambda: self._open_qc_configuration("profiles", new_profile=True),
+            on_refresh_qc=self.refresh_current_view,
         )
         self._views["diagnostics"] = DiagnosticsView(
             content,
@@ -1919,6 +1921,7 @@ class AnalyzerDesktopApp(tk.Tk):
         elif view_key == "settings":
             payload["devices"] = self._services.settings.get_device_inventory()
             payload["timing"] = self._services.settings.get_watch_timing()
+            payload["qc_configuration"] = self._services.settings.get_qc_assay_configuration()
         elif view_key == "diagnostics":
             payload["diagnoses"] = self._services.extraction.list_job_diagnoses()
             payload["duplicates"] = self._services.results.list_duplicate_candidates(status="pending")
@@ -1959,6 +1962,9 @@ class AnalyzerDesktopApp(tk.Tk):
                 devices=devices,
                 timing=payload["timing"],
             )
+            state = payload.get("qc_configuration")
+            if state is not None and self._qc_store_is_displayed(state.store_path):
+                self._views["settings"].render_qc_configuration(state)
         elif view_key == "diagnostics":
             self._views["diagnostics"].render_diagnoses(payload.get("diagnoses", ()))
             self._views["diagnostics"].render_duplicates(payload.get("duplicates", ()))
@@ -2438,14 +2444,18 @@ class AnalyzerDesktopApp(tk.Tk):
         def work() -> object:
             inventory = self._services.settings.reload_device_inventory()
             timing = self._services.settings.get_watch_timing()
-            return inventory, timing
+            state = self._services.settings.get_qc_assay_configuration()
+            return inventory, timing, state
 
-        def on_success(result: tuple[object, object]) -> None:
-            inventory, timing = result
+        def on_success(result: tuple[object, object, object]) -> None:
+            inventory, timing, state = result
+            if not self._qc_store_is_displayed(state.store_path):
+                return
             self._device_label_map = {
                 item.choice_label: item.device_id for item in inventory.devices
             }
             settings_view.render_settings(self._settings, devices=inventory.devices, timing=timing)
+            settings_view.render_qc_configuration(state)
 
         self._task_runner.submit("devices-reload", work, on_success=on_success, on_error=self._show_task_error)
 
@@ -2468,7 +2478,10 @@ class AnalyzerDesktopApp(tk.Tk):
         if not self._qc_store_is_displayed(store_path):
             self._show_error_dialog(self, "Qualitätskontrolle", "Der Ergebnisspeicher wurde gewechselt. Bitte den Dialog schließen und neu laden.")
             return
-        dialog.save_button.configure(state="disabled")
+        if self._task_runner.is_active("qc-write"):
+            return
+        set_busy = getattr(dialog, "set_busy", lambda value: dialog.save_button.configure(state="disabled" if value else "normal"))
+        set_busy(True)
 
         def success(_result):
             if dialog.winfo_exists():
@@ -2478,13 +2491,13 @@ class AnalyzerDesktopApp(tk.Tk):
 
         def error(exc):
             if dialog.winfo_exists():
-                dialog.save_button.configure(state="normal")
+                set_busy(False)
             self._show_qc_error(exc)
 
         if not self._task_runner.submit("qc-write", work, on_success=success, on_error=error):
-            dialog.save_button.configure(state="normal")
+            set_busy(False)
 
-    def _open_qc_configuration(self, kind: str) -> None:
+    def _open_qc_configuration(self, kind: str, *, new_profile: bool = False) -> None:
         from uuid import uuid4
         from interfaces.tk.widgets.dialogs import show_qc_initials_dialog, show_qc_inventory_dialog, show_qc_profile_dialog
 
@@ -2492,18 +2505,13 @@ class AnalyzerDesktopApp(tk.Tk):
             return
         self._qc_configuration_generation += 1
         generation = self._qc_configuration_generation
+        selected = self._views["settings"].selected_qc_configuration() if kind == "profiles" else None
 
         def work():
-            state = self._services.settings.get_qc_configuration()
-            assays, fields = [], {}
             if kind == "profiles":
-                for item in self._services.rules.list_inventory(kind="active"):
-                    key = str(getattr(item, "assay_key", "") or "")
-                    if key:
-                        label = str(getattr(item, "assay_name", "") or "Assayname fehlt")
-                        assays.append((label, key))
-                        fields[key] = self._services.rules.list_fields(key)
-            return state, assays, fields
+                state = self._services.settings.get_qc_assay_configuration()
+                return state, state.assays, state.field_choices
+            return self._services.settings.get_qc_configuration(), (), {}
 
         def loaded(payload):
             state, assays, fields = payload
@@ -2515,11 +2523,16 @@ class AnalyzerDesktopApp(tk.Tk):
                     self._submit_qc_write(lambda: self._services.settings.save_qc_inventory(state, snapshot, initials, request), dialog, state.store_path)
                 show_qc_inventory_dialog(self, state, initials=self._qc_initials(), on_submit=submit)
             elif kind == "profiles":
+                if state.catalog_error:
+                    self._show_error_dialog(self, "Assays & QK", state.catalog_error)
+                    return
                 def submit(snapshot, expected, initials, dialog):
                     request = uuid4().hex
                     self._submit_qc_write(lambda: self._services.settings.save_qc_profile(state, snapshot,
                         expected_version_id=expected, operator_initials=initials, request_id=request), dialog, state.store_path)
-                show_qc_profile_dialog(self, state, initials=self._qc_initials(), assays=assays, field_choices=fields, on_submit=submit)
+                show_qc_profile_dialog(self, state, initials=self._qc_initials(), assays=assays, field_choices=fields, on_submit=submit,
+                    selected_assay_key=selected.assay_key if selected else "",
+                    selected_profile_id=selected.profile_id if selected and not new_profile else "")
             elif kind == "migrate":
                 if not state.legacy_source_sha256:
                     self._show_error_dialog(self, "Geräte übernehmen", state.legacy_message)
@@ -2620,24 +2633,35 @@ class AnalyzerDesktopApp(tk.Tk):
 
         view = self._views["statistics"]
         detail, analysis = view.selected_qc_detail(), view.selected_qc_analysis()
-        if detail is None or analysis is None or analysis.evidence_lot_version_id is not None or detail.case.state != "open":
+        if detail is None or analysis is None or analysis.evidence_lot_version_id is not None or detail.case.state == "closed":
             return
         generation = self._qc_source_generation
-        def loaded(witnesses):
+        self._qc_close_generation = self.__dict__.get("_qc_close_generation", 0) + 1
+        attempt = self._qc_close_generation
+        def current():
             selected = view.selected_qc_case()
-            if (generation != self._qc_source_generation or not self._qc_store_is_displayed(detail.case.store_path)
-                    or selected is None or selected.lot_key != detail.case.lot_key or view.selected_qc_analysis() is not analysis):
+            return (generation == self._qc_source_generation and attempt == self._qc_close_generation
+                and self._qc_store_is_displayed(detail.case.store_path) and selected is not None
+                and selected.lot_key == detail.case.lot_key and view.selected_qc_analysis() is analysis)
+        def cancel():
+            self._qc_close_generation += 1
+        def submit(preview, initials, dialog):
+            if not current():
+                dialog.render_error("Auswahl oder Ergebnisspeicher wurde geändert. Bitte den Abschluss neu prüfen.")
                 return
-            if not witnesses:
-                self._show_error_dialog(self, "Chargenabschluss", "Keine passende neuere validierte Folgecharge mit neuerem Messdatum vorhanden.")
-                return
-            def submit(witness, initials, dialog):
-                request = uuid4().hex
-                self._submit_qc_write(lambda: self._services.results.close_qc_lot(detail, analysis, witness,
-                    operator_initials=initials, request_id=request), dialog, detail.case.store_path, results=True)
-            show_qc_close_dialog(self, detail, witnesses, initials=self._qc_initials(), on_submit=submit)
-        self._task_runner.submit("qc-witnesses", lambda: self._services.results.list_qc_close_witnesses(detail),
-            on_success=loaded, on_error=self._show_qc_error)
+            request = uuid4().hex
+            self._submit_qc_write(lambda: self._services.results.close_qc_lot(preview,
+                operator_initials=initials, request_id=request), dialog, detail.case.store_path, results=True)
+        dialog = show_qc_close_dialog(self, detail, initials=self._qc_initials(), on_submit=submit, on_cancel=cancel)
+        def loaded(preview):
+            if current() and dialog.winfo_exists():
+                dialog.render_preview(preview)
+        def failed(exc):
+            if current() and dialog.winfo_exists():
+                dialog.render_error(str(exc))
+        if not self._task_runner.submit(f"qc-close-preview-{attempt}", lambda: self._services.results.prepare_qc_lot_close(detail),
+                on_success=loaded, on_error=failed):
+            dialog.render_error("Die Vorbereitung konnte nicht gestartet werden. Bitte erneut versuchen.")
 
     def _export_qc_report(self) -> None:
         view = self._views["statistics"]
@@ -2652,6 +2676,7 @@ class AnalyzerDesktopApp(tk.Tk):
         include_explanations = view._qc_include_explanations.get()
         def saved(result):
             if generation == self._qc_source_generation and self._qc_store_is_displayed(analysis.case.store_path):
+                view._qc_include_explanations.set(False)
                 self._show_info_dialog(self, "PDF-Nachweis", "Die erweiterte Druckfassung wurde gespeichert." if include_explanations else "Der gespeicherte PDF-Nachweis wurde unverändert exportiert.")
         self._task_runner.submit("qc-export", lambda: self._services.results.export_qc_report(analysis.case,
             evidence_lot_version_id=analysis.evidence_lot_version_id, destination=destination, include_explanations=include_explanations), on_success=saved, on_error=self._show_qc_error)

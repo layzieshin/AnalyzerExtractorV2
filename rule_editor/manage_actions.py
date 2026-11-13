@@ -355,6 +355,8 @@ class ManageMixin:
         self.on_load_draft_into_editor(current)
 
     def _wizard_open_draft(self, draft_path: str) -> None:
+        if "_proof_loaded_identity" in self.__dict__:
+            self._proof_loaded_identity = None
         current = str(getattr(self, "current_draft_path", "") or "").strip()
         if current and self._same_draft_path(current, draft_path):
             if self.on_load_draft_into_editor(draft_path) is False:
@@ -371,17 +373,9 @@ class ManageMixin:
         self._set_hint("Entwurf zum Weiterbearbeiten im Editor geladen. Es wurde nichts aktiviert.")
 
     def _wizard_activate_draft(self, draft_path: str) -> None:
-        current = str(getattr(self, "current_draft_path", "") or "").strip()
-        if current and self._same_draft_path(current, draft_path):
-            if self.on_load_draft_into_editor(draft_path) is False:
-                return
-        else:
-            opened = self._open_draft_in_editor(draft_path)
-            if opened in {"abort", "error"}:
-                return
-        self.on_activate()
-        self._reload_assays()
-        self._refresh_ruleset_overview()
+        # Compatibility callback: a wizard can return a checked draft, never
+        # issue the user's separate final activation intent.
+        self._wizard_open_draft(draft_path)
 
     def _on_editor_close(self) -> None:
         if getattr(self, "_field_mutation_guard", False) or getattr(self, "_dialog_guard", False):

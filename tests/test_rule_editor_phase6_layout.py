@@ -26,8 +26,8 @@ PRIMARY_LABELS = (
     "Weitere Aktionen …",
     "Aktualisieren",
     "Entwurf speichern",
-    "Extraktion mit PDF testen",
-    "Entwurf aktivieren",
+    "Einzelne Extraktion testen",
+    "Aktivierung bestätigen",
     "Muster aus Markierung",
     "Regex testen",
     "Regeldetails",
@@ -146,7 +146,7 @@ def test_project_root_entry_is_readonly() -> None:
         assert str(entries[0].cget("state")) == "readonly"
         buttons = _button_texts(host)
         assert buttons.count("Arbeitsordner wählen …") == 1
-        assert "Regel aus PDF erstellen oder prüfen …" in buttons
+        assert "Geführte Erstellung / Feldhilfe …" in buttons
     finally:
         root.destroy()
 
@@ -489,3 +489,153 @@ def test_presentation_contract_is_static() -> None:
     combined = "\n".join((PROJECT_ROOT / path).read_text(encoding="utf-8") for path in presentation_files)
     for obsolete in ("Gesamtpreview", "Draft validieren", "Erweiterte Optionen", "Bib..."):
         assert obsolete not in combined
+
+
+@pytest.mark.parametrize("size", ["1024x768", "1280x900"])
+def test_r1_embedded_proof_actions_and_narrow_panel_buttons_remain_inside_layout(tmp_path, monkeypatch, size):
+    editor = _open_editor(tmp_path, monkeypatch)
+    try:
+        editor._show_page("workspace")
+        editor.geometry(size)
+        editor.update()
+        def walk(parent):
+            for child in parent.winfo_children():
+                yield child
+                yield from walk(child)
+        for button in walk(editor.page_workspace):
+            if not isinstance(button, (tk.Button, ttk.Button)) or not button.winfo_ismapped() or button.master.winfo_width() <= 1:
+                continue
+            assert button.winfo_x() >= 0, str(button.cget("text"))
+            assert button.winfo_x()+button.winfo_width() <= button.master.winfo_width()+1, str(button.cget("text"))
+        for button in (editor.btn_check_pdfs, editor.btn_activate):
+            assert button.winfo_viewable()
+            assert button.winfo_rooty()+button.winfo_height() <= editor.winfo_rooty()+editor.winfo_height()
+        assert editor.txt_proof_result.winfo_rooty()+editor.txt_proof_result.winfo_height() <= editor.winfo_rooty()+editor.winfo_height()
+        assert editor.field_settings_scroll.winfo_viewable()
+        assert editor.btn_activate.cget("text") == "Aktivierung bestätigen"
+    finally:
+        editor.destroy()
+
+
+def test_r1_native_loaded_draft_proof_diff_and_single_final_confirmation_are_separate(tmp_path, monkeypatch):
+    import hashlib
+    from src.application.api import create_desktop_services
+    from rule_editor_main import RuleEditorWindow
+    from test_application_rules_controller import _setup_project, real_proof, active_state
+    root = _setup_project(tmp_path)
+    rules = create_desktop_services(root).rules
+    draft = rules.create_draft("(1111)")
+    proof = real_proof(rules, draft, "(1111)", root)
+    before = active_state(root)
+    try:
+        editor = RuleEditorWindow(project_root=root)
+    except tk.TclError as exc:
+        pytest.skip(f"Tk not available: {exc}")
+    try:
+        editor.on_load_draft_into_editor(draft)
+        editor.geometry("1024x768")
+        editor.update()
+        assert "noch nicht aktiviert" in editor.var_proof_status.get()
+        assert editor.var_pdf.get() == proof["failing_pdf_path"] and editor.var_reference_pdf.get() == proof["reference_pdf_path"]
+        assert str(editor.btn_activate.cget("state")) == "normal"
+        digest = hashlib.sha256(Path(draft).read_bytes()).hexdigest()
+        editor.on_show_diff()
+        editor.update()
+        assert editor._advanced_visible and editor.frame_advanced.winfo_viewable()
+        assert editor.txt_log.winfo_viewable() and "[DIFF]" in editor.txt_log.get("1.0", "end")
+        assert editor.advanced_canvas.winfo_rooty() <= editor._advanced_sections["log"].winfo_rooty()
+        assert editor._advanced_sections["log"].winfo_rooty() < editor.advanced_canvas.winfo_rooty()+editor.advanced_canvas.winfo_height()
+        assert hashlib.sha256(Path(draft).read_bytes()).hexdigest() == digest
+        assert rules.verify_authoring_proof("(1111)", draft)["ok"] and active_state(root) == before
+        errors, confirmations, answer = [], [], [False]
+        monkeypatch.setattr("rule_editor.release_actions.messagebox.showerror", lambda *args: errors.append(args))
+        monkeypatch.setattr("rule_editor.release_actions.messagebox.askyesno", lambda *args: confirmations.append(args) or answer[0])
+        editor.var_pdf.set(proof["reference_pdf_path"])
+        assert "erneut" in editor.var_proof_status.get() and str(editor.btn_activate.cget("state")) == "disabled"
+        editor.on_activate()
+        assert errors and not confirmations and active_state(root) == before
+        editor.var_pdf.set(proof["failing_pdf_path"])
+        assert not editor._refresh_authoring_status()
+        _run_real_proof_mainloop(editor)
+        assert "noch nicht aktiviert" in editor.var_proof_status.get() and not editor._proof_running
+        assert active_state(root) == before
+        editor.on_activate()
+        assert len(confirmations) == 1 and active_state(root) == before
+        answer[0] = True
+        editor.on_activate()
+        assert len(confirmations) == 2
+        snapshots = list((root / "rules/history").glob("*.json"))
+        assert len(snapshots) == 1 and snapshots[0].read_bytes() == before["rules/AssayA.json"]
+        assert (root / "rules/AssayA.json").read_bytes() == Path(draft).read_bytes()
+        assert "Aktivierung abgeschlossen" in editor.var_proof_status.get()
+    finally:
+        editor.destroy()
+
+
+def _run_real_proof_mainloop(editor, *, timeout_ms=5000):
+    expired = []
+    def timeout():
+        expired.append(True)
+        editor.quit()
+    def watch():
+        if not editor._proof_running:
+            editor.quit()
+        else:
+            editor.after(10, watch)
+    deadline = editor.after(timeout_ms, timeout)
+    editor.after(0, editor.on_check_pdfs)
+    editor.after(10, watch)
+    editor.mainloop()
+    if not expired:
+        editor.after_cancel(deadline)
+    assert not expired, "real proof worker completed no Tk-visible result before timeout"
+    assert not editor._proof_running and not editor._busy
+
+
+@pytest.mark.parametrize("outcome", ["ready", "reference_required"])
+def test_r1_native_real_proof_worker_returns_to_tk_mainloop_success_and_error(tmp_path, monkeypatch, outcome):
+    import threading
+    from src.application.api import create_desktop_services
+    from rule_editor_main import RuleEditorWindow
+    from test_application_rules_controller import _setup_project, real_proof, active_state
+    root = _setup_project(tmp_path)
+    rules = create_desktop_services(root).rules
+    draft = rules.create_draft("(1111)")
+    real_proof(rules, draft, "(1111)", root)
+    before = active_state(root)
+    try:
+        editor = RuleEditorWindow(project_root=root)
+    except tk.TclError as exc:
+        pytest.skip(f"Tk not available: {exc}")
+    try:
+        editor.on_load_draft_into_editor(draft)
+        editor.update()
+        main_thread = threading.get_ident()
+        workers, completions, callback_errors = [], [], []
+        create = editor._rules.create_authoring_proof
+        complete = editor._complete_authoring_check
+        def observed_create(*args, **kwargs):
+            workers.append(threading.get_ident())
+            return create(*args, **kwargs)
+        def observed_complete(*args, **kwargs):
+            completions.append(threading.get_ident())
+            return complete(*args, **kwargs)
+        monkeypatch.setattr(editor._rules, "create_authoring_proof", observed_create)
+        monkeypatch.setattr(editor, "_complete_authoring_check", observed_complete)
+        monkeypatch.setattr(editor, "report_callback_exception", lambda *args: callback_errors.append(args))
+        if outcome == "reference_required":
+            editor.var_reference_pdf.set("")
+        _run_real_proof_mainloop(editor)
+        assert workers and all(identifier != main_thread for identifier in workers)
+        assert completions == [main_thread] and not callback_errors
+        assert active_state(root) == before
+        if outcome == "ready":
+            assert "erfolgreich" in editor.var_proof_status.get() and "noch nicht aktiviert" in editor.var_proof_status.get()
+            assert str(editor.btn_activate.cget("state")) == "normal"
+            assert editor._rules.verify_authoring_proof("(1111)", draft)["ok"]
+        else:
+            assert "fehlgeschlagen" in editor.var_proof_status.get() and "blockiert" in editor.var_proof_reference.get()
+            assert str(editor.btn_activate.cget("state")) == "disabled"
+            assert not editor._rules.verify_authoring_proof("(1111)", draft)["ok"]
+    finally:
+        editor.destroy()

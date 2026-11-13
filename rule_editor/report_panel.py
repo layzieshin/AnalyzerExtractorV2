@@ -14,22 +14,22 @@ def build_report_panel(host: tk.Misc, parent: tk.Widget) -> None:
 
     controls = tk.Frame(parent)
     controls.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-    controls.columnconfigure(1, weight=1)
+    controls.columnconfigure(0, weight=1)
     SectionHeader(
         controls,
         "PDF-Testbericht",
-        subtitle="PDF laden, Text markieren und Treffer der Extraktionsfelder prüfen.",
+        subtitle="Text markieren und Felder prüfen.",
     ).grid(row=0, column=0, columnspan=3, sticky="ew")
     tk.Label(controls, text="Test-PDF").grid(row=1, column=0, sticky="w", pady=(4, 0))
-    tk.Entry(controls, textvariable=host.var_pdf).grid(row=1, column=1, sticky="ew", padx=(4, 6), pady=(4, 0))
-    tk.Button(controls, text="PDF auswählen …", command=host.on_pick_pdf).grid(row=1, column=2, sticky="e", pady=(4, 0))
-    tk.Button(controls, text="PDF-Text laden", command=host.on_load_text).grid(row=2, column=0, sticky="w", pady=(4, 0))
+    tk.Entry(controls, textvariable=host.var_pdf, width=1).grid(row=2, column=0, columnspan=3, sticky="ew", pady=2)
+    tk.Button(controls, text="PDF auswählen …", command=host.on_pick_pdf).grid(row=3, column=0, columnspan=3, sticky="ew", pady=2)
+    tk.Button(controls, text="PDF-Text laden", command=host.on_load_text).grid(row=4, column=0, columnspan=3, sticky="ew", pady=2)
     host.btn_toggle_markings = tk.Button(
         controls,
         text="Markierungen ausblenden",
         command=host._toggle_marking_panel,
     )
-    host.btn_toggle_markings.grid(row=2, column=1, columnspan=2, sticky="e", pady=(4, 0))
+    host.btn_toggle_markings.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
     text_wrap = tk.Frame(parent)
     text_wrap.grid(row=1, column=0, sticky="nsew", pady=(0, 4))
@@ -53,8 +53,7 @@ def build_report_panel(host: tk.Misc, parent: tk.Widget) -> None:
     )
     marking_row = tk.Frame(host.frame_marking_panel)
     marking_row.grid(row=1, column=0, sticky="ew")
-    for column in range(3):
-        marking_row.columnconfigure(column, weight=1)
+    marking_row.columnconfigure(0, weight=1)
     marking_buttons = (
         ("Markierungen aktualisieren", host._render_field_markings),
         ("Alle Markierungen zeigen", lambda: host._set_all_markings_visible(True)),
@@ -65,7 +64,7 @@ def build_report_panel(host: tk.Misc, parent: tk.Widget) -> None:
     )
     for index, (label, command) in enumerate(marking_buttons):
         tk.Button(marking_row, text=label, command=command).grid(
-            row=index // 3, column=index % 3, sticky="ew", padx=2, pady=2
+            row=index, column=0, sticky="ew", padx=2, pady=2
         )
 
     tk.Label(

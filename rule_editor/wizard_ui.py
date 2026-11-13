@@ -235,7 +235,7 @@ class WizardUiMixin:
         tk.Label(
             self.frm_reference,
             text=(
-                "Nur zur Aktivierung einer geänderten aktiven Regel: Die Problem-PDF muss mit diesem Entwurf bestehen. "
+                "Zum Prüfen einer geänderten aktiven Regel: Die Problem-PDF muss mit diesem Entwurf bestehen. "
                 "Zusätzlich eine andere Referenz-PDF wählen, mit der die bisherige Regel funktioniert hat. "
                 "Alte und neue Regel müssen auf dieser Referenz dieselben Werte liefern."
             ),
@@ -257,7 +257,7 @@ class WizardUiMixin:
         ).pack(anchor="w", padx=6)
         tk.Radiobutton(
             form,
-            text="Kontrolliert aktivieren",
+            text="Mit PDFs prüfen und zum Editor zurückkehren (ohne Aktivierung)",
             variable=self.var_finish_action,
             value="activate",
         ).pack(anchor="w", padx=6, pady=(0, 4))

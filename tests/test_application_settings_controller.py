@@ -197,7 +197,9 @@ def test_desktop_settings_legacy_positional_and_watch_dir_keyword(tmp_path: Path
         )
 
 
-def test_validate_watch_paths_rejects_settings_case_variant_child(tmp_path: Path) -> None:
+def test_validate_watch_paths_rejects_settings_case_variant_child(tmp_path: Path, monkeypatch) -> None:
+    # Explicitly simulate Windows case-insensitive comparison with native separators.
+    monkeypatch.setattr("src.application.settings_controller.os.path.normcase", lambda value: str(value).casefold())
     watch = tmp_path / "Watch"
     backup = tmp_path / "watch" / "backup"
     watch.mkdir()

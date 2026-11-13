@@ -26,13 +26,15 @@ def build_toolbar(host: tk.Misc) -> None:
     ttk.Label(controls, text="Arbeitsordner", style="AppSubtitle.TLabel").pack(side="left")
     tk.Entry(controls, textvariable=host.var_root, width=62, state="readonly").pack(side="left", padx=(6, 6))
     ttk.Button(controls, text="Arbeitsordner wählen …", command=host.on_pick_root).pack(side="left")
+    help_row = ttk.Frame(bar, style="Header.TFrame")
+    help_row.pack(fill="x", pady=(4, 0))
     ttk.Button(
-        controls,
-        text="Regel aus PDF erstellen oder prüfen …",
+        help_row,
+        text="Geführte Erstellung / Feldhilfe …",
         style="Primary.TButton",
         command=host.open_step_by_step,
     ).pack(side="left", padx=(10, 0))
-    host.lbl_status = StatusBadge(controls, "Bereit", kind="success")
+    host.lbl_status = StatusBadge(help_row, "Bereit", kind="success")
     host.lbl_status.pack(side="right")
 
     hint = tk.Label(host, textvariable=host.var_hint, anchor="w", fg=COLOR_TEXT_MUTED)

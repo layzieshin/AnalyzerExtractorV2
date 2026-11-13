@@ -40,6 +40,7 @@ class HistoryMixin:
             self.var_lot_regex,
             self.var_excel_filename,
             self.var_sheet_template,
+            self.var_dedupe_fields,
         ):
             var.trace_add("write", self._on_form_changed)
         for var in (
@@ -50,6 +51,7 @@ class HistoryMixin:
             self.var_search_line,
             self.var_field_excel_column,
             self.var_field_dedupe,
+            self.var_field_required,
         ):
             var.trace_add("write", self._on_field_form_changed)
         self.var_search_mode_label.trace_add("write", self.on_search_mode_label_changed)
@@ -59,11 +61,17 @@ class HistoryMixin:
             return
         if self.current_draft_path:
             self._dirty = True
+            invalidate = getattr(self, "_invalidate_authoring_proof", None)
+            if callable(invalidate):
+                invalidate()
 
     def _on_field_form_changed(self, *_args: object) -> None:
         if self._suspend_dirty_tracking or self._field_form_loading:
             return
         self._field_form_dirty = True
+        invalidate = getattr(self, "_invalidate_authoring_proof", None)
+        if callable(invalidate):
+            invalidate()
 
     def _schedule_autosave(self) -> None:
         self.after(self._autosave_ms, self._autosave_tick)

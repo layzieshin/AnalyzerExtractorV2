@@ -104,6 +104,44 @@ Felder und Metadaten; `Alte Werte behalten` und `Neue Werte uebernehmen` fuehren
 zur getrennten Erstvalidation zurueck. Jede Aktion erhaelt die beim Anzeigen
 erfasste Datenbank und Kennung. Vier Controller bleiben bestehen; die ausdrücklich freigegebene Statistik-Navigation ergänzt die siebte View.
 
+## Regelfreigabe im vorhandenen Editor (R1)
+
+Der geladene Entwurf wird im bestehenden dreispaltigen Workspace direkt über
+„Mit PDFs prüfen“ freigegeben vorbereitet. Struktur, Beispiel-/Problem-PDF,
+Update-Referenz und Gesamtstatus sind getrennt sichtbar; ein erfolgreicher
+Nachweis aktiviert nichts. Genau eine abschließende Bestätigung in ReleaseMixin
+führt über denselben RuleSuiteController zur Aktivierung. Der vorhandene Wizard
+bleibt Erstellung-/Feldhilfe und gibt höchstens einen geprüften Entwurf zurück.
+Ungespeicherte Felder, Meta-/PDF-/Root-/Draftwechsel und verspätete Workerresultate
+können keinen alten Nachweis aktivieren. Ein alter Callback darf weder den Status
+noch Busy eines neueren Prüfversuchs zurücksetzen. Zerstörte Fenster verwerfen
+Completion-Ereignisse. Die neue PDF-Proofarbeit nutzt den bestehenden TkTaskRunner
+mit threadsicherer Queue und ausschließlich auf dem Hauptthread geplantem Tk-Polling;
+ein Proof-Worker ruft kein Tk-`after` auf. Reine Diff-/Strukturansichten serialisieren
+saubere bytegebundene Entwürfe nicht neu.
+
+Der bestehende readiness-Owner erzeugt Proof-Version 2 aus exakt erfassten
+Draft-/Index-/Active-/PDF-Bytes. Kurze Lifecycle→Draft-Sperren schützen Capture,
+Pending und Ready-Publikation; PDF-Arbeit läuft ohne langfristig gehaltene
+TTL-Sperre. Private Snapshots speisen die echte Extraktion. Der private Index
+verweist für den geprüften Assay stets auf die private Active-Kopie, auch wenn
+die originale Bindung absolut oder ein Alias ist. Originalpfade und Original-
+Hashes bleiben im Nachweis. Vor Ready werden aktueller Modus, Bindungen und
+Inputs erneut geprüft. Eine Versuchskennung verhindert, dass ältere langsame
+Ergebnisse neuere fehlgeschlagene Prüfungen überschreiben. Keine zweite
+Nachweisablage oder Workflowengine entsteht.
+
+Beim Update müssen alle bisherigen Referenzfelder und `lot_id` gleich bleiben;
+gleiche PDF-Bytes sind auch unter anderem Dateinamen keine Referenz. Der echte
+Extractor verlangt weiterhin jedes konfigurierte Feld, auch `required=false`.
+Der proofpflichtige Produktpfad prüft innerhalb derselben bestehenden
+Aktivierungsowner und konsistenter Lifecycle→Draft-Sperrfolge nochmals, bindet
+die tatsächlich publizierten Draftbytes und verwirft ungetestete Namensargumente.
+Untere API-Aufrufe bleiben mit optionaler Proofpflicht kompatibel. Die zentrale
+Draftnamenbildung verwirft pfadartige Assaykeys hostunabhängig und behält die
+zusätzliche resolved-Enthaltenheitsprüfung gegen Symlinks. Vorhandene Regeln
+werden nicht dafür umgeschrieben.
+
 ## Modulgrenzen
 
 ### Versionierte Geräte- und QC-Autorität (P4/P5)
@@ -167,12 +205,38 @@ Owner-Lesevorgänge sind kein atomarer Latest-Snapshot: genau dieses Manifest
 definiert die Population und wird vor Publikation unter dem QC-Schreiblock erneut
 geprüft.
 
-Chargenidentität ist Gerät/Assay/exakte extrahierte Kit-Charge, Beginn das älteste
-geeignete Messdatum. Abschluss verlangt eine andere neuere validierte Charge
-mit Datumsnachweis, passende Quellen-/Konfigurationskennungen sowie ein bereits
-geliefertes eingefrorenes Modell und PDF mit Prüfsumme. Nachweis und Abschluss
-werden atomar gespeichert; Fehler lassen die Charge offen. Späte Werte brauchen
-eine begründete Wiederöffnung mit neuer Chargenrevision; frühere PDFs bleiben
+Chargenidentität ist Gerät/Assay/exakte extrahierte Kit-Charge. Der statistische
+Beginn bleibt das älteste geeignete Messdatum. Die davon unabhängige Nutzung
+kommt aus `get_lot_chronology`: alle projizierten Ergebnisse, auch unvalidierte
+und numerisch ungeeignete, mit Datum-/Zeitpräzision und möglichen offenen
+Kandidatenidentitäten. `QCUsageSnapshot` hält das vollständige kanonische JSON
+und seinen Hash. Tage ohne gemessene Uhrzeit sind ganze Tagesintervalle;
+nur zusammenhängend explizite Stunden/Minuten/Sekunden verfeinern sie. Fehlende
+höhere Zeitkomponenten werden nicht durch strptime-Standardwerte ergänzt.
+
+Abschluss setzt mindestens einen geeigneten Zielchargenwert und eine sicher
+spätere Nutzung einer anderen Charge voraus; ein späterer Beginn oder eine
+Validierung dieser belegenden Messung ist nicht erforderlich. Gleichstände,
+überlappende Zeitintervalle und unbekannte Zielnutzung werden nicht künstlich
+geordnet. Unlesbare Revisionshistorie mit unbekannter Kandidatenidentität
+verlangt gruppenweite Klärung. Der Nachweis ist paarweise und behauptet keine
+global neueste Charge. Bestehende Bindung oder ausdrückliche Profilwahl liefert
+den Kontext; widersprüchliche zeitliche Interpretationen bleiben sichtbar.
+
+ResultsController bereitet über `prepare_qc_lot_close` Modell und echte PDF
+rein lesend vor. Der bestehende Statistikknopf „Abschluss prüfen“ öffnet diesen
+Vorschlag mit allen Leveln, Quellen und Klärungsgründen. Abbruch speichert nichts.
+`close_qc_lot(preview, ...)` veröffentlicht die vorbereiteten Bytes; unter
+`BEGIN IMMEDIATE` prüft der einzige QC-Schreibowner Ziel-/Zeugenquellen,
+Profil/Inventar, vollständigen Chronologietoken, erwarteten Chargenkopf,
+Modell-/PDF-Hashes und SD-Bindung erneut. Abschluss und Nachweis entstehen
+atomar. Erwartete Abwesenheit (`expected_version_id=0`) erlaubt den direkten
+ersten abgeschlossenen Snapshot ohne beiläufige offene Revision oder neue SD.
+Die finale Veröffentlichung sperrt Dialogabbruch und Fensterschließen.
+
+Neue Werte ändern weder geschlossenen Zustand noch Archivbytes; ein separater
+Live-Änderungshinweis bleibt neben der Archivansicht sichtbar. Eine begründete
+Wiederöffnung erzeugt ausdrücklich eine neue Revision; frühere PDFs bleiben
 bytegenau lesbar. Manuelle SD und ausdrücklich bestätigte validierte
 Referenzserien werden eingefroren. P5 bewahrt diese rohen Referenzen unverändert
 und ergänzt berechneten Mittelpunkt und Stichproben-SD im Analysemodell. Ohne
@@ -228,6 +292,36 @@ günstige Teilmengenauswahl oder kontrollübergreifende Längspoolung. Fehlende
 SD/Ordnung/Gruppierung werden mit Gründen sichtbar; menschliche Validation
 bleibt unabhängig.
 
+P2 erzeugt Modellversion 2 mit `arev2-qc-analysis-v3` und `arev2-qc-pdf-v3`.
+Die vier bisherigen Modellversion-1-Kombinationen aus Analyse v1/v2 und PDF v1/v2
+bleiben lesbar; ungültige Querkombinationen werden abgewiesen. Neue
+Quellenmanifeste heißen `qc-sources-v2`. Hersteller-MIN/MAX brauchen dieselbe
+Decimal-Konstanz wie SOLL und Einheit. Getrennte Hersteller-/Prozentgrenzen,
+Punktbefunde und `chart.reference_lines` sind eingefroren; UI/PDF berechnen keine
+Grenzwerte. Die profilweite Einzelwertabweichung p erzeugt pro Level
+`SOLL × (1 ± p/100)`, unabhängig von QMMA/SD/Westgard. Gleichheit liegt innerhalb;
+Grenzüberschreitung schließt den Punkt nicht aus. Tatsächlich vertauschte
+Prozentgrenzen bleiben erklärt unverfügbar, auch bei negativem SOLL. SOLL null
+und p null werden ohne Sonderumdeutung berechnet. Altmodelle erhalten beim Lesen
+oder erläuterten Drucken keine rückwirkenden neuen Linien.
+
+P4 vom 13.11.2026 erzeugt zusätzlich genau Modellversion 3 /
+`arev2-qc-analysis-v4` / `arev2-qc-pdf-v4`. Das historische Tupel
+2 / analysis-v3 / pdf-v3 bleibt literal erhalten. Der reine Analyseowner friert
+je Level `descriptive` (n, Mittelwert, empirische Stichproben-SD mit n-1, VK),
+`period`, stabile Darstellungspositionen und je Punkt `measurement` sowie absolute
+und relative absolute Abweichungen ein. Grundgesamtheit bleiben die bereits
+geeigneten Werte. Die exakt budgetierte Decimal-Varianz verwendet
+`(n*sum(x²)-sum(x)²)/(n*(n-1))`; n<2 gibt keine empirische SD, nichtpositiver
+Mittelwert keinen VK. Relative Einzelabweichungen brauchen positiven SOLL.
+Ausgeschlossene Werte erhalten keine scheinbar gültigen Abweichungen. Diese
+empirische SD ist ausdrücklich keine freigegebene Westgard-Referenz. Eine
+vorhandene Mittelwertlinie gehört ebenfalls zu `chart.reference_lines`.
+Datums-/Zeitpräzision folgt nur zusammenhängend belegten H/M/S-Komponenten;
+fehlende Zeiten werden nicht ergänzt. UI und PDF verwenden die eingefrorenen
+Zahlen, die Anzeige rundet auf sechs signifikante Stellen. Historische Modelle
+erhalten weder Deskriptivwerte noch Abweichungen nachträglich.
+
 `QCAnalysis` hält nur kanonisches JSON und SHA-256 unveränderlich. Sein Modell
 enthält das vollständige Manifest, unveränderte rohe SD-Referenzen, berechnete
 Serien, Diagramm, Befunde, Nichtverfügbarkeitsgründe, Zählungen und
@@ -244,27 +338,48 @@ Grenzen: 16 MiB Modell, 50.000 beobachtete Punkte in der Analyse, 200 PDF-Seiten
 64 MiB PDF, 4 KiB Prozessmetadaten. Dateibasierter Austausch vermeidet einen
 vollen Pipe-/Queue-Puffer. Der Kindprozess prüft die echte PDF erneut; Eltern
 prüfen Größe/Hash/Identitäten. Lange Tabellen werden paginiert, unbeherrschbarer
-Inhalt liefert einen kontrollierten Fehler. Anschließend prüft P4 `close_lot`
+Inhalt liefert einen kontrollierten Fehler. Anschließend prüft `close_lot`
 Quellen/Konfiguration erneut und speichert PDF und Abschluss atomar. Rendering-
 oder Konfliktfehler lassen die Charge offen. Export prüft gespeicherte Hashes
 und erstellt standardmäßig ausschließlich eine neue Datei mit den archivierten Bytes.
 
-Die aktuelle Darstellung `arev2-qc-pdf-v2` beginnt für jede Kontrolle eine eigene
-Seite: Diagramm, QMMA/SOLL/SD/Referenzumfang, Grenzen, konkrete Befunde und nur
-ihre Einzelwerte. Fortsetzungsseiten behalten Kontrolle, vollständigen Assaynamen
-und Kit-Charge im Kopf. Datum allein erzeugt weder in der Tabelle noch an der
-Achse eine scheinbar erfasste Uhrzeit. Anwender stammt aus dem eingefrorenen
-Quellenpayload (`ANWENDER` oder öffentlicher Legacy-Alias `user`), Validierer und
-UTC-Zeit ausschließlich aus dem zu Run/Revision/Auswahl passenden Nachweis.
-Widersprüche oder fehlende Bindungen werden sichtbar statt geraten.
+Die aktuelle Darstellung `arev2-qc-pdf-v4` verwendet kompakte A4-Abschnitte je
+Level: dreiteiliger Kopf aus belegten Stammdaten, Diagramm mit rechter Legende,
+zwei Statistikspalten, Messwerttabelle und leere Unterschriftsfelder. Elf übliche
+Messungen passen auf eine vollständige Seite; die geprüften Standardbeispiele
+mit 60 Messwertzeilen insgesamt benötigen höchstens drei Seiten. Ein Folgelevel
+kann mit vollständigem eigenem Kopf, Diagramm und Statistik auf derselben Seite
+beginnen. Eingebaute Times-Roman/Times-Bold vermeiden externe Fontabhängigkeiten;
+Datum/Zeit bleibt einzeilig, Zeilen sind gleichmäßig kompakt. Die Zeitachse bleibt
+echt, zu dichte Beschriftungen werden ausgelassen. Farbe und Strichart trennen
+Grenzlinien; Ringe und Punktsymbole kennzeichnen Grenz- beziehungsweise Westgard-
+Befunde. Fortsetzungen wiederholen Gerät, Assay, Kit-/Reagenzcharge, Level und
+Tabellenkopf. Reine Datumswerte erzeugen keine scheinbar erfassten Uhrzeiten.
 
-`include_explanations=False` bleibt im bestehenden Render-/Exportpfad der
-Standard. Beim Export bedeutet das unveränderte Archivbytes. Die optionale
-Druckfassung rendert nur das gespeicherte Modell und hängt Legenden,
-Interpretation und Verfahrensdetails an; sie schreibt weder DB noch Modell oder
-alte PDF um. Der Bool-Modus wird beim Spawn und in den Rückgabemetadaten geprüft.
-Alte v1-Nachweise bleiben exakt exportierbar und können bei unterstütztem Modell
-als separate erläuterte Druckfassung dargestellt werden.
+Darstellungsnummern (Pos) sind je Level stabil an `point_key` gebunden, keine
+analytischen Läufe. Laufangaben stammen nur aus einem ausdrücklich konfigurierten
+`run_grouping_field` und dessen eingefrorenem `run_group_raw`; technische Run-IDs
+sind ausschließlich Nachweisidentitäten. Anwender stammt aus dem eingefrorenen
+Quellenpayload (`ANWENDER` oder Legacy-Alias `user`), Validierer und UTC-Zeit
+nur aus dem zu Ergebnis/Revision/Auswahl passenden Nachweis. Fehlende Bindungen,
+mehrdeutige Anwender und ausgeschlossene Punkte bleiben im Standard mit Position
+und verständlichem Grund sichtbar. Vollständige lange Rohangaben, Identitäten
+und Validatorbindung bleiben im bestehenden digitalen Analysemodell erhalten;
+der Fuß nennt die Modellkennung. Der Renderer fügt keinen JSON-Rohdatenanhang
+hinzu. Zusätzliche technische Papiernachweise sind bewusst optional. Weder Klinikdaten aus dem
+Vorlagenbild noch Hersteller-/Kontrollmaterialnamen, Kalibrationen oder
+Unterschriften werden erfunden.
+
+`include_explanations=False` bleibt Standard und druckt die fachliche Auswertung
+mit Legende und wichtigen positionsgebundenen Befunden. Technische Quellen-/
+Validierungslisten und wiederholte Einzelprobenbelege werden nur mit
+`include_explanations=True` zusätzlich gedruckt, ebenso Methoden, Referenzen und
+die vollständige Westgard-Regelliste. Beim Export bedeutet der Standard weiterhin
+unveränderte Archivbytes. Die optionale Druckfassung verwendet nur das gespeicherte
+Modell, bei alten Modellen den bisherigen Layoutzweig und ausschließlich damalige
+Kennzahlen; DB, Modell und alte PDF bleiben unverändert. Der Bool-Modus bleibt
+beim Spawn und in den Rückgabemetadaten geprüft. Die echten prä-P2- und prä-P4-
+Fixtures binden ursprüngliches Modell/PDF, Hash und Herkunft.
 
 Assaynamen sind Präsentationsdaten im bestehenden Application-Owner. Der
 ResultsController bevorzugt die tatsächlich ausgewählte Revision, sonst den

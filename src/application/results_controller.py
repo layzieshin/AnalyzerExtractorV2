@@ -17,9 +17,9 @@ from src.ingestion.api import get_import_record, resolve_current_path
 from src.jobcontroller.api import get_job_evidence, reanalyze_run
 from src.jobqueue.api import list_jobs
 from src.qualitycontrol.api import (
-    MutationContext, QCAnalysis, QualityControlError, analyze_lot, close_lot, configure_lot, export_report_evidence,
+    MutationContext, QCAnalysis, QCUsageSnapshot, QualityControlError, analyze_lot, close_lot, configure_lot, export_report_evidence,
     get_report_evidence, get_sd_reference_context, render_analysis_pdf, get_inventory as qc_get_inventory,
-    get_lot_sources, get_lot, list_lots, list_profiles, lot_identity, open_lot, reopen_lot,
+    get_lot_sources, get_lot_chronology, get_lot, list_lots, list_profiles, lot_identity, open_lot, reopen_lot,
 )
 from src.resultstore.api import (
     compute_report_id,
@@ -55,6 +55,7 @@ from .models import (
     DesktopSettings,
     QCLotCase,
     QCLotDetail,
+    QCLotClosePreview,
     QCAnalysisView,
     QCReportVersion,
     DuplicateCandidateDetail,
@@ -183,6 +184,25 @@ class ResultsController:
             schema_warnings=tuple(str(item) for item in (raw.get("schema_warnings") or [])),
         )
 
+    @staticmethod
+    def _qc_usage_case(case, usage):
+        entry = next((row for row in usage.to_dict()["lots"] if row["kit_lot"] == case.kit_lot), None)
+        if entry is None:
+            return replace(case, close_reason="Kein Nutzungsnachweis vorhanden.")
+        available = entry["close_available"] and case.state != "closed"
+        last = entry["last_usage"]["display"] if entry["last_usage"] else "nicht bestimmbar"
+        if entry["close_available"]:
+            witness = entry["witnesses"][0]
+            reason = f"Zuletzt {last}; Charge {witness['kit_lot']} sicher später benutzt: {witness['interval']['display']}."
+        elif not entry["last_usage_reliable"]:
+            reason = "Letzte Nutzung ungeklärt: Datum, offene Ergebnisauswahl oder Konfiguration prüfen."
+        else:
+            reason = "Keine sicher spätere Nutzung einer anderen Charge belegt; gleiche oder überlappende Zeitangaben bleiben ungeklärt."
+        if case.state == "closed":
+            reason = "Bereits abgeschlossen. " + reason
+        return replace(case, last_usage=last, chronology_status="proven" if entry["last_usage_reliable"] else "unclear",
+            close_available=available, close_reason=reason)
+
     def list_qc_lots(self) -> tuple[QCLotCase, ...]:
         spec = self._capture_store()
         try:
@@ -194,7 +214,11 @@ class ResultsController:
             identities = {(row.get("device_id"), row.get("assay_key"), row.get("lot_id"))
                           for row in named if row.get("lot_id") and row.get("device_id")}
             identities.update((row["device_id"], row["assay_key"], row["kit_lot"]) for row in lots.values())
-            cases = []
+            for row in named:
+                candidate = (row.get("pending_revision") or {}).get("result") or {}
+                if isinstance(candidate.get("lot_id"), str) and candidate["lot_id"].strip():
+                    identities.add((row.get("device_id"), row.get("assay_key"), candidate["lot_id"]))
+            cases, chronology = [], {}
             for device_id, assay, kit_lot in sorted(identities):
                 key = lot_identity(device_id, assay, kit_lot)
                 lot = lots.get(key)
@@ -205,11 +229,18 @@ class ResultsController:
                     options.insert(0, (selected, "Gespeichertes Prüfprofil"))
                 device = devices.get(device_id, {})
                 name = str(device.get("display_name") or f"{device_id} (unvollständig)")
-                cases.append(QCLotCase(spec["path"], key, device_id, name, assay, kit_lot,
+                case = QCLotCase(spec["path"], key, device_id, name, assay, kit_lot,
                     lot["state"] if lot else "unconfigured", int(lot["version_id"]) if lot else 0,
                     selected, tuple(options), str(lot["snapshot"].get("start_date") or "") if lot else "",
                     " / ".join(dict.fromkeys(row["_assay_name"] for row in named
-                        if (row.get("device_id"), row.get("assay_key"), row.get("lot_id")) == (device_id, assay, kit_lot))) or "Assayname fehlt"))
+                        if (row.get("device_id"), row.get("assay_key"), row.get("lot_id")) == (device_id, assay, kit_lot))) or "Assayname fehlt")
+                if selected:
+                    if selected not in chronology:
+                        chronology[selected] = get_lot_chronology(spec, profile_version_id=selected)
+                    case = self._qc_usage_case(case, chronology[selected])
+                else:
+                    case = replace(case, close_reason="Bitte ein passendes Prüfprofil ausdrücklich auswählen.")
+                cases.append(case)
             return tuple(cases)
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
@@ -232,8 +263,11 @@ class ResultsController:
             lot = get_lot(spec, case.lot_key) if case.version_id else None
             if lot and lot["version_id"] != case.version_id:
                 raise QualityControlApplicationError("Die Charge wurde geändert. Bitte neu laden.")
-            return QCLotDetail(replace(case, profile_version_id=selected, start_date=manifest["start_date"] or ""),
-                               manifest, lot["snapshot"]["sd_references"] if lot else {})
+            usage = get_lot_chronology(spec, profile_version_id=selected)
+            current_case = self._qc_usage_case(replace(case, profile_version_id=selected, start_date=manifest["start_date"] or ""), usage)
+            changed = bool(lot and lot["state"] == "closed" and lot["snapshot"]["source_manifest"]["source_token"] != manifest["source_token"])
+            return QCLotDetail(current_case, manifest, lot["snapshot"]["sd_references"] if lot else {},
+                usage.snapshot_json, usage.snapshot_sha256, changed)
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
 
@@ -329,54 +363,81 @@ class ResultsController:
 
     def list_qc_close_witnesses(self, detail: QCLotDetail) -> tuple[QCLotDetail, ...]:
         spec = self._qc_case_store(detail.case)
-        result = []
         try:
             self._qc_current_lot(detail.case, spec)
-            source = detail.source_manifest
-            for case in self.list_qc_lots():
-                if ((case.device_id, case.assay_key) != (detail.case.device_id, detail.case.assay_key)
-                        or case.kit_lot == detail.case.kit_lot or case.store_path != spec["path"]):
-                    continue
-                manifest = get_lot_sources(spec, profile_version_id=detail.case.profile_version_id, kit_lot=case.kit_lot)
-                if (manifest["included"] and source["included"] and manifest["start_date"] > source["start_date"]
-                        and max(point["measured_at"] for point in manifest["included"]) > max(point["measured_at"] for point in source["included"])):
-                    result.append(QCLotDetail(replace(case, profile_version_id=detail.case.profile_version_id,
-                        start_date=manifest["start_date"]), manifest, {}))
-            return tuple(result)
+            usage = get_lot_chronology(spec, profile_version_id=detail.case.profile_version_id)
+            own = next((row for row in usage.to_dict()["lots"] if row["kit_lot"] == detail.case.kit_lot), None)
+            identities = {row["kit_lot"] for row in own["witnesses"]} if own else set()
+            return tuple(self.get_qc_lot_detail(case, profile_version_id=detail.case.profile_version_id)
+                for case in self.list_qc_lots() if case.kit_lot in identities and
+                (case.device_id, case.assay_key) == (detail.case.device_id, detail.case.assay_key))
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
 
-    def close_qc_lot(self, detail: QCLotDetail, analysis_view: QCAnalysisView, witness: QCLotDetail, *,
-                     operator_initials: str, request_id: str) -> dict[str, Any]:
+    def prepare_qc_lot_close(self, detail: QCLotDetail) -> QCLotClosePreview:
+        """Read-only preparation; cancellation cannot leave an opened/closed lot."""
         case = detail.case
         spec = self._qc_case_store(case)
-        self._qc_case_store(witness.case)
-        if (case.state != "open" or analysis_view.evidence_lot_version_id is not None or analysis_view.case != case
-                or (witness.case.device_id, witness.case.assay_key) != (case.device_id, case.assay_key)
-                or witness.case.kit_lot == case.kit_lot or witness.case.profile_version_id != case.profile_version_id):
-            raise QualityControlApplicationError("Bitte eine aktuelle offene Auswertung und eine passende neuere Folgecharge wählen.")
         try:
-            self._qc_current_lot(case, spec)
-            self._qc_current_lot(witness.case, spec)
-            witness_now = get_lot_sources(spec, profile_version_id=case.profile_version_id, kit_lot=witness.case.kit_lot)
-            if witness_now["source_token"] != witness.source_manifest["source_token"]:
-                raise QualityControlApplicationError("Die Werte der Folgecharge wurden geändert. Bitte neu laden.")
-            if not witness_now["included"] or witness_now["start_date"] <= detail.source_manifest["start_date"]:
-                raise QualityControlApplicationError("Die Folgecharge braucht ein strikt neueres ältestes Messdatum.")
-            expected = self.get_qc_analysis(detail)
-            if expected.model_sha256 != analysis_view.model_sha256 or expected.model_json != analysis_view.model_json:
-                raise QualityControlApplicationError("Die angezeigte Auswertung ist veraltet. Bitte neu laden.")
+            current = self._qc_current_lot(case, spec)
+            if case.state == "closed":
+                raise QualityControlApplicationError("Die Charge ist bereits abgeschlossen.")
+            if current and current["snapshot"]["profile_version_id"] != case.profile_version_id:
+                raise QualityControlApplicationError("Die ausgewählte Profiländerung ist noch nicht gespeichert. Bitte zuerst die Chargenkonfiguration speichern.")
+            captured = self.get_qc_lot_detail(case)
+            if captured.source_manifest["source_token"] != detail.source_manifest["source_token"]:
+                raise QualityControlApplicationError("Die Quellen wurden geändert. Bitte neu laden.")
+            usage = json.loads(captured.chronology_json)
+            own = next((row for row in usage["lots"] if row["kit_lot"] == case.kit_lot), None)
+            if not own or not own["witnesses"]:
+                raise QualityControlApplicationError(captured.case.close_reason)
+            witness = own["witnesses"][0]
+            witness_source = get_lot_sources(spec, profile_version_id=case.profile_version_id, kit_lot=witness["kit_lot"])
+            analysis_view = self.get_qc_analysis(captured)
             analysis = QCAnalysis(analysis_view.model_json, analysis_view.model_sha256)
-            model = analysis.to_dict()
-            # Expensive rendering happens before any QC write transaction.
             report = render_analysis_pdf(analysis)
+            import hashlib
+            if (report.model_sha256 != analysis.model_sha256 or report.renderer_id != analysis.to_dict()["renderer_id"]
+                    or hashlib.sha256(report.pdf_bytes).hexdigest() != report.pdf_sha256):
+                raise QualityControlApplicationError("Die vorbereitete PDF gehört nicht zum eingefrorenen Modell oder ihre Prüfsumme ist ungültig.")
             self._qc_case_store(case)
-            self._qc_case_store(witness.case)
-            return close_lot(spec, case.lot_key, expected_version_id=case.version_id,
-                expected_source_token=detail.source_manifest["source_token"], witness_kit_lot=witness.case.kit_lot,
-                expected_witness_source_token=witness.source_manifest["source_token"], analysis_model=model,
-                pdf_bytes=report.pdf_bytes, pdf_sha256=report.pdf_sha256, algorithm_id=model["algorithm_id"],
-                renderer_id=report.renderer_id, context=MutationContext(operator_initials, request_id))
+            self._qc_current_lot(case, spec)
+            if get_lot_chronology(spec, profile_version_id=case.profile_version_id).snapshot_sha256 != captured.chronology_sha256:
+                raise QualityControlApplicationError("Der Nutzungs- oder Konfigurationsstand wurde während der Vorbereitung geändert. Bitte neu prüfen.")
+            latest = self.get_qc_analysis(captured)
+            if latest.model_sha256 != analysis_view.model_sha256:
+                raise QualityControlApplicationError("Die Auswertung wurde während der Vorbereitung geändert. Bitte neu prüfen.")
+            block = "Keine vollständigen, eindeutig validierten Zielchargenwerte. Bitte die ausgeschlossenen Werte klären." if not captured.source_manifest["included"] else ""
+            return QCLotClosePreview(captured, analysis_view, captured.chronology_json, captured.chronology_sha256,
+                witness["kit_lot"], witness_source["source_token"], report.pdf_bytes, report.pdf_sha256,
+                report.renderer_id, report.page_count, block)
+        except QualityControlError as exc:
+            raise QualityControlApplicationError(str(exc)) from exc
+
+    def close_qc_lot(self, preview: QCLotClosePreview, *, operator_initials: str, request_id: str) -> dict[str, Any]:
+        """Publish only the exact prepared model/PDF; no final-click rendering."""
+        case = preview.detail.case
+        spec = self._qc_case_store(case)
+        if preview.block_reason:
+            raise QualityControlApplicationError(preview.block_reason)
+        if preview.analysis.evidence_lot_version_id is not None or preview.analysis.case != case:
+            raise QualityControlApplicationError("Bitte einen aktuellen Abschlussvorschlag prüfen.")
+        try:
+            QCUsageSnapshot(preview.chronology_json, preview.chronology_sha256)
+            latest = next((row for row in list_lots(spec) if row["lot_key"] == case.lot_key), None)
+            # Exact repeat requests still reach the store's intent check, even
+            # after publication changed the head or later sources arrived.
+            if latest is None or latest["request_id"] != request_id:
+                self._qc_current_lot(case, spec)
+                expected = self.get_qc_analysis(preview.detail)
+                if expected.model_json != preview.analysis.model_json or expected.model_sha256 != preview.analysis.model_sha256:
+                    raise QualityControlApplicationError("Die vorbereitete Auswertung ist veraltet. Bitte neu prüfen.")
+            model = QCAnalysis(preview.analysis.model_json, preview.analysis.model_sha256).to_dict()
+            return close_lot(spec, case.lot_key, expected_version_id=case.version_id, profile_version_id=case.profile_version_id,
+                expected_source_token=preview.detail.source_manifest["source_token"], witness_kit_lot=preview.witness_kit_lot,
+                expected_witness_source_token=preview.witness_source_token, expected_chronology_token=preview.chronology_sha256,
+                analysis_model=model, pdf_bytes=preview.pdf_bytes, pdf_sha256=preview.pdf_sha256,
+                algorithm_id=model["algorithm_id"], renderer_id=preview.renderer_id, context=MutationContext(operator_initials, request_id))
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
 

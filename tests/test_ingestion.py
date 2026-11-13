@@ -322,13 +322,16 @@ def test_observe_stable_pdfs_timing_sequence_and_reset(tmp_path: Path) -> None:
     assert observe_stable_pdfs(watch, stable_window_s=1.0, state=state, now=3.1) == [pdf]
 
 
-def test_validate_watch_paths_rejects_case_and_parent_child(tmp_path: Path) -> None:
+def test_validate_watch_paths_rejects_case_and_parent_child(tmp_path: Path, monkeypatch) -> None:
     watch = tmp_path / "Watch"
     backup = tmp_path / "watch" / "backup"
     watch.mkdir()
     backup.mkdir(parents=True)
-    with pytest.raises(IngestionError, match="watch_backup_under_input"):
-        validate_watch_path_pair(str(watch), str(backup))
+    # Case comparison is a simulated Windows context, not a POSIX filesystem claim.
+    with monkeypatch.context() as patch:
+        patch.setattr("src.ingestion.service.os.path.normcase", lambda value: str(value).casefold())
+        with pytest.raises(IngestionError, match="watch_backup_under_input"):
+            validate_watch_path_pair(str(watch), str(backup))
 
     nested = tmp_path / "outer" / "inner"
     nested.mkdir(parents=True)

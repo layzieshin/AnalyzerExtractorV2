@@ -142,7 +142,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self._render_summary()
             self._set_status(
                 "Auch unvollständige Entwürfe können im Editor weiterbearbeitet werden. "
-                "Nur die ausdrückliche Aktivierung benötigt alle Prüfungen und Nachweise."
+                "Der PDF-Nachweis wird hier geprüft; aktiviert wird erst separat im Editor."
             )
 
     def _on_next(self) -> None:
@@ -230,9 +230,8 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self.destroy()
         if callable(callback):
             callback(draft)
-        if action == "activate" and draft:
-            self._on_activate_requested(draft)
-        elif action == "editor" and draft:
+        if action in {"activate", "editor"} and draft:
+            # Legacy action names remain accepted; wizard success never activates.
             self._on_open_in_editor(draft)
 
     def _on_mode_changed(self) -> None:
@@ -875,11 +874,11 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         else:
             if mode == "update":
                 self.lbl_mode_summary.config(
-                    text="Nur zur Aktivierung der geänderten aktiven Regel: Problem-PDF und eine davon verschiedene Referenz-PDF sind erforderlich."
+                    text="Zum PDF-Nachweis der geänderten aktiven Regel sind Problem-PDF und eine andere Referenz-PDF erforderlich."
                 )
                 self.frm_reference.pack(fill="x", before=self.lbl_required_summary)
             else:
-                self.lbl_mode_summary.config(text="Aktivierung einer Neuanlage: eine Referenz-PDF ist nicht erforderlich.")
+                self.lbl_mode_summary.config(text="Prüfung einer Neuanlage: eine Referenz-PDF ist nicht erforderlich.")
                 self.frm_reference.pack_forget()
                 self.var_reference_pdf.set("")
         if getattr(self, "_using_fulltext_fallback", False):
@@ -946,14 +945,14 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         if not self._pdf_ready():
             messagebox.showwarning(
                 "PDF fehlt",
-                "Die Aktivierung braucht eine erfolgreich geladene PDF.",
+                "Der PDF-Nachweis braucht eine erfolgreich geladene PDF.",
                 parent=self,
             )
             return
         if not self._all_fields_confirmed():
             messagebox.showwarning(
                 "Felder unvollständig",
-                "Die Aktivierung ist blockiert, solange nicht jedes konfigurierte Feld "
+                "Der PDF-Nachweis ist blockiert, solange nicht jedes konfigurierte Feld "
                 "einen nichtleeren Treffer im PDF-Text hat.",
                 parent=self,
             )
@@ -966,7 +965,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         if not structure.get("ok"):
             messagebox.showwarning(
                 "Strukturprüfung",
-                "Die Aktivierung ist blockiert, solange die Strukturprüfung Fehler meldet.",
+                "Der PDF-Nachweis ist blockiert, solange die Strukturprüfung Fehler meldet.",
                 parent=self,
             )
             return
@@ -1012,7 +1011,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                 )
             messagebox.showerror("Nachweis fehlgeschlagen", message, parent=self)
             return
-        self._shutdown("activate")
+        self._shutdown("editor")
 
     def _set_preview_text(self, text: str) -> None:
         if not hasattr(self, "txt_preview"):

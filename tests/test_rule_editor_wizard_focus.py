@@ -274,7 +274,7 @@ def test_stepwise_nonempty_match_contract_accepts_zero_only() -> None:
     assert NewRulesetWizard._row_has_nonempty_value({"matched": False, "value": "x", "error": None}) is False
 
 
-def test_stepwise_activation_requires_real_preview(monkeypatch) -> None:
+def test_stepwise_proof_requires_real_preview_then_returns_without_activation(monkeypatch) -> None:
     from rule_editor.wizard import NewRulesetWizard
 
     calls: list[tuple[str, str, str | None]] = []
@@ -309,8 +309,8 @@ def test_stepwise_activation_requires_real_preview(monkeypatch) -> None:
     wizard._rules.validate_draft = lambda _path: {"ok": True, "errors": []}
     wizard._rules.diff_draft_vs_active = lambda _key, _path: {"mode": "create"}
     wizard.destroy = lambda: opened.append("destroyed")
-    wizard._on_open_in_editor = lambda _path: pytest.fail("activation must not open the editor")
-    wizard._on_activate_requested = opened.append
+    wizard._on_open_in_editor = lambda path: opened.append("editor:" + path)
+    wizard._on_activate_requested = lambda _path: pytest.fail("proof success must not activate")
     monkeypatch.setattr(
         "rule_editor.wizard.messagebox.showerror",
         lambda _title, message, **_kwargs: errors.append(str(message)),
@@ -325,7 +325,7 @@ def test_stepwise_activation_requires_real_preview(monkeypatch) -> None:
         ("sample.pdf", "(1111)", "draft.json"),
         ("sample.pdf", "(1111)", "draft.json"),
     ]
-    assert opened == ["destroyed", "draft.json"]
+    assert opened == ["destroyed", "editor:draft.json"]
 
 
 def test_stepwise_existing_rule_requires_reference_pdf(monkeypatch) -> None:
@@ -1130,7 +1130,7 @@ def test_update_reference_must_differ_and_create_skips_it(monkeypatch) -> None:
     wizard._rules.mode = "create"
     wizard.var_reference_pdf.set(r"I:\pdfs\problem.pdf")
     wizard._finish()
-    assert proofs == [(r"I:\pdfs\problem.pdf", None), ("activated", None)]
+    assert proofs == [(r"I:\pdfs\problem.pdf", None)]  # Proof success has no activation callback.
 
 
 def test_proof_is_blocked_until_every_configured_field_hits(monkeypatch) -> None:

@@ -303,12 +303,12 @@ def preview_extract(project_root: str, pdf_path: str, assay_key: str, draft_path
     return RuleSuite().preview_extract(project_root, pdf_path, assay_key, draft_path=draft_path)
 
 
-def activate_draft(project_root: str, assay_key: str, draft_path: str) -> str:
-    return str(RuleSuite().activate_draft(project_root, assay_key, draft_path))
+def activate_draft(project_root: str, assay_key: str, draft_path: str, *, require_authoring_proof: bool = False) -> str:
+    return str(RuleSuite().activate_draft(project_root, assay_key, draft_path, require_authoring_proof=require_authoring_proof))
 
 
-def activate_new_draft(project_root: str, assay_key: str, assay_name: str, draft_path: str) -> str:
-    return str(RuleSuite().activate_new_draft(project_root, assay_key, assay_name, draft_path))
+def activate_new_draft(project_root: str, assay_key: str, assay_name: str, draft_path: str, *, require_authoring_proof: bool = False) -> str:
+    return str(RuleSuite().activate_new_draft(project_root, assay_key, assay_name, draft_path, require_authoring_proof=require_authoring_proof))
 
 
 def list_fields(project_root: str, assay_key: str) -> List[str]:

@@ -218,7 +218,7 @@ def test_unc_path_uses_direct_connect_not_uri(tmp_path: Path, monkeypatch):
     real_is_file = Path.is_file
 
     def _fake_is_file(self: Path) -> bool:
-        if str(self).startswith("\\\\medistar\\") or self.as_posix().startswith("//medistar/"):
+        if self in {Path("//medistar/share/runs.sqlite3"), Path("//medistar/share/runs.sqlite3").resolve()}:
             return True
         return real_is_file(self)
 
@@ -279,7 +279,7 @@ def test_direct_connect_sets_query_only(tmp_path: Path, monkeypatch):
     real_is_file = Path.is_file
 
     def _fake_is_file(self: Path) -> bool:
-        if str(self).startswith("\\\\medistar\\") or self.as_posix().startswith("//medistar/"):
+        if self in {Path("//medistar/share/runs.sqlite3"), Path("//medistar/share/runs.sqlite3").resolve()}:
             return True
         return real_is_file(self)
 
@@ -755,3 +755,28 @@ def test_schema_missing_pdf_path_or_created_at_returns_empty_legacy_reports(tmp_
     detail = get_report_runs(_store_spec(db), "job-only")
     assert detail is not None
     assert detail["run_count"] == 1
+
+
+@pytest.mark.parametrize("path,expected", [
+    (r"\\server\share\runs.sqlite3", True), ("//server/share/runs.sqlite3", True),
+    ("/local/runs.sqlite3", False), (r"C:\local\runs.sqlite3", False)])
+def test_network_path_classification_is_explicitly_synthetic(path, expected):
+    from pathlib import PureWindowsPath, PosixPath
+    from src.resultstore.sqlite_store import _is_unc_or_network_path
+    value = PureWindowsPath(path) if "\\" in path else PosixPath(path)
+    assert _is_unc_or_network_path(value) is expected
+
+
+def test_direct_readonly_connection_enforces_query_only_on_real_local_database(tmp_path):
+    from src.resultstore.sqlite_store import _connect_direct_readonly
+    db = tmp_path / "query-only.sqlite3"
+    _create_runs_db(db)
+    before = db.read_bytes()
+    connection = _connect_direct_readonly(db)
+    try:
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            connection.execute("CREATE TABLE forbidden_write (id INTEGER)")
+    finally:
+        connection.close()
+    assert db.read_bytes() == before

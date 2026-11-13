@@ -13,6 +13,24 @@ Dieses Dokument beschreibt den aktuellen Workflow fuer die Regelerstellung.
 - API: `src/rulesuite/api.py`
 - Implementierung: `src/rulesuite/rulesuite.py`
 
+## Direkte Prüfung des geladenen Entwurfs
+
+Im vorhandenen Workspace die Beispiel-/Problem-PDF und bei Updates eine andere
+Referenz-PDF wählen, dann **Mit PDFs prüfen**. Ein bereits bestehender Entwurf
+muss dafür keinen Feldwizard erneut durchlaufen. Strukturstatus, Beispielprüfung,
+Referenzvergleich und Gesamtstatus stehen gemeinsam im Freigabebereich. Erfolg
+heißt **Prüfung erfolgreich – noch nicht aktiviert**. Ergebnis und Änderungen
+können angesehen werden, ohne einen unveränderten Draft neu zu schreiben.
+
+Meta-/Feldänderungen, eine andere PDF-Auswahl oder geänderte Dateien entwerten den
+Nachweis sichtbar. Zurückwählen einer alten PDF ist kein neuer erfolgreicher
+Prüflauf. Updates vergleichen alle bisherigen Felder und Kit-Charge auf einer
+inhaltlich anderen Referenz. Auch optionale konfigurierte Felder müssen einen
+nichtleeren Wert liefern. **Aktivierung bestätigen** führt erst danach zu genau
+einem abschließenden Ja/Nein-Dialog; der Backendpfad prüft die Hashbindungen erneut.
+Eine erfolgreiche Prüfung alleine schreibt weder aktive Regel noch Index oder
+History. Bei Strukturfehlern gibt es keinen Aktivierungs-Override.
+
 ## Gefuehrter Anlage-Wizard (Neues Regelset)
 - Start ueber den sekundaeren Button `Von Grund auf neu...` auf der Inventar-Startseite. Der primaere Neuanlageweg `Von bestehender Rule ableiten...` nutzt weiterhin den Clone-Dialog.
 - Eigenes modales Fenster mit 5 Schritten (Zurueck/Weiter/Abbrechen):
@@ -25,7 +43,7 @@ Dieses Dokument beschreibt den aktuellen Workflow fuer die Regelerstellung.
      Danach Pflichtfeld-Checkliste und Kandidaten-Vorschau (Treffer / Regex fehlt / kein Treffer / Fehler).
   3. Pflichtfelder bestaetigen (Focus Mode): Regex manuell pflegen, Treffer pruefen; Pflichtfelder koennen nicht entfernt werden.
   4. Kandidaten aus Vorlage (Testen / Uebernehmen / Verwerfen, session-only) plus eigene Felder (optional).
-  5. Abschluss: Zusammenfassung + Validierung + Pflichtfeld-Status; Draft im Editor oeffnen oder direkt aktivieren.
+  5. Abschluss: Zusammenfassung + Validierung + Pflichtfeld-Status; Draft im Editor öffnen oder mit PDFs prüfen und danach ohne Aktivierung zum Editor zurückkehren. Die endgültige Aktivierung bleibt ein eigener bestätigter Schritt.
 - Abbruch laesst den bisherigen Stand als Draft unter `rules/drafts/` liegen.
 
 ## Pflichtfeld-Vertrag (neue Assays)

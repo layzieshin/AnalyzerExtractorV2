@@ -1,10 +1,144 @@
 # AREV2 Test Baseline
 
-Date: 2026-09-22 (Phase 2 / Gate 2 — technical closure)
+Date: 2026-11-13 (A1 integrated source release 2.1.0)
 
-Purpose: reproducible reference point for the V2.1 GUI refactor orchestration. Supersedes the 2026-07-09 AP-1 baseline (`74 passed` is **obsolete**).
+Purpose: current verified source baseline with preserved historical phase evidence.
+The current release gate is A1 below; older gate labels, build results and pending
+review statements describe their recorded checkpoints and do not qualify 2.1.0.
+The 2026-07-09 AP-1 baseline (`74 passed`) is obsolete.
 
 ## Current rebuild gates (2026-11-13)
+
+### A1 integrated source release 2.1.0: GATE_PASSED (2026-11-13)
+
+Root issued **GO for P4+A1** on source metadata 2.1.0 after the independent
+standard-print review and one integrated native full-suite run: **1418 passed,
+0 failed, 0 errors, 0 skipped in 86.06s**. This is the observed full-suite result;
+focused totals are not added into it. External evidence: `test_runs/final_native.xml`
+and `test_runs/root_final_review.json`. All **249 frozen Python hashes** still
+match the functional freeze. Current release notes: [2.1.0](RELEASE_NOTES_2_1_0.md).
+Current acceptance/evidence owner: [A1 final verification](A1_FINAL_VERIFICATION_2026-11-13.md).
+
+Root ran isolated synthetic CLI checks: rules integrity, matrix preview, main02
+E2E, watchdog once and worker once all exit 0; both assays are matrix-green and
+three processed PDF runs produced three SQLite rows. All five shipped rule
+integrity error lists are empty. All **121 CLI-owner files** match the execution
+copy byte-for-byte. CLI evidence: `test_runs/root_final_cli_smokes.json`. GitHub
+upload is the subsequent separate Root action. No Windows EXE/packaging
+qualification or completed GitHub upload is claimed here.
+
+### P4 compact PDF layout: ROOT-GO / GATE_PASSED (2026-11-13)
+
+Schema 3 / analysis-v4 / PDF-v4 freezes eligible-sample descriptive statistics,
+absolute/relative deviations, genuine source precision, periods/positions and
+the mean line. Literal schema-2/v3/v3 compatibility and genuine pre-P4 archived
+model/PDF bytes remain intact. Root independently passed eight numeric vectors,
+an excluded outlier and 48 version tuples, plus 242 native focused cases without
+skips before the print-only reworks; those analysis/version owners are unchanged.
+
+The user's later explicit print requirement supersedes the earlier plan for
+mandatory technical evidence pages. Standard print is compact and defaults to
+false for additional evidence: 11 usual rows = 1 page; 60 one-level rows = 2
+pages; two levels with 30 rows each = 3 pages in executed synthetic real-store
+examples. Times-Roman with bold headings, 7.5 pt measurement text, 14 pt rows and
+one-line date/time preserve readability and actual seconds. Important exclusions,
+limit and Westgard findings stay position-bound and visible. Complete identities,
+raw values and bound validations stay in the frozen digital model, identified in
+the footer. No JSON/raw-data attachment was added. Explicitly selected additional
+technical evidence/method/full-rule printing may use more pages. The UI flag
+resets after successful export and stays selected on failure for retry.
+
+Final writer focus: **34 passed, 0 failed, 0 skipped in 44.20s**, covering the
+entire PDF owner plus the existing shell-export capture/reset/retry case. Tests
+check all 60 positions across one/two levels, visible findings, layout bounds,
+no attachments or repeated source lists by default, exact unmodified models,
+full optional hash/token/point-key/raw exceptions, historical exact export and
+bounded spawn behavior. The writer rendered and visually checked all six real-store standard-print
+pages. Historical focused evidence: `test_runs/p4_rework2_focused.xml`,
+`tmp/P4_rework2_freeze.json` (249 Python hashes).
+
+Root independently generated real-store PDFs: **11 points = 1 page**, **60
+one-level points = 2 pages**, **2 x 30 points with long names = 3 pages**, and
+**120 points including an invalid raw value = 4 pages**. Every page was rendered
+with Poppler; representative views were checked at full size. Geometry found
+**zero out-of-bounds spans** across all ten pages. No raw-data attachment was
+embedded; complete raw evidence remains in the frozen model and rendering did
+not mutate it. Optional paper details and exact legacy export are covered by
+focused/full-suite checks. Root issued P4-GO; external evidence:
+`test_runs/root_final_review.json`, `test_runs/root_p4_pdf_geometry_final.json`.
+Details: [P4 result](P4_PDF_LAYOUT_RESULT_2026-11-13.md).
+
+### R1 functional implementation: ROOT-GO (2026-11-13)
+
+The existing Rule Editor now separates loaded-draft PDF proof from one final
+activation confirmation. Proof-v2 uses privately frozen input bytes, current
+mode/binding checks, short lock scopes and attempt-token publication. Product
+activation rechecks the exact captured snapshot under existing owner locks;
+private-index relocation closes absolute/alias live-file escapes. Existing
+lower APIs remain compatible with optional proof enforcement. No shipped rule
+JSON, runtime data or governance configuration was changed.
+
+The six previously established P1/Linux baseline failures were treated by cause:
+four scoped test-context fixes (two simulated Windows case comparisons, two
+exact synthetic UNC/resolved-path mocks) and two product fixes (visible narrow
+editor controls/first-mapped sashes, and fail-closed host-independent draft keys).
+No skips or production case-fold policy were added. Real local SQLite query-only
+behavior and pure synthetic network classification are additionally verified.
+
+Writer's focused R1 selection: **403 passed, 21 existing Tk environment skips in
+3.64s**, including all Rule Editor/RuleSuite/controller tests, baseline contexts
+and architecture. This is not a full-suite result. Root's independent real-PDF
+backend checks passed create/update proof-only isolation, exact old history,
+same-byte reference revocation, mode/name/binding guards and optional-field
+emptiness. A reproduced absolute-binding transient-mutation hole was corrected;
+independent absolute/alias × good/mismatch checks then all resolved private
+snapshots and preserved original BASE values. Independent native R1 review passed **424 tests, 0 skips in 5.91s** with all
+Python-freeze hashes matching. The first actual click flow exposed lost worker-thread Tk-timer delivery hidden
+by an ImmediateThread test double. Rework 1 uses the existing TkTaskRunner queue
+and main-thread poller, replaces that double with a real worker/mainloop and makes
+the existing diff log visible. Focused rework check: **92 passed, 9 existing Tk
+skips in 2.16s**. Root independently confirmed actual main-thread completion,
+cleared busy state and zero worker Tk calls. The independent native rework selection passed **148 tests, 0 skips**, with
+matching hashes. Actual create/update flows at 1024x768 and 1280x900 passed using
+real workers, PDFs and final confirmation dialogs: proof-only/cancel do not write,
+all required reference blockers reject, successful final publication creates the
+exact checked draft and one exact-old-byte history entry. Root issued R1-GO;
+evidence `test_runs/root_r1_review_final.json`. Details: `docs/R1_RULE_RELEASE_RESULT_2026-11-13.md`.
+
+
+### Authorized package implementation: P2/P3 ROOT-GO (2026-11-13)
+
+The current user authorized all agreed packages with one product writer, read-only
+planning and independent Root review. No per-package full-suite repetition, build,
+Git mutation or rule/runtime-data change has been made by the writer. Source and
+safety checkpoints are external to the materialized checkout (no `.git`).
+
+P2 adds frozen manufacturer/percentage reference lines, independent point findings
+and schema-2 / analysis-v3 / PDF-v3 models; genuine pre-P2 model/PDF archives stay
+byte-exact. Root's independent native selection passed **72 tests, 0 skips in
+5.67s**, followed by actual AnalyzerDesktopApp and independently generated PDF
+visual checks. Result: `docs/P2_QK_LIMITS_RESULT_2026-11-13.md`.
+
+P3 adds complete read-only usage chronology, precision intervals, proactive
+pairwise close offers and a prepared model/PDF preview. Final publication remains
+in the existing atomic QC owner, including direct first closure. Writer checks:
+
+| Focused check | Observed result |
+|---|---|
+| Profile/source/store tests including usage overlap, pending candidates, >500 observations, unknown revision identity and contiguous explicit clock precision | **111 passed in 3.23s** |
+| New real-preview/direct-close/empty-target integrity checks and 18 preparation/publication race cases | **21 passed in 8.27s** |
+| Application + profile/source/store + real PDF + architecture selection | **222 passed, 21 existing Tk environment skips in 39.89s** |
+| Additional explicit-profile/configuration binding checks | **2 passed in 1.02s** |
+
+No skips were added. Native P3 selection passed 246 tests without skips; the focused refresh rework
+passed a further 5 native tests without skips. Actual preview/cancel/direct-first-
+close/archive/exact-export flow was reviewed. See `docs/P3_LOT_CLOSE_RESULT_2026-11-13.md` for the final package
+status. These targeted checks do not claim an integrated full-suite result. The
+previously established Linux/P1 full baseline of 1267 passed / 6 failed is recorded
+separately; those qualification failures are not hidden or converted to skips.
+The integrated final run subsequently passed as recorded under A1 above.
+Windows target qualification remains outstanding.
+
 
 ### Post-push duplicate comparison correction (2026-11-13): GATE_PASSED
 

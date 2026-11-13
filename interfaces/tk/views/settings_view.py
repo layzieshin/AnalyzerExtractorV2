@@ -5,7 +5,7 @@ from collections.abc import Callable, Sequence
 from tkinter import ttk
 
 from interfaces.tk.widgets.common import Card, SectionHeader
-from src.application.api import DesktopSettings, DeviceInventoryItem, WatchTimingSettings
+from src.application.api import DesktopSettings, DeviceInventoryItem, QCConfigurationState, QCAssayConfigurationItem, WatchTimingSettings
 
 
 class SettingsView(ttk.Frame):
@@ -22,6 +22,8 @@ class SettingsView(ttk.Frame):
         on_manage_devices: Callable[[], None] | None = None,
         on_migrate_devices: Callable[[], None] | None = None,
         on_manage_profiles: Callable[[], None] | None = None,
+        on_new_qc_profile: Callable[[], None] | None = None,
+        on_refresh_qc: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master, style="Content.TFrame")
         self._on_save = on_save
@@ -33,6 +35,10 @@ class SettingsView(ttk.Frame):
         self._on_manage_devices = on_manage_devices or (lambda: None)
         self._on_migrate_devices = on_migrate_devices or (lambda: None)
         self._on_manage_profiles = on_manage_profiles or (lambda: None)
+        self._on_new_qc_profile = on_new_qc_profile or self._on_manage_profiles
+        self._on_refresh_qc = on_refresh_qc or (lambda: None)
+        self._qc_rows: dict[str, QCAssayConfigurationItem] = {}
+        self._qc_state: QCConfigurationState | None = None
         self._edit_generation = 0
         self._clean_generation = 0
         self._suppress_dirty = False
@@ -42,11 +48,18 @@ class SettingsView(ttk.Frame):
     def _build(self) -> None:
         card = Card(self)
         card.pack(fill="both", expand=True)
-        footer = ttk.Frame(card.body, style="CardInner.TFrame")
+        self._notebook = ttk.Notebook(card.body)
+        self._notebook.pack(fill="both", expand=True)
+        general = ttk.Frame(self._notebook, style="CardInner.TFrame", padding=6)
+        qc = ttk.Frame(self._notebook, style="CardInner.TFrame", padding=8)
+        self._notebook.add(general, text="Allgemein & Geräte")
+        self._notebook.add(qc, text="Assays & QK")
+        self._build_qc_tab(qc)
+        footer = ttk.Frame(general, style="CardInner.TFrame")
         footer.pack(side="bottom", fill="x", pady=(6, 0))
-        scroll = ttk.Scrollbar(card.body, orient="vertical")
+        scroll = ttk.Scrollbar(general, orient="vertical")
         scroll.pack(side="right", fill="y")
-        self._settings_canvas = tk.Canvas(card.body, highlightthickness=0, yscrollcommand=scroll.set)
+        self._settings_canvas = tk.Canvas(general, highlightthickness=0, yscrollcommand=scroll.set)
         self._settings_canvas.pack(fill="both", expand=True)
         scroll.configure(command=self._settings_canvas.yview)
         body = ttk.Frame(self._settings_canvas, style="CardInner.TFrame")
@@ -96,7 +109,6 @@ class SettingsView(ttk.Frame):
         management.pack(fill="x", pady=(4, 6))
         ttk.Button(management, text="Geräte verwalten", command=self._on_manage_devices).pack(side="left")
         ttk.Button(management, text="Geräte übernehmen", command=self._on_migrate_devices).pack(side="left", padx=6)
-        ttk.Button(management, text="Prüfprofile verwalten", command=self._on_manage_profiles).pack(side="left")
 
         row_initials = ttk.Frame(body, style="CardInner.TFrame")
         row_initials.pack(fill="x", pady=(8, 4))
@@ -126,6 +138,64 @@ class SettingsView(ttk.Frame):
         self._lbl_status.pack(anchor="w", pady=(4, 8))
         self._btn_save = ttk.Button(footer, text="Speichern", style="Primary.TButton", command=self._on_save)
         self._btn_save.pack(anchor="w")
+
+    def _build_qc_tab(self, parent: ttk.Frame) -> None:
+        SectionHeader(parent, "Assays & QK", subtitle="Aktive Assays und ihre Geräte-/Profilbindungen. Jede Profilfassung bleibt nachvollziehbar.").pack(fill="x", pady=(0, 10))
+        actions = ttk.Frame(parent)
+        actions.pack(side="bottom", fill="x", pady=(8, 0))
+        self._qc_edit = ttk.Button(actions, text="Einrichten / Bearbeiten", command=self._on_manage_profiles, state="disabled")
+        self._qc_edit.pack(side="left")
+        self._qc_new = ttk.Button(actions, text="Weiteres Profil", command=self._on_new_qc_profile, state="disabled")
+        self._qc_new.pack(side="left", padx=8)
+        ttk.Button(actions, text="Neu laden", command=self._on_refresh_qc).pack(side="right")
+        self._qc_detail = ttk.Label(parent, text="Assay auswählen, um QK-Level einzurichten.", wraplength=780)
+        self._qc_detail.pack(side="bottom", anchor="w", pady=6)
+        columns = ("assay", "device", "profile", "levels", "status")
+        self._qc_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse", height=10)
+        for key, label, width in zip(columns, ("Assay / Kennung", "Gerät / Kennung", "Profil / Kennung", "Level", "QK-Konfiguration"), (220, 200, 220, 55, 190)):
+            self._qc_tree.heading(key, text=label)
+            self._qc_tree.column(key, width=width, minwidth=50)
+        scroll_y = ttk.Scrollbar(parent, orient="vertical", command=self._qc_tree.yview)
+        scroll_y.pack(side="right", fill="y")
+        scroll_x = ttk.Scrollbar(parent, orient="horizontal", command=self._qc_tree.xview)
+        scroll_x.pack(side="bottom", fill="x")
+        self._qc_tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        self._qc_tree.pack(fill="both", expand=True)
+        self._qc_tree.bind("<<TreeviewSelect>>", self._select_qc_row)
+        self._qc_tree.bind("<Double-1>", lambda _event: self._on_manage_profiles() if self.selected_qc_configuration() else None)
+
+    def selected_qc_configuration(self) -> QCAssayConfigurationItem | None:
+        selection = self._qc_tree.selection()
+        return self._qc_rows.get(selection[0]) if selection else None
+
+    def _select_qc_row(self, _event=None) -> None:
+        row = self.selected_qc_configuration()
+        self._qc_edit.configure(state="normal" if row else "disabled")
+        if row:
+            self._qc_detail.configure(text="; ".join(row.issues) if row.issues else
+                f"{row.assay_name} [{row.assay_key}] · {row.status}" + (f" · Fassung {row.profile_version_id}" if row.profile_id else " · Gerät und Level jetzt einrichten."))
+
+    def render_qc_configuration(self, state: QCConfigurationState) -> None:
+        previous = self.selected_qc_configuration()
+        identity = (previous.assay_key, previous.device_id, previous.profile_id) if previous else None
+        self._qc_state = state
+        self._qc_rows.clear()
+        self._qc_tree.delete(*self._qc_tree.get_children())
+        self._qc_new.configure(state="normal" if state.assays and not state.catalog_error else "disabled")
+        selected = ""
+        for index, row in enumerate(state.assay_rows):
+            identifier = str(index)
+            self._qc_rows[identifier] = row
+            self._qc_tree.insert("", "end", iid=identifier, values=(f"{row.assay_name} [{row.assay_key}]",
+                f"{row.device_name} [{row.device_id}]" if row.device_id else "Noch keinem Gerät zugeordnet",
+                f"{row.profile_name} [{row.profile_id}]" if row.profile_id else "Noch kein Profil", row.level_count, row.status))
+            if identity == (row.assay_key, row.device_id, row.profile_id):
+                selected = identifier
+        if self._qc_rows:
+            self._qc_tree.selection_set(selected or next(iter(self._qc_rows)))
+        else:
+            self._qc_detail.configure(text=state.catalog_error or "Keine aktiven Assays vorhanden. Regeln in der bestehenden Regelverwaltung einrichten.")
+        self._select_qc_row()
 
     @property
     def edit_generation(self) -> int:

@@ -8,9 +8,12 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-CURRENT_ANALYSIS_ID = "arev2-qc-analysis-v2"
-SUPPORTED_ANALYSIS_IDS = frozenset({"arev2-qc-analysis-v1", CURRENT_ANALYSIS_ID})
-SUPPORTED_RENDERER_IDS = frozenset({"arev2-qc-pdf-v1", "arev2-qc-pdf-v2"})
+CURRENT_ANALYSIS_ID = "arev2-qc-analysis-v4"
+SUPPORTED_MODEL_VERSIONS = frozenset({
+    (1, algorithm, renderer)
+    for algorithm in ("arev2-qc-analysis-v1", "arev2-qc-analysis-v2")
+    for renderer in ("arev2-qc-pdf-v1", "arev2-qc-pdf-v2")
+} | {(2, "arev2-qc-analysis-v3", "arev2-qc-pdf-v3"), (3, CURRENT_ANALYSIS_ID, "arev2-qc-pdf-v4")})
 
 
 def sd_parameter_definition(profile: object, control_id: str) -> dict[str, str] | None:
@@ -86,9 +89,32 @@ class QCAnalysis:
     @property
     def is_supported(self) -> bool:
         model = self.to_dict()
-        algorithm, renderer = model.get("algorithm_id"), model.get("renderer_id")
-        return (model.get("analysis_model_version") == 1 and isinstance(algorithm, str) and algorithm in SUPPORTED_ANALYSIS_IDS
-                and isinstance(renderer, str) and renderer in SUPPORTED_RENDERER_IDS)
+        version, algorithm, renderer = (model.get(key) for key in ("analysis_model_version", "algorithm_id", "renderer_id"))
+        return (type(version) is int and isinstance(algorithm, str) and isinstance(renderer, str)
+                and (version, algorithm, renderer) in SUPPORTED_MODEL_VERSIONS)
+
+
+@dataclass(frozen=True)
+class QCUsageSnapshot:
+    """Canonical read-only usage evidence, independent of statistical eligibility."""
+
+    snapshot_json: str
+    snapshot_sha256: str
+
+    def __post_init__(self):
+        try:
+            value = json.loads(self.snapshot_json)
+        except (TypeError, ValueError) as exc:
+            raise QCConfigurationError("Der Nutzungsnachweis ist unlesbar.") from exc
+        if not isinstance(value, dict) or canonical_json(value) != self.snapshot_json or content_hash(value) != self.snapshot_sha256:
+            raise QCConfigurationError("Der Nutzungsnachweis oder seine Prüfsumme ist ungültig.")
+
+    @classmethod
+    def freeze(cls, value):
+        return cls(canonical_json(value), content_hash(value))
+
+    def to_dict(self):
+        return json.loads(self.snapshot_json)
 
 
 @dataclass(frozen=True)

@@ -36,6 +36,7 @@ class UiBuilderMixin:
             self.page_inventory.grid_remove()
             self.page_workspace.grid()
             self._active_page = "workspace"
+            self.after_idle(self._place_workspace_sashes)
             return
         self.page_workspace.grid_remove()
         self.page_inventory.grid()
@@ -81,8 +82,10 @@ class UiBuilderMixin:
         panes = getattr(self, "workspace_panes", None)
         if panes is None or not panes.winfo_exists():
             return
+        if self.__dict__.get("_workspace_sashes_initialized", False):
+            return
         width = panes.winfo_width()
-        if width < 900:
+        if not panes.winfo_ismapped() or width < 900:
             return
         left = max(220, int(width * 0.22))
         middle_end = max(left + 360, int(width * 0.64))
@@ -91,6 +94,7 @@ class UiBuilderMixin:
         try:
             panes.sashpos(0, left)
             panes.sashpos(1, middle_end)
+            self._workspace_sashes_initialized = True
         except tk.TclError:
             return
 

@@ -476,46 +476,69 @@ def reopen_lot(store_spec: Mapping[str, Any], lot_key: str, *, expected_version_
 def close_lot(store_spec: Mapping[str, Any], lot_key: str, *, expected_version_id: int,
               expected_source_token: str, witness_kit_lot: str, expected_witness_source_token: str,
               analysis_model: Mapping[str, Any], pdf_bytes: bytes, pdf_sha256: str,
-              algorithm_id: str, renderer_id: str, context: MutationContext) -> dict[str, Any]:
-    """Publish supplied frozen analysis/PDF evidence and close in one transaction.
+              algorithm_id: str, renderer_id: str, context: MutationContext,
+              expected_chronology_token: str | None = None, profile_version_id: int | None = None) -> dict[str, Any]:
+    """Atomically publish prepared evidence after rechecking complete usage.
 
-    Statistics and validated PDF rendering belong to P5 and run before this API.
-    No rendering or statistics run under the SQLite write lock.
+    Existing callers may omit a chronology token; their current context is then
+    captured before the lock and checked again under it. UI previews always pass
+    their inspected token. No analysis or PDF rendering runs under the lock.
     """
-    previous = get_lot(store_spec, lot_key)
-    captured = _capture(store_spec, previous["snapshot"]["profile_version_id"], previous["kit_lot"])
-    witness = _capture(store_spec, previous["snapshot"]["profile_version_id"], witness_kit_lot)
+    from .model import QCAnalysis
+    from .sources import get_lot_chronology
+
     if not isinstance(pdf_bytes, bytes) or not pdf_bytes.startswith(b"%PDF-") or b"%%EOF" not in pdf_bytes[-1024:]:
         raise QCConfigurationError("Ein vollständiger gelieferter PDF-Nachweis ist erforderlich.")
     if hashlib.sha256(pdf_bytes).hexdigest() != pdf_sha256:
         raise QCConflictError("Die PDF-Prüfsumme stimmt nicht überein.")
     model = json.loads(canonical_json(analysis_model))
-    if not algorithm_id.strip() or not renderer_id.strip() or model.get("algorithm_id") != algorithm_id or model.get("renderer_id") != renderer_id:
+    analysis = QCAnalysis.freeze(model)
+    if not analysis.is_supported or model.get("algorithm_id") != algorithm_id or model.get("renderer_id") != renderer_id:
         raise QCConfigurationError("Analyse- und PDF-Verfahrenskennungen fehlen oder widersprechen sich.")
+    supplied_source = model.get("source_manifest", {})
+    selected_profile = profile_version_id or supplied_source.get("profile_version_id")
     intent = intent_hash("close_lot", {"lot": lot_key, "expected": expected_version_id, "source": expected_source_token,
-                                      "witness": expected_witness_source_token, "model": model, "pdf": pdf_sha256}, context)
+        "witness": expected_witness_source_token, "witness_lot": witness_kit_lot, "chronology": expected_chronology_token,
+        "profile": selected_profile, "model": model, "pdf": pdf_sha256}, context)
+    baseline_usage = expected_chronology_token
+    if baseline_usage is None:
+        baseline_usage = get_lot_chronology(store_spec, profile_version_id=selected_profile).snapshot_sha256
     with write_connection(store_spec) as conn:
         repeated = repeated_request(conn, "qc_lot_versions", context, intent)
         if repeated:
             return repeated
-        if model.get("source_manifest") != captured or model.get("sd_references") != previous["snapshot"]["sd_references"]:
-            raise QCConflictError("Der Analyse-Nachweis gehört zu einem anderen Quellen- oder SD-Stand.")
-        if witness_kit_lot == previous["kit_lot"] or not witness["included"] or not captured["included"]:
-            raise QCConfigurationError("Zum Abschluss ist eine andere, neuere validierte Kit-Charge erforderlich.")
-        latest = max(point["measured_at"] for point in captured["included"])
-        witness_points = [point for point in witness["included"] if point["measured_at"] > latest]
-        if not witness_points or witness["start_date"] <= captured["start_date"]:
-            raise QCConfigurationError("Die Folgecharge braucht ein neueres Messdatum als Abschlussnachweis.")
-        if previous["state"] != "open":
+        previous = version_record(conn.execute("SELECT * FROM qc_lot_versions WHERE lot_key=? ORDER BY version_id DESC LIMIT 1", (lot_key,)).fetchone())
+        if (previous["version_id"] if previous else 0) != expected_version_id:
+            raise QCConflictError("Die Charge wurde geändert. Bitte neu laden.")
+        if previous and previous["state"] != "open":
             raise QCConflictError("Die Charge ist bereits abgeschlossen; späte Werte brauchen eine Wiederöffnung.")
+        if previous and previous["snapshot"]["profile_version_id"] != selected_profile:
+            raise QCConflictError("Das ausgewählte Prüfprofil ist noch nicht an die Charge gebunden. Bitte zuerst die Konfiguration speichern.")
+        kit_lot = previous["kit_lot"] if previous else supplied_source.get("kit_lot")
+        captured = _capture(store_spec, selected_profile, kit_lot)
+        if lot_identity(captured["device_id"], captured["assay_key"], captured["kit_lot"]) != lot_key:
+            raise QCConflictError("Die Profil-/Chargenidentität stimmt nicht überein.")
+        references = previous["snapshot"]["sd_references"] if previous else {}
+        if supplied_source != captured or model.get("sd_references") != references:
+            raise QCConflictError("Der Analyse-Nachweis gehört zu einem anderen Quellen- oder SD-Stand.")
         _require_sources(store_spec, captured, expected_source_token)
-        _require_sources(store_spec, witness, expected_witness_source_token)
-        snapshot = _lot_snapshot(captured, previous["snapshot"]["sd_references"], "closed")
-        snapshot.update(successor_witness={"kit_lot": witness_kit_lot, "source_manifest": witness, "measurements": witness_points},
-                        evidence={"pdf_sha256": pdf_sha256, "model_sha256": content_hash(model), "algorithm_id": algorithm_id, "renderer_id": renderer_id})
+        usage = get_lot_chronology(store_spec, profile_version_id=selected_profile)
+        if not baseline_usage or usage.snapshot_sha256 != baseline_usage:
+            raise QCConflictError("Der vollständige Nutzungs- oder Konfigurationsstand wurde geändert. Bitte den Abschluss neu prüfen.")
+        own = next((row for row in usage.to_dict()["lots"] if row["kit_lot"] == kit_lot), None)
+        witnesses = [row for row in own["witnesses"] if row["kit_lot"] == witness_kit_lot] if own else []
+        if not witnesses:
+            raise QCConfigurationError("Eine sicher spätere Nutzung einer anderen Kit-Charge ist nicht belegt.")
+        witness = _capture(store_spec, selected_profile, witness_kit_lot)
+        if witness["source_token"] != expected_witness_source_token:
+            raise QCConflictError("Die Quellen der belegenden Charge wurden geändert. Bitte neu prüfen.")
+        snapshot = _lot_snapshot(captured, references, "closed")
+        snapshot.update(successor_witness={"witness_version": "qc-usage-witness-v1", "kit_lot": witness_kit_lot,
+            "chronology": usage.to_dict(), "chronology_sha256": usage.snapshot_sha256, "measurements": witnesses},
+            evidence={"pdf_sha256": pdf_sha256, "model_sha256": analysis.model_sha256, "algorithm_id": algorithm_id, "renderer_id": renderer_id})
         closed = _append_lot(conn, snapshot, expected_version_id, context, intent)
         conn.execute("""INSERT INTO qc_report_evidence
             (lot_version_id, model_json, model_sha256, pdf_bytes, pdf_sha256, algorithm_id, renderer_id, created_at_utc, request_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (closed["version_id"], canonical_json(model), content_hash(model),
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (closed["version_id"], analysis.model_json, analysis.model_sha256,
                 pdf_bytes, pdf_sha256, algorithm_id, renderer_id, utc_now(), context.request_id))
         return closed

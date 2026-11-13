@@ -40,6 +40,21 @@ def _setup_project(tmp_path: Path) -> Path:
     return root
 
 
+
+def real_proof(rules, draft, key, directory, *, value="UPDATED"):
+    import fitz
+    def pdf(name, lot):
+        path = directory / name
+        data = rules.load_draft(draft)
+        with fitz.open() as document:
+            page = document.new_page()
+            page.insert_text((60, 60), f"{data['assay_name']}\n{key}\nLot: {lot}\nTest: {value}")
+            document.save(path)
+        return str(path)
+    example, reference = pdf("failing.pdf", "NEW"), pdf("reference.pdf", "REF")
+    mode = rules.diff_draft_vs_active(key, draft)["mode"]
+    return rules.create_authoring_proof(key, draft, example, reference if mode == "update" else None)
+
 def test_controller_open_history_as_draft_routes_and_keeps_bytes(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
     rules = create_desktop_services(root).rules
@@ -177,7 +192,7 @@ def test_controller_activate_draft_snapshots_previous_bytes(
     before = active.read_bytes()
     draft = rules.create_draft("(1111)")
     rules.set_field_regex(draft, "test", r"Test:\s*(UPDATED)")
-    monkeypatch.setattr(rules, "verify_authoring_proof", lambda _key, _draft: {"ok": True})
+    real_proof(rules, draft, "(1111)", root)
 
     target = rules.activate_draft("(1111)", draft)
 
@@ -194,11 +209,11 @@ def test_controller_activate_new_draft_does_not_snapshot(
     root = _setup_project(tmp_path)
     rules = create_desktop_services(root).rules
     draft = rules.create_blank_draft("(9000)", "Fresh Assay")
-    rules.set_lot_rule(draft, r"Lot:\\s*(\\w+)")
-    rules.add_field(draft, "test", r"Test:\\s*(\\w+)", required=True)
+    rules.set_lot_rule(draft, r"Lot:\s*(\w+)")
+    rules.add_field(draft, "test", r"Test:\s*(\w+)", required=True)
     rules.set_dedupe_fields(draft, ["test"])
     rules.set_excel_rules(draft, "{assay_name}.xlsx", "{lot_id}", {"test": "TEST"})
-    monkeypatch.setattr(rules, "verify_authoring_proof", lambda _key, _draft: {"ok": True})
+    real_proof(rules, draft, "(9000)", root)
 
     out_path = rules.activate_new_draft("(9000)", "Fresh Assay", draft)
 
@@ -222,7 +237,7 @@ def test_controller_activate_draft_is_fail_closed_when_snapshot_fails(
         raise RuleSuiteError("snapshot_publish_failed")
 
     monkeypatch.setattr("src.rulesuite.rulesuite.snapshot_existing_active_ruleset", _fail)
-    monkeypatch.setattr(rules, "verify_authoring_proof", lambda _key, _draft: {"ok": True})
+    real_proof(rules, draft, "(1111)", root)
 
     with pytest.raises(RuleSuiteError, match="snapshot_publish_failed"):
         rules.activate_draft("(1111)", draft)
@@ -376,3 +391,173 @@ def test_controller_crud_routes_only_through_rulesuite_api(tmp_path: Path) -> No
     assert not fresh_path.exists()
     assert not readiness.exists()
     assert active.read_bytes() == active_before
+
+
+def active_state(root):
+    return {str(path.relative_to(root)): path.read_bytes() for path in (root / "rules").rglob("*.json") if "drafts" not in path.parts}
+
+
+@pytest.mark.parametrize("stage", ["controller_verify", "locked_verify"])
+@pytest.mark.parametrize("changed", ["draft", "index", "active"])
+def test_r1_activation_rechecks_exact_verified_snapshot_under_owner_locks(tmp_path, monkeypatch, stage, changed):
+    import src.rulesuite.authoring_readiness as owner
+    root = _setup_project(tmp_path)
+    rules = create_desktop_services(root).rules
+    draft = rules.create_draft("(1111)")
+    rules.set_field_regex(draft, "test", r"Test:\s*(UPDATED)")
+    real_proof(rules, draft, "(1111)", root)
+    path = {"draft": Path(draft), "index": root / "rules/index.json", "active": root / "rules/AssayA.json"}[changed]
+    modified = []
+    if stage == "controller_verify":
+        verify = rules.verify_authoring_proof
+        def racing_verify(key, target):
+            report = verify(key, target)
+            assert report["ok"]
+            path.write_bytes(path.read_bytes()+b"\n")
+            modified.append(active_state(root))
+            return report
+        monkeypatch.setattr(rules, "verify_authoring_proof", racing_verify)
+    else:
+        verify = owner.verify_authoring_proof
+        def racing_verify(*args):
+            report = verify(*args)
+            assert report["ok"]
+            path.write_bytes(path.read_bytes()+b"\n")
+            modified.append(active_state(root))
+            return report
+        monkeypatch.setattr(owner, "verify_authoring_proof", racing_verify)
+    with pytest.raises(AuthoringReadinessError, match="changed"):
+        rules.activate_draft("(1111)", draft)
+    assert modified and active_state(root) == modified[-1]
+    assert not list((root / "rules/history").glob("*.json"))
+
+
+def test_r1_create_name_override_and_current_mode_drift_are_not_published(tmp_path):
+    root = _setup_project(tmp_path)
+    rules = create_desktop_services(root).rules
+    draft = rules.create_blank_draft("FRESH", "Fresh Assay")
+    rules.set_lot_rule(draft, r"Lot:\s*(\w+)")
+    rules.add_field(draft, "test", r"Test:\s*(\w+)")
+    rules.set_dedupe_fields(draft, ["test"])
+    real_proof(rules, draft, "FRESH", root)
+    before = active_state(root)
+    with pytest.raises(AuthoringReadinessError, match="name_mismatch"):
+        rules.activate_new_draft("FRESH", "Untested name", draft)
+    assert active_state(root) == before
+    target = root / "rules/Other.json"
+    target.write_bytes(Path(draft).read_bytes())
+    index = json.loads((root / "rules/index.json").read_text())
+    index["assays"].append({"assay_key": "FRESH", "ruleset_file": target.name})
+    (root / "rules/index.json").write_text(json.dumps(index))
+    before = active_state(root)
+    assert "authoring_proof_mode_changed" in rules.verify_authoring_proof("FRESH", draft)["errors"]
+    with pytest.raises(AuthoringReadinessError):
+        rules.activate_new_draft("FRESH", "Fresh Assay", draft)
+    assert active_state(root) == before
+
+
+@pytest.mark.parametrize("binding", ["absolute", "alias"])
+def test_r1_private_active_reference_never_reads_transient_live_absolute_or_alias_binding(tmp_path, monkeypatch, binding):
+    from src.rulesuite.rulesuite import RuleSuite
+    root = _setup_project(tmp_path)
+    rules = create_desktop_services(root).rules
+    active = root / "rules/AssayA.json"
+    original = active.read_bytes()
+    source = json.loads(original)
+    source["extract_rules"]["fields"][0]["regex"] = r"Test:\s*(BASE)"
+    active.write_text(json.dumps(source))
+    original = active.read_bytes()
+    if binding == "alias":
+        alias = root / "rules/Alias.json"
+        try:
+            alias.symlink_to(active.name)
+        except OSError as exc:
+            pytest.fail(f"Synthetic in-root alias could not be created: {exc}")
+        file_name = alias.name
+    else:
+        file_name = str(active.resolve())
+    (root / "rules/index.json").write_text(json.dumps({"assays": [{"assay_key": "(1111)", "ruleset_file": file_name}]}))
+    draft = rules.create_draft("(1111)")
+    rules.set_field_regex(draft, "test", r"Test:\s*(CHANGED)")
+    import fitz
+    for name, text in (("problem.pdf", "Test: CHANGED"), ("reference.pdf", "Test: BASE\nTest: CHANGED")):
+        with fitz.open() as document:
+            page = document.new_page()
+            page.insert_text((60, 60), "Assay A\n(1111)\nLot: LOT\n" + text)
+            document.save(root / name)
+    preview, observed = RuleSuite.preview_extract, []
+    def transient(self, project_root, pdf_path, key, draft_path=None):
+        if Path(pdf_path).name == "reference.pdf" and draft_path is None:
+            altered = json.loads(original)
+            altered["extract_rules"]["fields"][0]["regex"] = r"Test:\s*(CHANGED)"
+            active.write_text(json.dumps(altered))
+            try:
+                result = preview(self, project_root, pdf_path, key, draft_path=draft_path)
+                observed.append(result["data"]["test"])
+                return result
+            finally:
+                active.write_bytes(original)
+        return preview(self, project_root, pdf_path, key, draft_path=draft_path)
+    monkeypatch.setattr(RuleSuite, "preview_extract", transient)
+    with pytest.raises(AuthoringReadinessError, match="reference_mismatch: test"):
+        rules.create_authoring_proof("(1111)", draft, str(root / "problem.pdf"), str(root / "reference.pdf"))
+    assert observed == ["BASE"] and active.read_bytes() == original
+    assert not rules.verify_authoring_proof("(1111)", draft)["ok"]
+
+
+@pytest.mark.parametrize("changed", ["draft", "failing_pdf", "reference_pdf", "active_ruleset", "index"])
+def test_r1_changes_during_real_proof_never_publish_ready(tmp_path, monkeypatch, changed):
+    from src.rulesuite.rulesuite import RuleSuite
+    root = _setup_project(tmp_path)
+    rules = create_desktop_services(root).rules
+    draft = rules.create_draft("(1111)")
+    proof = real_proof(rules, draft, "(1111)", root)
+    path = Path(proof[changed + "_path"])
+    preview, once = RuleSuite.preview_extract, []
+    def racing(self, *args, **kwargs):
+        result = preview(self, *args, **kwargs)
+        if not once:
+            once.append(True)
+            path.write_bytes(path.read_bytes()+b"\n")
+        return result
+    monkeypatch.setattr(RuleSuite, "preview_extract", racing)
+    with pytest.raises(AuthoringReadinessError, match="changed_during_check"):
+        rules.create_authoring_proof("(1111)", draft, proof["failing_pdf_path"], proof["reference_pdf_path"])
+    assert not rules.verify_authoring_proof("(1111)", draft)["ok"]
+    assert not list((root / "rules/history").glob("*.json"))
+
+
+def test_r1_superseded_slow_attempt_cannot_overwrite_newer_failed_attempt(tmp_path, monkeypatch):
+    import threading
+    from src.rulesuite.rulesuite import RuleSuite
+    root = _setup_project(tmp_path)
+    rules = create_desktop_services(root).rules
+    draft = rules.create_draft("(1111)")
+    proof = real_proof(rules, draft, "(1111)", root)
+    entered, release = threading.Event(), threading.Event()
+    errors = []
+    original = RuleSuite.preview_extract
+    def delayed(self, *args, **kwargs):
+        if threading.current_thread().name == "older-proof" and not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(RuleSuite, "preview_extract", delayed)
+    def older():
+        try:
+            rules.create_authoring_proof("(1111)", draft, proof["failing_pdf_path"], proof["reference_pdf_path"])
+        except Exception as exc:
+            errors.append(str(exc))
+    thread = threading.Thread(target=older, name="older-proof", daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        with pytest.raises(AuthoringReadinessError, match="missing"):
+            rules.create_authoring_proof("(1111)", draft, str(root / "missing.pdf"), proof["reference_pdf_path"])
+        failed = Path(draft + ".readiness").read_bytes()
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive() and errors and "superseded" in errors[0]
+    assert Path(draft + ".readiness").read_bytes() == failed
+    assert not rules.verify_authoring_proof("(1111)", draft)["ok"]

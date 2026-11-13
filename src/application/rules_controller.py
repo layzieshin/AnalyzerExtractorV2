@@ -279,11 +279,11 @@ class RuleSuiteController:
 
     def activate_draft(self, assay_key: str, draft_path: str) -> str:
         self._require_authoring_proof(assay_key, draft_path)
-        return activate_draft(str(self._project_root), assay_key, draft_path)
+        return activate_draft(str(self._project_root), assay_key, draft_path, require_authoring_proof=True)
 
     def activate_new_draft(self, assay_key: str, assay_name: str, draft_path: str) -> str:
         self._require_authoring_proof(assay_key, draft_path)
-        return activate_new_draft(str(self._project_root), assay_key, assay_name, draft_path)
+        return activate_new_draft(str(self._project_root), assay_key, assay_name, draft_path, require_authoring_proof=True)
 
     def create_authoring_proof(
         self,

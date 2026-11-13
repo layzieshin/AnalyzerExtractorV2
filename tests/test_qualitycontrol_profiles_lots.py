@@ -291,7 +291,7 @@ def open_current(spec, profile, **kwargs):
 def evidence_arguments(spec, profile, lot):
     manifest, witness = sources(spec, profile), sources(spec, profile, "L2")
     pdf = b"%PDF-1.4\nsynthetic supplied renderer evidence\n%%EOF"
-    model = {"source_manifest": manifest, "sd_references": lot["snapshot"]["sd_references"], "algorithm_id": "synthetic-algorithm-v1", "renderer_id": "synthetic-renderer-v1"}
+    model = analyze_lot(manifest, lot["snapshot"]["sd_references"]).to_dict()
     return {"expected_version_id": lot["version_id"], "expected_source_token": manifest["source_token"], "witness_kit_lot": "L2",
             "expected_witness_source_token": witness["source_token"], "analysis_model": model, "pdf_bytes": pdf,
             "pdf_sha256": hashlib.sha256(pdf).hexdigest(), "algorithm_id": model["algorithm_id"], "renderer_id": model["renderer_id"], "context": context("close")}
@@ -313,6 +313,69 @@ def test_complete_profile_history_stable_controls_and_no_control_count_limit(tmp
     assert history[0]["snapshot"]["controls"][0]["fields"] == {"IST": "I1", "SOLL": "S1", "MIN": "N1", "MAX": "X1"}
     with pytest.raises(QCConflictError):
         save_profile(spec, value, expected_version_id=first["version_id"], expected_inventory_version_id=1, context=context("stale"))
+
+
+@pytest.mark.parametrize("raw,expected", [("12,5", "12.5"), ("12.5", "12.5"), ("0", "0"), ("250", "250"), (".5", "0.5")])
+def test_single_value_percent_is_additive_independent_of_measurement_grammar(tmp_path, raw, expected):
+    spec, old = fixture(tmp_path, count=0)
+    value = copy.deepcopy(old["snapshot"])
+    value.update(single_value_limits_enabled=True, single_value_limit_percent=raw, numeric_grammar="decimal_comma")
+    revised = save_profile(spec, value, expected_version_id=old["version_id"], expected_inventory_version_id=1,
+                           context=context("single-value"), available_field_keys=["I1", "S1", "N1", "X1"])
+    assert revised["snapshot"]["single_value_limit_percent"] == expected
+    assert revised["snapshot"]["single_value_limits_enabled"] is True
+    assert revised["snapshot"]["relative_limit_percent"] == "12.5"
+    assert revised["snapshot"]["rili_applicable"] and revised["snapshot"]["relative_enabled"]
+    assert get_profile(spec, old["version_id"]) == old
+
+
+@pytest.mark.parametrize("raw", [None, "", "-1", "NaN", "Infinity", "inf", "1.000,5", "1,000.5", "1,2,3", "1e2", True])
+def test_invalid_enabled_single_value_percent_does_not_write_revision(tmp_path, raw):
+    spec, old = fixture(tmp_path, count=0)
+    value = {**copy.deepcopy(old["snapshot"]), "single_value_limits_enabled": True, "single_value_limit_percent": raw}
+    before = Path(spec["path"]).read_bytes()
+    with pytest.raises(QCConfigurationError, match="Einzelwert"):
+        save_profile(spec, value, expected_version_id=old["version_id"], expected_inventory_version_id=1, context=context("invalid-p"))
+    assert Path(spec["path"]).read_bytes() == before
+
+
+def test_current_field_membership_blocks_foreign_and_removed_keys_but_keeps_history(tmp_path):
+    spec, old = fixture(tmp_path, count=0)
+    value = copy.deepcopy(old["snapshot"])
+    value["controls"][0]["fields"]["IST"] = "FOREIGN_IST"
+    with pytest.raises(QCConfigurationError, match="FOREIGN_IST"):
+        save_profile(spec, value, expected_version_id=old["version_id"], expected_inventory_version_id=1,
+                     context=context("foreign-field"), available_field_keys=["I1", "S1", "N1", "X1"])
+    with pytest.raises(QCConfigurationError, match="X1"):
+        save_profile(spec, old["snapshot"], expected_version_id=old["version_id"], expected_inventory_version_id=1,
+                     context=context("removed-field"), available_field_keys=["I1", "S1", "N1"])
+    value["controls"][0]["fields"]["IST"] = "S1"
+    with pytest.raises(QCConfigurationError, match="unterschiedliche"):
+        save_profile(spec, value, expected_version_id=old["version_id"], expected_inventory_version_id=1,
+                     context=context("duplicate-field"), available_field_keys=["I1", "S1", "N1", "X1"])
+    assert list_profiles(spec, include_history=True) == [old]
+    assert get_profile(spec, old["version_id"]) == old
+
+
+def test_legacy_profile_read_stays_exact_and_empty_legacy_qmma_limit_remains_saveable(tmp_path):
+    spec, old = fixture(tmp_path, count=0)
+    legacy = copy.deepcopy(old["snapshot"])
+    legacy.pop("single_value_limits_enabled")
+    legacy.pop("single_value_limit_percent")
+    legacy["relative_limit_percent"] = None
+    with sqlite3.connect(spec["path"]) as conn:
+        conn.execute("UPDATE qc_profile_versions SET snapshot_json=? WHERE version_id=?", (json.dumps(legacy), old["version_id"]))
+    before = Path(spec["path"]).read_bytes()
+    assert get_profile(spec, old["version_id"])["snapshot"] == legacy
+    assert Path(spec["path"]).read_bytes() == before
+    revised = save_profile(spec, {**legacy, "name": "Neue Bezeichnung", "single_value_limit_percent": "NaN"},
+        expected_version_id=old["version_id"], expected_inventory_version_id=1, context=context("legacy-edit"),
+        available_field_keys=["I1", "S1", "N1", "X1"])
+    assert revised["snapshot"]["single_value_limits_enabled"] is False
+    assert revised["snapshot"]["single_value_limit_percent"] is None
+    assert revised["snapshot"]["relative_limit_percent"] is None
+    assert revised["snapshot"]["relative_enabled"] and revised["snapshot"]["rili_applicable"]
+    assert get_profile(spec, old["version_id"])["snapshot"] == legacy
 
 
 @pytest.mark.parametrize("raw", ["", "NaN", "Infinity", "<3", ">42", "1,2", "1.234,5", "42 U"])
@@ -481,3 +544,194 @@ def test_no_write_source_and_lot_browsing(tmp_path: Path):
     list_lots(spec, include_history=True)
     get_inventory(spec, include_history=True)
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("minimum,maximum,reasons", [
+    ("31", "49", {"manufacturer_min_conflict", "manufacturer_max_conflict"}),
+    ("30.0", "50.00", set()),
+    ("51", "50", {"manufacturer_limits_reversed"}),
+])
+def test_p2_source_manifest_checks_decimal_manufacturer_limits_without_losing_raw_evidence(tmp_path, minimum, maximum, reasons):
+    spec, profile = fixture(tmp_path, count=0)
+    add_run(spec, 1, data=payload("2026-01-01"))
+    add_run(spec, 2, data=payload("2026-01-02", N1=minimum, X1=maximum))
+    source = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="L1")
+    assert source["manifest_version"] == "qc-sources-v2"
+    assert source["population_count"] == 2
+    assert {point["run_id"]: point["raw"]["MIN"] for point in source["included"] + source["excluded"]} == {1: "30", 2: minimum}
+    actual = {reason for point in source["excluded"] for reason in point["reasons"]}
+    assert actual == reasons
+    if "manufacturer_min_conflict" in reasons:
+        assert source["excluded_count"] == 2 and not source["included"]
+    elif "manufacturer_limits_reversed" in reasons:
+        assert source["included_count"] == source["excluded_count"] == 1
+    else:
+        assert source["included_count"] == 2 and not source["excluded"]
+
+
+def test_p2_conflict_is_local_to_its_level_and_keeps_existing_exclusion_reasons(tmp_path):
+    spec, old = fixture(tmp_path, count=0)
+    value = copy.deepcopy(old["snapshot"])
+    second = copy.deepcopy(value["controls"][0])
+    second.update(control_id="c2", name="Zweites Level", fields={"IST": "I2", "SOLL": "S2", "MIN": "N2", "MAX": "X2"})
+    value["controls"].append(second)
+    profile = save_profile(spec, value, expected_version_id=old["version_id"], expected_inventory_version_id=1, context=context("p2-second-level"))
+    for index, minimum in ((1, "30"), (2, "31"), (3, "32")):
+        add_run(spec, index, validated=index != 3, data=payload(f"2026-01-{index:02d}", N1=minimum, I2="200", S2="200", N2="160", X2="240"))
+    source = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="L1")
+    assert {point["control_id"] for point in source["included"]} == {"c2"}
+    assert source["included_count"] == 2
+    assert all("validation_missing" in point["reasons"] for point in source["excluded"] if point["run_id"] == 3)
+    result = analyze_lot(source, {}).to_dict()
+    assert [row["included_count"] for row in result["computed_series"]] == [0, 2]
+    assert result["computed_series"][1]["qmma"]["value"] == "0"
+
+
+def usage_snapshot(spec, profile):
+    from src.qualitycontrol.api import get_lot_chronology
+    return get_lot_chronology(spec, profile_version_id=profile["version_id"])
+
+
+def usage_lots(spec, profile):
+    return {row["kit_lot"]: row for row in usage_snapshot(spec, profile).to_dict()["lots"]}
+
+
+def test_usage_overlap_later_unvalidated_bad_qc_and_unknown_third_lot_are_independent(tmp_path):
+    spec, profile = fixture(tmp_path, count=0)
+    for index, lot, date, valid, actual in ((1, "A", "2026-01-02", True, "42"), (2, "A", "2026-01-03", True, "42"),
+        (3, "B", "2026-01-01", True, "42"), (4, "B", "2026-01-04", False, "unlesbar"), (5, "C", "unlesbar", False, "42")):
+        add_run(spec, index, lot=lot, data=payload(date, I1=actual), validated=valid)
+    usage = usage_lots(spec, profile)
+    assert usage["A"]["close_available"] and {row["run_id"] for row in usage["A"]["witnesses"]} == {4}
+    assert usage["A"]["last_usage"]["display"] == "2026-01-03"
+    assert not usage["C"]["last_usage_reliable"] and not usage["B"]["close_available"]
+    source = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="B")
+    assert source["excluded_count"] == 1 and source["included_count"] == 1
+    assert {"validation_missing", "ist_invalid"}.issubset(source["excluded"][0]["reasons"])
+
+
+@pytest.mark.parametrize("dated,expected", [(False, False), (True, False)])
+def test_usage_equal_day_or_exact_timestamp_has_no_import_or_id_tiebreaker(tmp_path, dated, expected):
+    spec, profile = fixture(tmp_path, count=0)
+    if dated:
+        value = copy.deepcopy(profile["snapshot"])
+        value["measurement_date_format"] = "%Y-%m-%dT%H:%M:%S"
+        profile = save_profile(spec, value, expected_version_id=profile["version_id"], expected_inventory_version_id=1, context=context("usage-seconds"))
+    for index, lot in ((1, "A"), (2, "B")):
+        add_run(spec, index, lot=lot, data=payload("2026-01-04T12:00:00" if dated else "2026-01-04"))
+    usage = usage_lots(spec, profile)
+    assert all(row["close_available"] is expected for row in usage.values())
+    assert all(row["last_usage"]["precision"] == ("seconds" if dated else "day") for row in usage.values())
+    if not dated:
+        assert all("00:00" not in row["last_usage"]["display"] for row in usage.values())
+
+
+def test_usage_partial_order_three_lots_old_import_and_reuse_change_only_read_only_offers(tmp_path):
+    spec, profile = fixture(tmp_path, count=0)
+    for index, lot, date in ((1, "A", "2026-01-03"), (2, "B", "2026-01-04"), (3, "C", "2026-01-04")):
+        add_run(spec, index, lot=lot, data=payload(date))
+    before = usage_snapshot(spec, profile)
+    usage = usage_lots(spec, profile)
+    assert {row["kit_lot"] for row in usage["A"]["witnesses"]} == {"B", "C"}
+    assert not usage["B"]["close_available"] and not usage["C"]["close_available"]
+    add_run(spec, 4, lot="A", data=payload("2026-01-01"))
+    after = usage_snapshot(spec, profile)
+    assert after.snapshot_sha256 != before.snapshot_sha256
+    assert usage_lots(spec, profile)["A"]["last_usage"] == usage["A"]["last_usage"]
+    add_run(spec, 5, lot="A", data=payload("2026-01-05"))
+    latest = usage_lots(spec, profile)
+    assert not latest["A"]["close_available"] and latest["B"]["close_available"] and latest["C"]["close_available"]
+    assert list_lots(spec) == []
+
+
+def test_usage_missing_separate_clock_is_day_precision_but_remains_statistically_excluded(tmp_path):
+    spec, old = fixture(tmp_path, count=0)
+    profile = time_profile(spec, old)
+    add_run(spec, 1, lot="A", data=payload("2026-01-03", TIME="13:00"))
+    add_run(spec, 2, lot="B", data=payload("2026-01-04", TIME="24:00"))
+    usage = usage_lots(spec, profile)
+    assert usage["A"]["close_available"] and usage["B"]["last_usage"]["precision"] == "day"
+    assert usage["B"]["last_usage"]["display"] == "2026-01-04"
+    assert "measurement_time_invalid" in usage["B"]["reasons"]
+    source = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="B")
+    assert not source["included"] and source["excluded"][0]["reasons"] == ["measurement_time_invalid"]
+
+
+@pytest.mark.parametrize("change", ["qc_only", "lot", "time"])
+def test_usage_pending_revisions_preserve_possible_identities_without_selecting_candidate(tmp_path, monkeypatch, change):
+    import src.qualitycontrol.sources as owner
+    spec, profile = fixture(tmp_path, count=0)
+    data = payload("2026-01-04")
+    candidate = copy.deepcopy(data)
+    candidate["I1"] = "unlesbar"
+    if change == "time":
+        candidate["DATE"] = "2026-01-05"
+    row = {"id": 1, "device_id": "dev", "assay_key": "A", "lot_id": "A", "payload": payload("2026-01-03"), "selection_token": "original:1"}
+    pending = {"id": 2, "device_id": "dev", "assay_key": "A", "lot_id": "B", "payload": data, "selection_token": "original:2|pending:1",
+        "pending_revision": {"revision_id": 1, "result": {"lot_id": "C" if change == "lot" else "B", "payload": candidate}}}
+    monkeypatch.setattr(owner, "list_result_runs", lambda *args, **kwargs: {"runs": [row, pending]})
+    usage = usage_lots(spec, profile)
+    assert usage["A"]["close_available"] is (change == "qc_only")
+    if change == "lot":
+        assert set(usage) == {"A", "B", "C"}
+        assert not usage["B"]["last_usage_reliable"] and not usage["C"]["last_usage_reliable"]
+    snapshot = usage_snapshot(spec, profile).to_dict()
+    assert snapshot["runs"][1]["selection_token"] == "original:2|pending:1"
+    assert snapshot["runs"][1]["determinate"] is (change == "qc_only")
+
+
+def test_usage_all_more_than_500_rows_exact_lot_and_stable_device_assay_scope(tmp_path):
+    spec, profile = fixture(tmp_path, count=0)
+    with sqlite3.connect(spec["path"]) as conn:
+        conn.executemany("INSERT INTO runs VALUES (?, '', ?, ?, ?, ?, ?, '2026-01-01')", [
+            (index, f"synthetic-{index}.pdf", "OTHER" if index == 504 else "A", " A " if index == 503 else ("B" if index == 502 else "A"),
+             "other-device" if index == 505 else "dev", json.dumps(payload("2026-01-04" if index == 502 else "2026-01-03"))) for index in range(1, 506)])
+    snapshot = usage_snapshot(spec, profile)
+    assert len(snapshot.to_dict()["runs"]) == 503
+    assert set(usage_lots(spec, profile)) == {"A", "B", " A "}
+    assert usage_lots(spec, profile)["A"]["close_available"]
+
+
+def test_usage_unknown_target_date_prevents_false_oldest_and_conflicting_profile_times_are_visible(tmp_path):
+    spec, profile = fixture(tmp_path, count=0)
+    add_run(spec, 1, lot="A", data=payload("unlesbar"))
+    add_run(spec, 2, lot="B", data=payload("2026-01-04"))
+    assert not usage_lots(spec, profile)["A"]["close_available"]
+    assert not usage_lots(spec, profile)["A"]["last_usage_reliable"]
+    value = copy.deepcopy(profile["snapshot"])
+    value.update(profile_id="p2", measurement_date_field="OTHER_DATE")
+    save_profile(spec, value, expected_version_id=0, expected_inventory_version_id=1, context=context("usage-other-mapping"))
+    add_run(spec, 3, lot="C", data=payload("2026-01-05", OTHER_DATE="2026-01-06"))
+    assert "profile_time_conflict" in usage_lots(spec, profile)["C"]["reasons"]
+
+
+@pytest.mark.parametrize("format_string,raw,precision,expected", [
+    ("%Y-%m-%d %S", "2026-01-03 45", "day", "2026-01-03"),
+    ("%Y-%m-%d %H:%S", "2026-01-03 14:45", "hours", "2026-01-03 14"),
+    ("%Y-%m-%d %H:%M", "2026-01-03 14:35", "minutes", "2026-01-03 14:35"),
+])
+def test_usage_only_contiguous_explicit_clock_components_define_precision(tmp_path, format_string, raw, precision, expected):
+    spec, old = fixture(tmp_path, count=0)
+    value = copy.deepcopy(old["snapshot"])
+    value["measurement_date_format"] = format_string
+    profile = save_profile(spec, value, expected_version_id=old["version_id"], expected_inventory_version_id=1, context=context("usage-unusual-format"))
+    add_run(spec, 1, lot="A", data=payload(raw))
+    interval = usage_lots(spec, profile)["A"]["last_usage"]
+    assert interval["precision"] == precision and interval["display"] == expected
+    width = {"day": 86_400_000_000, "hours": 3_600_000_000, "minutes": 60_000_000}[precision]
+    assert interval["upper_exclusive"] - interval["lower"] == width
+    assert interval["lower"] % width == 0
+
+
+def test_usage_unreadable_revision_identity_prevents_other_lots_false_closure(tmp_path, monkeypatch):
+    import src.qualitycontrol.sources as owner
+    spec, profile = fixture(tmp_path, count=0)
+    rows = [{"id": index, "device_id": "dev", "assay_key": "A", "lot_id": lot,
+        "payload": payload(date), "selection_token": f"original:{index}"} for index, lot, date in
+        ((1, "A", "2026-01-03"), (2, "B", "2026-01-04"), (3, "C", "2026-01-01"))]
+    rows[2]["revision_error"] = "Unlesbare Ergebnishistorie"
+    monkeypatch.setattr(owner, "list_result_runs", lambda *args, **kwargs: {"runs": rows})
+    snapshot = usage_snapshot(spec, profile).to_dict()
+    assert snapshot["unassigned_run_ids"] == [3]
+    assert all(not row["close_available"] for row in snapshot["lots"])
+    assert "usage_identity_unassigned" in next(row for row in snapshot["lots"] if row["kit_lot"] == "A")["reasons"]

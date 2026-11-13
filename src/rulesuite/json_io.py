@@ -11,11 +11,14 @@ from .errors import RuleSuiteError
 
 
 def _write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+    _write_bytes_atomic(path, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))
+
+
+def _write_bytes_atomic(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(data, indent=2, ensure_ascii=False)
     tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
-        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+        with tmp.open("wb") as handle:
             handle.write(payload)
             handle.flush()
         os.replace(tmp, path)
@@ -38,7 +41,12 @@ def _read_json_object(path: Path) -> Dict[str, Any]:
 
 
 def _safe_key(assay_key: str) -> str:
-    return assay_key.replace("(", "").replace(")", "").replace("/", "_")
+    key = str(assay_key)
+    cleaned = key.replace("(", "").replace(")", "")
+    if (not cleaned.strip() or any(char in key for char in ("/", "\\", ":", "\x00"))
+            or ".." in key or cleaned in {".", ".."}):
+        raise RuleSuiteError("path_outside_allowed_directory: invalid_assay_key")
+    return cleaned
 
 
 def _safe_filename(name: str) -> str:

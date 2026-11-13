@@ -13,7 +13,7 @@ def build_field_list_panel(host: tk.Misc, parent: tk.Widget) -> None:
     SectionHeader(
         parent,
         "Extraktionsfelder",
-        subtitle="Reihenfolge ist fest. Verschieben Sie Felder nur mit den Schaltflächen.",
+        subtitle="Reihenfolge über die Schaltflächen ändern.",
     ).grid(row=0, column=0, sticky="ew", padx=2, pady=(0, 4))
 
     host.tree_fields, fields_frame = create_scrollable_treeview(
@@ -38,8 +38,7 @@ def build_field_list_panel(host: tk.Misc, parent: tk.Widget) -> None:
 
     actions = tk.Frame(parent)
     actions.grid(row=2, column=0, sticky="ew", pady=(0, 2))
-    for column in range(5):
-        actions.columnconfigure(column, weight=1)
+    actions.columnconfigure(0, weight=1)
     buttons = (
         ("Neues Feld", host.on_begin_new_field),
         ("Duplizieren …", host.on_duplicate_field),
@@ -48,4 +47,4 @@ def build_field_list_panel(host: tk.Misc, parent: tk.Widget) -> None:
         ("Löschen …", host.on_remove_field),
     )
     for column, (label, command) in enumerate(buttons):
-        tk.Button(actions, text=label, command=command).grid(row=0, column=column, sticky="ew", padx=1)
+        tk.Button(actions, text=label, command=command).grid(row=column, column=0, sticky="ew", padx=1, pady=1)

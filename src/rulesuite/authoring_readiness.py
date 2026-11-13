@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -24,7 +25,7 @@ from .required_fields import check_required_fields
 from .validation import _validate_draft_data
 from .json_io import _read_json_object
 
-_PROOF_VERSION = 1
+_PROOF_VERSION = 2
 
 
 class AuthoringReadinessError(RuntimeError):
@@ -75,149 +76,171 @@ def check_authoring_readiness(
     }
 
 
-def create_authoring_proof(
-    project_root: str,
-    assay_key: str,
-    draft_path: str,
-    failing_pdf_path: str,
-    reference_pdf_path: str | None = None,
-) -> Dict[str, Any]:
-    """Create a hash-bound proof for the current draft and its acceptance PDFs."""
-    from .rulesuite import RuleSuite
-
-    root = Path(project_root).resolve()
-    draft = _require_contained_draft(root, draft_path)
-    proof_path = _proof_path(draft)
-    # Starting a new check revokes an older proof immediately. Otherwise a
-    # failed attempt with a newly selected problem PDF could leave a previous
-    # proof usable for activation.
-    _write_json_atomic(
-        proof_path,
-        {
-            "version": _PROOF_VERSION,
-            "status": "pending",
-            "draft_path": str(draft),
-            "started_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        },
-    )
-    failing_pdf = _require_pdf(failing_pdf_path, "failing_pdf")
-    key = str(assay_key or "").strip()
-    if not key:
-        raise AuthoringReadinessError("authoring_proof_assay_key_missing")
-
-    service = RuleSuite()
-    draft_data = service.load_draft(str(draft))
-    if str(draft_data.get("assay_key", "")).strip() != key:
+def _capture_proof_inputs(root: Path, key: str, draft: Path, failing_path: str, reference_path: str | None):
+    draft_bytes = draft.read_bytes()
+    draft_data = json.loads(draft_bytes)
+    if not isinstance(draft_data, dict) or str(draft_data.get("assay_key", "")).strip() != key:
         raise AuthoringReadinessError("authoring_proof_assay_key_mismatch")
     structural = _validate_draft_data(draft_data)
     if not structural.get("ok"):
         raise AuthoringReadinessError(f"authoring_proof_draft_invalid: {structural.get('errors', [])}")
-
-    # The former failing/example PDF must now pass the real extractor completely.
-    failing_result = service.preview_extract(str(root), str(failing_pdf), key, draft_path=str(draft))
-    diff = service.diff_draft_vs_active(str(root), key, str(draft))
-    mode = str(diff.get("mode") or "create")
-
-    reference_pdf: Path | None = None
-    reference_hash = ""
-    active_ruleset: Path | None = None
-    active_ruleset_hash = ""
-    compared_fields: list[str] = []
-    if mode == "update":
-        active_ruleset = _require_contained_active_ruleset(root, str(diff.get("ruleset_file") or ""))
-        active_ruleset_hash = _sha256_file(active_ruleset)
-        if not str(reference_pdf_path or "").strip():
-            raise AuthoringReadinessError("authoring_proof_reference_pdf_required")
-        reference_pdf = _require_pdf(str(reference_pdf_path), "reference_pdf")
-        failing_hash = _sha256_file(failing_pdf)
-        reference_hash = _sha256_file(reference_pdf)
-        if failing_pdf == reference_pdf or failing_hash == reference_hash:
+    index_path = root / "rules" / "index.json"
+    index_bytes = index_path.read_bytes()
+    index = json.loads(index_bytes)
+    rows = index.get("assays") if isinstance(index, dict) else None
+    if not isinstance(rows, list):
+        raise AuthoringReadinessError("authoring_proof_index_invalid")
+    matches = [row for row in rows if isinstance(row, dict) and str(row.get("assay_key", "")).strip() == key]
+    if len(matches) > 1:
+        raise AuthoringReadinessError("authoring_proof_active_binding_ambiguous")
+    active = _require_contained_active_ruleset(root, str(matches[0].get("ruleset_file") or "")) if matches else None
+    failing = _require_pdf(failing_path, "failing_pdf")
+    if active is not None and not str(reference_path or "").strip():
+        raise AuthoringReadinessError("authoring_proof_reference_pdf_required")
+    reference = _require_pdf(str(reference_path), "reference_pdf") if active is not None else None
+    values = {"draft": (draft, draft_bytes), "index": (index_path, index_bytes),
+              "failing_pdf": (failing, failing.read_bytes())}
+    if active is not None:
+        values["active_ruleset"] = (active, active.read_bytes())
+        values["reference_pdf"] = (reference, reference.read_bytes())
+        if reference == failing or values["reference_pdf"][1] == values["failing_pdf"][1]:
             raise AuthoringReadinessError("authoring_proof_reference_must_differ")
-        active_reference = service.preview_extract(str(root), str(reference_pdf), key, draft_path=None)
-        draft_reference = service.preview_extract(str(root), str(reference_pdf), key, draft_path=str(draft))
-        expected = dict(active_reference.get("data") or {})
-        actual = dict(draft_reference.get("data") or {})
-        compared_fields = list(expected.keys())
-        mismatches = [field for field in compared_fields if actual.get(field) != expected.get(field)]
-        if str(draft_reference.get("lot_id") or "") != str(active_reference.get("lot_id") or ""):
-            mismatches.append("lot_id")
-        if mismatches:
-            raise AuthoringReadinessError(
-                "authoring_proof_reference_mismatch: " + ",".join(dict.fromkeys(mismatches))
-            )
-    else:
-        failing_hash = _sha256_file(failing_pdf)
+    return {"mode": "update" if active is not None else "create", "assay_name": draft_data.get("assay_name"),
+        "files": values, "binding": {name: {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()} for name, (path, raw) in values.items()}}
 
-    proof = {
-        "version": _PROOF_VERSION,
-        "status": "ready",
-        "assay_key": key,
-        "mode": mode,
-        "draft_path": str(draft),
-        "draft_sha256": _sha256_file(draft),
-        "failing_pdf_path": str(failing_pdf),
-        "failing_pdf_sha256": failing_hash,
-        "reference_pdf_path": str(reference_pdf) if reference_pdf is not None else "",
-        "reference_pdf_sha256": reference_hash,
-        "active_ruleset_path": str(active_ruleset) if active_ruleset is not None else "",
-        "active_ruleset_sha256": active_ruleset_hash,
-        "compared_fields": compared_fields,
-        "checked_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "failing_result_fields": list(dict(failing_result.get("data") or {}).keys()),
-    }
-    _write_json_atomic(proof_path, proof)
-    return proof
+
+def _attempt_is_current(proof_path, attempt):
+    try:
+        value = json.loads(proof_path.read_text(encoding="utf-8"))
+        return isinstance(value, dict) and value.get("attempt_id") == attempt
+    except (OSError, ValueError):
+        return False
+
+
+def create_authoring_proof(project_root: str, assay_key: str, draft_path: str,
+                           failing_pdf_path: str, reference_pdf_path: str | None = None) -> Dict[str, Any]:
+    """Extract only privately frozen bytes; publish ready for this attempt only."""
+    from .rulesuite import RuleSuite
+    from .lifecycle import rulesuite_draft_lock, rulesuite_lifecycle_lock
+
+    root, key = Path(project_root).resolve(), str(assay_key or "").strip()
+    draft = _require_contained_draft(root, draft_path)
+    proof_path, attempt = _proof_path(draft), uuid4().hex
+    pending = {"version": _PROOF_VERSION, "status": "pending", "attempt_id": attempt, "draft_path": str(draft),
+               "started_at_utc": datetime.now(timezone.utc).isoformat()}
+    try:
+        # Locks are short-lived: real PDF extraction may exceed the draft TTL.
+        with rulesuite_lifecycle_lock(str(root)), rulesuite_draft_lock(draft):
+            _write_json_atomic(proof_path, pending)
+            if not key:
+                raise AuthoringReadinessError("authoring_proof_assay_key_missing")
+            captured = _capture_proof_inputs(root, key, draft, failing_pdf_path, reference_pdf_path)
+        with tempfile.TemporaryDirectory(prefix="arev2-authoring-proof-") as temporary:
+            frozen_root = Path(temporary)
+            frozen_paths = {}
+            for name, (original, raw) in captured["files"].items():
+                if name == "index":
+                    destination = frozen_root / "rules" / "index.json"
+                elif name == "active_ruleset":
+                    destination = frozen_root / "rules" / original.relative_to((root / "rules").resolve())
+                elif name == "draft":
+                    destination = frozen_root / "rules" / "drafts" / original.name
+                else:
+                    destination = frozen_root / name / original.name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(raw)
+                frozen_paths[name] = str(destination)
+            if captured["mode"] == "update":
+                # Absolute in-root paths and symlink aliases in the real index
+                # must resolve to captured bytes, never back to a live file.
+                private_index = json.loads(captured["files"]["index"][1])
+                private_active = Path(frozen_paths["active_ruleset"]).relative_to(frozen_root / "rules").as_posix()
+                for row in private_index["assays"]:
+                    if isinstance(row, dict) and str(row.get("assay_key", "")).strip() == key:
+                        row["ruleset_file"] = private_active
+                Path(frozen_paths["index"]).write_text(json.dumps(private_index), encoding="utf-8")
+            service = RuleSuite()
+            failing_result = service.preview_extract(str(frozen_root), frozen_paths["failing_pdf"], key, draft_path=frozen_paths["draft"])
+            compared_fields = []
+            if captured["mode"] == "update":
+                active_reference = service.preview_extract(str(frozen_root), frozen_paths["reference_pdf"], key, draft_path=None)
+                draft_reference = service.preview_extract(str(frozen_root), frozen_paths["reference_pdf"], key, draft_path=frozen_paths["draft"])
+                expected, actual = dict(active_reference.get("data") or {}), dict(draft_reference.get("data") or {})
+                compared_fields = list(expected)
+                mismatches = [field for field in compared_fields if actual.get(field) != expected.get(field)]
+                if str(draft_reference.get("lot_id") or "") != str(active_reference.get("lot_id") or ""):
+                    mismatches.append("lot_id")
+                if mismatches:
+                    raise AuthoringReadinessError("authoring_proof_reference_mismatch: " + ",".join(dict.fromkeys(mismatches)))
+        proof = {**pending, "status": "ready", "assay_key": key, "assay_name": captured["assay_name"], "mode": captured["mode"],
+            "input_snapshot": "exact-bytes-v1", "input_bindings": captured["binding"],
+            "compared_fields": compared_fields, "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+            "failing_result_fields": list(dict(failing_result.get("data") or {}))}
+        for name in ("draft", "failing_pdf", "reference_pdf", "active_ruleset", "index"):
+            binding = captured["binding"].get(name, {})
+            proof[name + "_path"] = binding.get("path", "")
+            proof[name + "_sha256"] = binding.get("sha256", "")
+        with rulesuite_lifecycle_lock(str(root)), rulesuite_draft_lock(draft):
+            if not _attempt_is_current(proof_path, attempt):
+                raise AuthoringReadinessError("authoring_proof_superseded")
+            current = _capture_proof_inputs(root, key, draft, failing_pdf_path, reference_pdf_path)
+            if current["binding"] != captured["binding"] or current["mode"] != captured["mode"]:
+                raise AuthoringReadinessError("authoring_proof_inputs_changed_during_check")
+            _write_json_atomic(proof_path, proof)
+        return proof
+    except Exception as exc:
+        # A superseded attempt must never overwrite a newer pending/failed one.
+        try:
+            with rulesuite_draft_lock(draft):
+                if _attempt_is_current(proof_path, attempt):
+                    _write_json_atomic(proof_path, {**pending, "status": "failed", "error": str(exc)})
+        except Exception:
+            pass  # Leaving pending is fail-closed as well.
+        raise
 
 
 def verify_authoring_proof(project_root: str, assay_key: str, draft_path: str) -> Dict[str, Any]:
     root = Path(project_root).resolve()
     try:
         draft = _require_contained_draft(root, draft_path)
-    except AuthoringReadinessError as exc:
-        return {"ok": False, "errors": [str(exc)]}
-    proof_path = _proof_path(draft)
-    if not proof_path.is_file():
-        return {"ok": False, "errors": ["authoring_proof_missing"]}
-    try:
-        proof = json.loads(proof_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"ok": False, "errors": ["authoring_proof_unreadable"]}
-    if not isinstance(proof, dict) or proof.get("version") != _PROOF_VERSION:
-        return {"ok": False, "errors": ["authoring_proof_version_invalid"]}
-    if proof.get("status") != "ready":
-        return {"ok": False, "errors": ["authoring_proof_not_ready"]}
-
-    errors: list[str] = []
-    key = str(assay_key or "").strip()
-    if str(proof.get("assay_key") or "") != key:
-        errors.append("authoring_proof_assay_key_mismatch")
-    if str(proof.get("draft_path") or "") != str(draft):
-        errors.append("authoring_proof_draft_path_mismatch")
-    if str(proof.get("draft_sha256") or "") != _sha256_file(draft):
-        errors.append("authoring_proof_draft_changed")
-    for label in ("failing_pdf", "reference_pdf"):
-        raw_path = str(proof.get(f"{label}_path") or "").strip()
-        expected_hash = str(proof.get(f"{label}_sha256") or "").strip()
-        if not raw_path and label == "reference_pdf" and proof.get("mode") != "update":
-            continue
-        path = Path(raw_path).resolve() if raw_path else None
-        if path is None or not path.is_file():
-            errors.append(f"authoring_proof_{label}_missing")
-        elif _sha256_file(path) != expected_hash:
-            errors.append(f"authoring_proof_{label}_changed")
-    if proof.get("mode") == "update" and not proof.get("reference_pdf_sha256"):
-        errors.append("authoring_proof_reference_pdf_required")
-    if proof.get("mode") == "update":
-        active_path_raw = str(proof.get("active_ruleset_path") or "").strip()
-        expected_active_hash = str(proof.get("active_ruleset_sha256") or "").strip()
+        proof_path = _proof_path(draft)
+        if not proof_path.is_file():
+            return {"ok": False, "errors": ["authoring_proof_missing"]}
         try:
-            active_path = _require_contained_active_ruleset(root, active_path_raw)
-        except AuthoringReadinessError:
-            errors.append("authoring_proof_active_ruleset_missing")
-        else:
-            if _sha256_file(active_path) != expected_active_hash:
-                errors.append("authoring_proof_active_ruleset_changed")
-    return {"ok": not errors, "errors": errors, "proof": proof}
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"ok": False, "errors": ["authoring_proof_unreadable"]}
+        if not isinstance(proof, dict) or proof.get("version") != _PROOF_VERSION:
+            return {"ok": False, "errors": ["authoring_proof_version_invalid"]}
+        if proof.get("status") != "ready":
+            return {"ok": False, "errors": ["authoring_proof_not_ready"], "proof": proof}
+        errors, key = [], str(assay_key or "").strip()
+        if proof.get("assay_key") != key:
+            errors.append("authoring_proof_assay_key_mismatch")
+        if proof.get("draft_path") != str(draft):
+            errors.append("authoring_proof_draft_path_mismatch")
+        for name in ("draft", "failing_pdf", "reference_pdf", "active_ruleset", "index"):
+            raw_path, expected = proof.get(name + "_path"), proof.get(name + "_sha256")
+            if name in {"reference_pdf", "active_ruleset"} and proof.get("mode") == "create":
+                continue
+            path = Path(raw_path).resolve() if raw_path else None
+            if path is None or not path.is_file():
+                errors.append(f"authoring_proof_{name}_missing")
+            elif _sha256_file(path) != expected:
+                errors.append(f"authoring_proof_{name}_changed")
+        from .rulesuite import RuleSuite
+        diff = RuleSuite().diff_draft_vs_active(str(root), key, str(draft))
+        if diff.get("mode") != proof.get("mode"):
+            errors.append("authoring_proof_mode_changed")
+        if diff.get("mode") == "update":
+            current_active = _require_contained_active_ruleset(root, str(diff.get("ruleset_file") or ""))
+            if str(current_active) != proof.get("active_ruleset_path"):
+                errors.append("authoring_proof_active_binding_changed")
+        if proof.get("input_snapshot") != "exact-bytes-v1":
+            errors.append("authoring_proof_snapshot_required")
+        return {"ok": not errors, "errors": errors, "proof": proof}
+    except Exception as exc:
+        return {"ok": False, "errors": [str(exc)]}
 
 
 def _require_contained_draft(root: Path, draft_path: str) -> Path:

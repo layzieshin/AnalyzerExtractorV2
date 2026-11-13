@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -40,6 +40,32 @@ def parse_measurement_date(raw: object, date_format: str) -> str:
         return value.isoformat()
     except (ValueError, TypeError) as exc:
         raise QCConfigurationError("Messdatum entspricht nicht dem festgelegten Format.") from exc
+
+
+def _single_value_limit(raw: Mapping[str, Any]) -> tuple[bool, str | None]:
+    enabled = raw.get("single_value_limits_enabled", False)
+    if not isinstance(enabled, bool):
+        raise QCConfigurationError("RiliBÄK-Grenzen vorhanden muss eindeutig gewählt sein.")
+    if not enabled:
+        return False, None
+    value = raw.get("single_value_limit_percent")
+    text = str(value).strip() if value is not None and not isinstance(value, bool) else ""
+    if not re.fullmatch(r"[+]?(?:[0-9]+(?:[.,][0-9]+)?|[.,][0-9]+)", text):
+        raise QCConfigurationError("Für die Einzelwertgrenzen ist eine endliche, nicht negative Abweichung in % erforderlich (Punkt oder Komma, ohne Tausendertrennzeichen).")
+    number = Decimal(text.replace(",", "."))
+    if not number.is_finite() or number < 0:
+        raise QCConfigurationError("Die erlaubte Einzelwertabweichung muss endlich und nicht negativ sein.")
+    return True, str(number)
+
+
+def _validate_current_fields(value: Mapping[str, Any], available_field_keys: Collection[str]) -> None:
+    available = set(available_field_keys)
+    for control in value["controls"]:
+        invalid = [f"{role}: {key}" for role, key in control["fields"].items() if key not in available]
+        if invalid:
+            raise QCConfigurationError(
+                f"{control['name']}: Feldzuordnung prüfen. Diese Felder gehören nicht zum aktuellen Assay {value['assay_key']}: {', '.join(invalid)}."
+            )
 
 
 def _required(value: Mapping[str, Any], key: str, label: str) -> str:
@@ -134,10 +160,12 @@ def normalize_profile(raw: Mapping[str, Any]) -> dict[str, Any]:
     for flag in ("rili_applicable", "relative_enabled"):
         if not isinstance(raw.get(flag, False), bool):
             raise QCConfigurationError("Anwendbarkeit und relative Auswertung müssen eindeutig gewählt sein.")
+    single_enabled, single_percent = _single_value_limit(raw)
     result.update(numeric_grammar=grammar, qc_profile="classic-six-v1", enabled_rules=list(enabled), controls=prepared,
                   rili_applicable=raw.get("rili_applicable", False), relative_enabled=raw.get("relative_enabled", False),
                   relative_limit_percent=relative, run_grouping_field=str(raw.get("run_grouping_field") or "").strip(),
-                  guideline_reference=str(raw.get("guideline_reference") or "").strip())
+                  guideline_reference=str(raw.get("guideline_reference") or "").strip(),
+                  single_value_limits_enabled=single_enabled, single_value_limit_percent=single_percent)
     return result
 
 
@@ -162,8 +190,16 @@ def get_profile(store_spec: Mapping[str, Any], version_id: int) -> dict[str, Any
 
 
 def save_profile(store_spec: Mapping[str, Any], snapshot: Mapping[str, Any], *, expected_version_id: int,
-                 expected_inventory_version_id: int, context: MutationContext) -> dict[str, Any]:
+                 expected_inventory_version_id: int, context: MutationContext,
+                 available_field_keys: Collection[str] | None = None) -> dict[str, Any]:
+    """Save a revision; application writes supply the current assay's field catalog.
+
+    Independent QC clients may omit catalog context. Historical reads never
+    revalidate frozen mappings against a newer rule catalog.
+    """
     value = normalize_profile(snapshot)
+    if available_field_keys is not None:
+        _validate_current_fields(value, available_field_keys)
     intent = intent_hash("save_profile", {"snapshot": value, "expected": expected_version_id,
                                          "inventory": expected_inventory_version_id}, context)
     with write_connection(store_spec) as conn:

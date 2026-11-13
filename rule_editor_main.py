@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from interfaces.tk.desktop_theme import configure_desktop_theme
+from interfaces.tk.task_runner import TkTaskRunner
 from src.application.api import RuleSuiteController
 from src.runtime.api import resolve_app_root
 
@@ -65,6 +66,18 @@ class RuleEditorWindow(
         self.var_new_assay_name = tk.StringVar(value="")
         self.var_draft_path = tk.StringVar(value="")
         self.var_pdf = tk.StringVar(value="")
+        self.var_reference_pdf = tk.StringVar(value="")
+        self.var_proof_status = tk.StringVar(value="Nachweis fehlt – geladenen Entwurf mit PDFs prüfen.")
+        self.var_proof_structure = tk.StringVar(value="Struktur: nicht geprüft")
+        self.var_proof_example = tk.StringVar(value="Beispiel/Problem: nicht geprüft")
+        self.var_proof_reference = tk.StringVar(value="Referenz: Modus noch nicht geprüft")
+        self._proof_generation = 0
+        self._proof_running = False
+        self._proof_active_request = None
+        self._proof_disposed = False
+        self._proof_needs_recheck = False
+        self._proof_loaded_identity = None
+        self._suspend_proof_tracking = False
         self.var_lot_regex = tk.StringVar(value="")
         self.var_dedupe_fields = tk.StringVar(value="")
         self.var_excel_filename = tk.StringVar(value="{assay_name}.xlsx")
@@ -137,10 +150,13 @@ class RuleEditorWindow(
 
         configure_desktop_theme(self)
         self._build_ui()
+        self._proof_task_runner = TkTaskRunner(self, poll_ms=30)
         self._bind_shortcuts()
         self._reload_assays()
         self._refresh_ruleset_overview()
         self._install_dirty_watchers()
+        self.var_pdf.trace_add("write", self._on_proof_pdf_changed)
+        self.var_reference_pdf.trace_add("write", self._on_proof_pdf_changed)
         self._schedule_autosave()
 
     def _maximize_on_windows(self) -> None:
@@ -165,6 +181,9 @@ class RuleEditorWindow(
             return
         self.project_root = chosen
         self._rules = RuleSuiteController(chosen)
+        invalidate = getattr(self, "_invalidate_authoring_proof", None)
+        if callable(invalidate):
+            invalidate()
 
     def _select_tab(self, tab_key: str) -> None:
         if tab_key == "draft":
@@ -218,6 +237,15 @@ class RuleEditorWindow(
     def _set_busy(self, busy: bool, status: str) -> None:
         self._busy = busy
         self._set_status(status)
+
+    def destroy(self) -> None:
+        self._proof_disposed = True
+        self._proof_active_request = None
+        self._proof_generation = self.__dict__.get("_proof_generation", 0) + 1
+        runner = self.__dict__.get("_proof_task_runner")
+        if runner is not None and not runner.shutdown:
+            runner.shutdown_runner(join_timeout_s=0.5)
+        super().destroy()
 
 
 if __name__ == "__main__":

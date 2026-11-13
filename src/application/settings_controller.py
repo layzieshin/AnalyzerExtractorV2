@@ -20,8 +20,9 @@ from src.qualitycontrol.api import (
 )
 
 from .errors import QualityControlApplicationError, SettingsLoadError, SettingsSaveError, SettingsValidationError
-from .models import DesktopSettings, DeviceInventoryItem, DeviceInventoryStatus, QCConfigurationState, WatchTimingSettings
+from .models import DesktopSettings, DeviceInventoryItem, DeviceInventoryStatus, QCAssayConfigurationItem, QCConfigurationState, WatchTimingSettings
 from .presentation import normalize_scan_interval_s, normalize_stable_window_s
+from .rules_controller import RuleSuiteController
 
 _SETTINGS_FILE_NAME = "desktop_settings.json"
 _ALLOWED_KEYS = frozenset(
@@ -170,6 +171,58 @@ class SettingsController:
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
 
+    def get_qc_assay_configuration(self) -> QCConfigurationState:
+        """Read all active assays, plus every distinct existing profile binding."""
+        state = self.get_qc_configuration()
+        rules = RuleSuiteController(self._project_root)
+        try:
+            catalog = rules.list_inventory(kind="active")
+        except Exception as exc:
+            return replace(state, catalog_error=f"Der aktive Regelkatalog konnte nicht geladen werden. Bitte die Regelverwaltung prüfen und neu laden: {exc}")
+        assays = tuple((item.assay_name or "Assayname fehlt", item.assay_key) for item in catalog if item.assay_key)
+        fields, errors = {}, {}
+        for _name, key in assays:
+            try:
+                fields[key] = tuple(rules.list_fields(key))
+            except Exception as exc:
+                # An unreadable rule remains visible, but provides no valid choices.
+                fields[key] = ()
+                errors[key] = f"Aktuelle Regelfelder nicht verfügbar: {exc}"
+        devices = {row["device_id"]: row for row in state.inventory["snapshot"]["devices"]}
+        rows = []
+
+        def profile_row(name, key, record, *, active=True):
+            value = record["snapshot"]
+            device = devices.get(value["device_id"], {})
+            issues = []
+            if not active:
+                issues.append("Die zugehörige Regel ist nicht aktiv.")
+            if key in errors:
+                issues.append(errors[key])
+            if not device or device.get("incomplete") or not device.get("active", True):
+                issues.append("Gerätebindung prüfen.")
+            for control in value["controls"]:
+                mapping = control.get("fields", {})
+                invalid = [f"{role}: {mapping.get(role) or 'fehlt'}" for role in ("MIN", "MAX", "SOLL", "IST")
+                           if not mapping.get(role) or mapping.get(role) not in fields.get(key, ())]
+                if len(set(mapping.values())) != 4:
+                    invalid.append("Vier verschiedene Felder erforderlich")
+                if invalid:
+                    issues.append(f"{control['name']}: {', '.join(invalid)}")
+            return QCAssayConfigurationItem(key, name, value["device_id"], device.get("display_name") or value["device_id"],
+                record["profile_id"], value["name"], record["version_id"], len(value["controls"]),
+                "Feldzuordnung prüfen" if issues else "Eingerichtet", tuple(issues))
+
+        for name, key in assays:
+            profiles = [record for record in state.profiles if record["snapshot"]["assay_key"] == key]
+            rows.extend(profile_row(name, key, record) for record in profiles)
+            if not profiles:
+                rows.append(QCAssayConfigurationItem(key, name, issues=(errors[key],) if key in errors else ()))
+        active_keys = {key for _name, key in assays}
+        rows.extend(profile_row("Assay nicht aktiv", record["snapshot"]["assay_key"], record, active=False)
+                    for record in state.profiles if record["snapshot"]["assay_key"] not in active_keys)
+        return replace(state, assays=assays, field_choices=fields, assay_rows=tuple(rows))
+
     def save_qc_inventory(self, state: QCConfigurationState, snapshot: dict[str, Any], operator_initials: str,
                           request_id: str) -> dict[str, Any]:
         spec = self._qc_store(state.store_path)
@@ -183,8 +236,14 @@ class SettingsController:
                         operator_initials: str, request_id: str) -> dict[str, Any]:
         spec = self._qc_store(state.store_path)
         try:
+            # Never trust the dialog's catalog: rules may have changed since opening.
+            fields = RuleSuiteController(self._project_root).list_fields(str(snapshot.get("assay_key") or ""))
+        except Exception as exc:
+            raise QualityControlApplicationError(f"Aktuelle Regelfelder konnten nicht geladen werden. Bitte die Regel und Feldzuordnung prüfen: {exc}") from exc
+        try:
             return save_profile(spec, snapshot, expected_version_id=expected_version_id,
-                expected_inventory_version_id=state.inventory["version_id"], context=MutationContext(operator_initials, request_id))
+                expected_inventory_version_id=state.inventory["version_id"], context=MutationContext(operator_initials, request_id),
+                available_field_keys=fields)
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
 

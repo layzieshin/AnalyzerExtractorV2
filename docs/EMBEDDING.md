@@ -137,6 +137,42 @@ Read-only Erkennung aus normalisierten Dumps fuer Nacharbeit; keine Schreibpfade
 
 Der Rule-Editor (`rule_editor/`, `rule_editor_main.py`) spricht Authoring nur ueber `RuleSuiteController` aus `src.application.api`. Direkte `src.rulesuite`-, `src.parser`- oder `src.normalizer`-Imports sind dort nicht zulaessig. `required_header_field_keys` ist der read-only Pflichtfeldvertrag. `load_normalized_pdf_text` ist der PDF-Volltext-Fallback und darf intern `src.parser.api` sowie `src.normalizer.api` nutzen. `activate_draft` eines bestehenden Regelwerks veroeffentlicht vorher einen byte-genauen Snapshot unter `rules/history/`; Fehler sind fail-closed. `activate_new_draft` erzeugt keinen Snapshot. History/Trash-Inventar ist read-only; `open_history_as_draft` und `open_inactive_as_draft` publizieren ausschliesslich neue, nicht ueberschreibende Drafts. Die privaten View-Module exportieren keine neue Fach-API. Gate 7 ist nach isolierter sichtbarer Lifecycle-Abnahme `GATE_PASSED`.
 
+R1 keeps one embedded release area in the loaded Rule Editor workspace:
+`Mit PDFs prüfen` checks the current draft directly; successful proof says it is
+not yet activated. Structure-only validation and the single extraction preview
+remain technical helpers. The wizard may return a checked draft to the editor;
+it never invokes final activation. Dirty meta/field state, PDF selection changes,
+draft/root changes and external byte changes require another check. Pure diff,
+structure inspection and activation do not reserialize a clean proven draft. The
+existing details/log area becomes visible for diff inspection. Proof completion
+uses the existing TkTaskRunner queue and main-thread poller; workers never call Tk.
+
+`RuleSuiteController.create_authoring_proof` uses the existing readiness owner.
+Proof version 2 captures original draft, index, active rule and PDF bytes under
+short lifecycle→draft locks, then runs the real parser/splitter/extractor on
+private exact snapshots. The private selected index binding is relocated to the
+private active copy, including absolute in-root and symlink-alias inputs; original
+bindings/hashes remain frozen in the proof. Update requires a different PDF path
+and content, and equality of every previous data field plus `lot_id` on the
+reference. Every configured field needs a nonempty real extraction, regardless
+of its `required` flag. Proof-only success writes no active/index/history file.
+Before ready, the complete current mode/binding/hash context is checked again.
+Attempt IDs under short locks prevent an old slow success overwriting a newer
+pending/failed attempt; a TTL lock is not held across PDF work. Old proof-version-1
+sidecars require a new check; archived QC models/PDFs are unrelated and unchanged.
+
+Both existing lower activation APIs accept optional keyword
+`require_authoring_proof=False` for compatibility. Product controller calls always
+set it true. Within lifecycle→draft locks, the owner rechecks current mode,
+active/index binding and exact verified draft bytes, then publishes that captured
+snapshot without rereading unchecked draft data. Proof-required create rejects a
+supplied effective assay name differing from the tested draft. The editor issues
+exactly one final confirmation per explicit activation attempt; structure errors,
+stale UI selection and absent proof never reach it. Backend recheck follows user
+confirmation. Existing update history remains exact old bytes and fail-closed.
+Central draft-key handling rejects path-like keys under Windows and POSIX semantics
+without silently renaming them; existing legitimate technical key mapping stays.
+
 Kern:
 
 - `src.rulesuite.api.*` (Draft-Authoring, Preview, Aktivierung; fuer Adapter nur hinter `RuleSuiteController`)
@@ -223,9 +259,28 @@ configuration, all exclusion reasons and a source token. Separate read APIs are
 not claimed to form one atomic latest snapshot. A publication rechecks the manifest
 under `BEGIN IMMEDIATE`. A closed lot remains frozen; later arrivals need explicit
 `reopen_lot`. `close_lot` accepts a supplied frozen analysis model/PDF, hashes and
-algorithm/renderer identities; it requires a newer validated successor lot/date
-and atomically appends closure/evidence. The write owner retains that supplied-
-evidence contract; analysis/rendering happen before the transaction.
+algorithm/renderer identities. It requires at least one eligible target value
+and a proven later use of another lot, independent of that witness's statistical
+eligibility or earliest date. `get_lot_chronology(store_spec, *, profile_version_id)`
+returns immutable `QCUsageSnapshot(snapshot_json, snapshot_sha256)` with all
+projected runs, exact lot identities, selected/pending variants, source/validation
+bindings, profile heads/mappings, inventory, lot bindings and pairwise witnesses.
+Dates/times are half-open precision intervals; only contiguous explicit H→M→S
+components narrow them. Missing/invalid separate time permits at most a whole
+day when its date is valid, while remaining statistically excluded. Unknown
+revision identity requires group-wide clarification. Equal or overlapping
+intervals have no import/run-ID tie-breaker; a proven pair never implies a global
+newest lot. Offers and chronology reads never mutate lot state.
+
+New callers pass `expected_chronology_token` and `profile_version_id` to
+`close_lot`. The full usage snapshot, current sources/configuration, expected lot
+head or expected absence, reference binding and model/PDF checks are verified
+under `BEGIN IMMEDIATE`. Legacy direct callers may omit the chronology token;
+its current state is captured before the transaction and checked again inside.
+`expected_version_id=0` permits a direct first closed revision using empty stored
+SD references; no preliminary open revision or incidental reference confirmation
+occurs. Closure and exact PDF/model evidence are one atomic write. Analysis and
+rendering happen before the transaction; idempotent request intent stays checked.
 
 P5 adds these APIs without changing the five-table schema:
 
@@ -281,10 +336,34 @@ ID hashing, so the same numeric SD can be deliberately redeclared under a new
 unit. Existing by-ID references are copied exactly, never retrospectively
 modified. Supported archived v1 models retain their exact JSON/hash and PDF;
 no default context is injected into historical evidence. `QCAnalysis.is_supported`
-bounds display/render support to model version 1, known v1/v2 analysis IDs and
-known v1/v2 renderers. New models identify `arev2-qc-pdf-v2`; the current renderer
-can print supported archived v1 models without changing their JSON/hash.
+bounds display/render support to the four prior model-version-1 combinations of
+v1/v2 analysis and v1/v2 renderer, plus exactly model version 2 / analysis v3 /
+renderer v3, and exactly model version 3 / analysis v4 / renderer v4. New models freeze independent manufacturer/single-value percentage
+limits, point findings and exact `chart.reference_lines`; UI/PDF draw those values
+without recomputation. Percentage exceedance never changes statistical inclusion
+or Westgard run status. The current renderer can print supported archived v1
+models without changing their JSON/hash or retrofitting percentage lines.
 Export of original evidence remains independent.
+
+P4 (2026-11-13) adds frozen schema-3 fields without new public calls or database
+tables: per-level `descriptive` with availability/value/reason for mean,
+`sample_sd` (n-1), `cv_percent`, plus n and a fixed descriptive version; `period`
+with readable start/end dates and unknown-date count; per-point `position`,
+`measurement` (actual contiguous clock precision and raw counterpart), and
+`deviation.absolute` / `deviation.relative_percent`. Only already eligible
+values enter statistics; SD needs n>=2, CV positive mean, relative deviation
+positive SOLL. These empirical statistics never create a Westgard SD reference.
+Mean reference lines and findings summaries are frozen by QC, not calculated by
+UI/PDF. Literal schema-2/v3/v3 compatibility remains intact; old archive models
+are not enriched. The compact A4 standard renderer includes the primary right
+legend, measurements and important position-bound findings/exclusion reasons.
+Complete raw/source/validator evidence remains in the unchanged frozen model;
+the footer identifies that digital model. No JSON/raw-data attachment is added.
+`include_explanations=True` additionally prints the point-bound technical evidence,
+methods, references and full rule details; that optional print may use more pages.
+Explicit configured source grouping is the sole analytical-run label; technical
+result IDs remain labeled evidence identities. Missing source metadata is not
+inferred from the layout reference or other people fields.
 
 Use existing Application controllers for UI work:
 `SettingsController.get_qc_configuration`, `migrate_qc_devices`,
@@ -292,14 +371,21 @@ Use existing Application controllers for UI work:
 `get_qc_lot_detail`, `save_qc_lot`, `reopen_qc_lot`,
 `get_qc_analysis(detail, evidence_lot_version_id=None)`,
 `list_qc_report_versions(case)`, `list_qc_close_witnesses(detail)`,
-`close_qc_lot(detail, analysis_view, witness, operator_initials=..., request_id=...)`
+`prepare_qc_lot_close(detail) -> QCLotClosePreview`,
+`close_qc_lot(preview, operator_initials=..., request_id=...)`
 and `export_qc_report(case, evidence_lot_version_id=..., destination=..., include_explanations=False)`.
 `QCAnalysisView` carries canonical model/hash and optional archived evidence
 version/hash; `QCReportVersion` identifies a stored report revision. Current open
 analysis recaptures/rechecks sources. Closed or historical analysis loads only
 the stored model and checks lot ownership; unknown historical model versions
-fail explicitly rather than being silently recalculated. Close renders before
-the write lock, then uses the existing atomic closure API with captured tokens.
+fail explicitly rather than being silently recalculated. `QCLotCase` adds last-use
+and offer/clarification presentation; `QCLotDetail` adds the captured usage context
+and a live-source-change flag. Preparation is strictly read-only, binds the frozen
+analysis and actual verified PDF bytes/hash, and rechecks the complete context
+after rendering. Cancellation or late callbacks cannot publish. Final confirmation
+publishes only that preview through the existing atomic API; it performs no new
+PDF rendering. During the write, cancel/window-close are disabled. Closed lots
+retain an independent live-change notice beside their archived model view.
 The public DTOs `QCConfigurationState`, `QCLotCase`, `QCLotDetail` carry their inspected effective
 store. A store switch rejects mutations even when database-local IDs coincide.
 Errors are `QualityControlApplicationError`. Four controllers/services and seven

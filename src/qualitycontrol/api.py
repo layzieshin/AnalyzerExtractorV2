@@ -1,12 +1,12 @@
 """Public API for the single versioned QC/device authority."""
-from .model import MutationContext, QCAnalysis, QCPdfReport, QCConfigurationError, QCConflictError, QCReportError, QCStoreError, QualityControlError, content_hash
+from .model import MutationContext, QCAnalysis, QCUsageSnapshot, QCPdfReport, QCConfigurationError, QCConflictError, QCReportError, QCStoreError, QualityControlError, content_hash
 from .store import (
     close_lot, configure_lot, get_inventory, get_lot, get_report_evidence, get_status,
     legacy_device_source, list_lots, lot_identity, migrate_legacy_devices, open_lot, reopen_lot, save_inventory,
     resolve_store_path as validate_store_spec,
 )
 from .profiles import get_profile, list_profiles, save_profile
-from .sources import get_lot_sources
+from .sources import get_lot_sources, get_lot_chronology
 from .analysis import analyze_lot
 from .pdf_report import export_report_evidence, render_analysis_pdf
 
@@ -18,6 +18,7 @@ __all__ = [
     "lot_identity",
     "validate_store_spec",
     "QCAnalysis", "QCReportError", "analyze_lot",
+    "QCUsageSnapshot", "get_lot_chronology",
     "QCPdfReport", "export_report_evidence", "render_analysis_pdf",
     "get_sd_reference_context",
 ]

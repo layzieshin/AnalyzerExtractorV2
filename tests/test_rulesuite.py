@@ -3165,3 +3165,20 @@ def test_lifecycle_lock_blocks_activate_and_permanent_delete_without_file_change
     delete_never_active_ruleset(str(root), str(never))
     assert not never.exists()
     assert not lock_path.exists()
+
+
+@pytest.mark.parametrize("key", [r"..\..\outside", "../outside", r"C:\outside", "C:outside", r"\\host\share\outside",
+    "//host/share/outside", "/outside", r"\outside", "a\x00b", "..", "."])
+def test_r1_all_draft_creators_reject_path_like_keys_without_publishing(tmp_path, key):
+    root = _setup_project(tmp_path)
+    before = {str(path.relative_to(root)): path.read_bytes() for path in (root / "rules").rglob("*.json")}
+    with pytest.raises(RuleSuiteError, match="invalid_assay_key|outside_allowed"):
+        create_blank_draft(str(root), key, "Synthetic")
+    after = {str(path.relative_to(root)): path.read_bytes() for path in (root / "rules").rglob("*.json")}
+    assert after == before
+
+
+@pytest.mark.parametrize("key,filename", [("(abcd)", "abcd.draft.json"), ("FRESH", "FRESH.draft.json"), ("NEVER-1", "NEVER-1.draft.json")])
+def test_r1_legitimate_technical_keys_keep_existing_path_mapping(tmp_path, key, filename):
+    root = _setup_project(tmp_path)
+    assert Path(create_blank_draft(str(root), key, "Synthetic")).name == filename

@@ -15,7 +15,7 @@ from typing import Any
 from .model import CURRENT_ANALYSIS_ID, QCAnalysis, QCConfigurationError, canonical_json, content_hash, sd_parameter_definition
 
 ALGORITHM_ID = CURRENT_ANALYSIS_ID
-RENDERER_ID = "arev2-qc-pdf-v2"
+RENDERER_ID = "arev2-qc-pdf-v4"
 RULES = ("1_2s", "1_3s", "2_2s", "R_4s", "4_1s", "10x")
 MAX_MODEL_BYTES = 16 * 1024 * 1024
 MAX_POINTS = 50_000
@@ -64,6 +64,7 @@ def _precision(model: dict[str, Any], references: dict[str, Any]) -> int:
     longest = 1
     points = model["included"] + model["excluded"]
     values = [raw for point in points for raw in point.get("parsed", {}).values()]
+    values.extend(model["profile_snapshot"].get(key) for key in ("single_value_limit_percent", "relative_limit_percent"))
     for reference in references.values():
         if isinstance(reference, Mapping):
             values.append(reference.get("value"))
@@ -268,14 +269,119 @@ def _evaluate_runs(points: list[dict[str, Any]], controls: list[dict[str, Any]],
     return result
 
 
+def _series_limits(configuration, prepared, target, minima, maxima):
+    reasons = {reason for point in prepared for reason in point.get("reasons", [])}
+    manufacturer_reason = next((reason for reason in ("manufacturer_min_conflict", "manufacturer_max_conflict",
+        "manufacturer_limits_reversed", "min_invalid", "max_invalid") if reason in reasons), "eligible_values_missing")
+    manufacturer = {"available": len(minima) == len(maxima) == 1 and target is not None,
+                    "reason": manufacturer_reason, "lower": None, "upper": None}
+    if manufacturer["available"]:
+        manufacturer.update(reason="", lower=_text(next(iter(minima))), upper=_text(next(iter(maxima))))
+    enabled = configuration.get("single_value_limits_enabled", False)
+    single = {"enabled": enabled, "available": False, "reason": "not_configured", "percent": None, "lower": None, "upper": None}
+    if enabled:
+        percent = _decimal(configuration.get("single_value_limit_percent"))
+        if percent < 0:
+            raise QCConfigurationError("Die Einzelwert-Prozentgrenze darf nicht negativ sein.")
+        single.update(percent=_text(percent), reason="eligible_values_missing")
+        if target is not None:
+            lower, upper = target * (1 - percent / 100), target * (1 + percent / 100)
+            if lower > upper:
+                single["reason"] = "percentage_limits_reversed"
+            else:
+                single.update(available=True, reason="", lower=_text(lower), upper=_text(upper))
+    return {"manufacturer": manufacturer, "single_value": single}
+
+
+def _limit_finding(point, limit):
+    if not point["eligible"]:
+        return {"status": "unavailable", "reason": "point_ineligible", "direction": ""}
+    if not limit["available"]:
+        return {"status": "unavailable", "reason": limit["reason"], "direction": ""}
+    actual = point["_actual"]
+    direction = "below" if actual < _decimal(limit["lower"]) else ("above" if actual > _decimal(limit["upper"]) else "")
+    return {"status": "exceeded" if direction else "within_limit", "reason": "", "direction": direction}
+
+
+def _reference_lines(item):
+    # Frozen drawing order keeps the SOLL visible above the reference SD grid.
+    lines = [{"kind": "sd", "boundary": str(band["sd_multiple"]), "value": band["value"],
+              "label": f"{band['sd_multiple']:+d} SD"} for band in item["bands"]]
+    if item["qmma"].get("target") is not None:
+        lines.append({"kind": "target", "boundary": "target", "value": item["qmma"]["target"], "label": "SOLL"})
+    if item["descriptive"]["mean"]["available"]:
+        lines.append({"kind": "mean", "boundary": "mean", "value": item["descriptive"]["mean"]["value"], "label": "Mittelwert"})
+    for kind, label in (("manufacturer", "Hersteller"), ("single_value", "Einzelwert")):
+        limit = item["limits"][kind]
+        if limit["available"]:
+            for boundary, caption in (("lower", "MIN"), ("upper", "MAX")):
+                suffix = f" ({limit['percent']} %)" if kind == "single_value" else ""
+                lines.append({"kind": kind, "boundary": boundary, "value": limit[boundary], "label": f"{label} {caption}{suffix}"})
+    return lines
+
+
+def _metric(value=None, reason=""):
+    return {"available": value is not None, "value": _text(value) if value is not None else None, "reason": reason}
+
+
+def _descriptive(eligible):
+    n = len(eligible)
+    result = {"version": "qc-descriptive-v1", "n": n, "mean": _metric(reason="eligible_values_missing"),
+        "sample_sd": _metric(reason="sample_sd_requires_two_values"), "cv_percent": _metric(reason="sample_sd_requires_two_values")}
+    if not n:
+        return result
+    count = Decimal(n)
+    total = sum((point["_actual"] for point in eligible), Decimal(0))
+    mean = total / count
+    result["mean"] = _metric(mean)
+    if n >= 2:
+        squares = sum((point["_actual"] * point["_actual"] for point in eligible), Decimal(0))
+        sd = ((count * squares - total * total) / (count * (count - 1))).sqrt()
+        result["sample_sd"] = _metric(sd)
+        result["cv_percent"] = _metric(100 * sd / mean) if mean > 0 else _metric(reason="positive_mean_required")
+    return result
+
+
+def _observation_identity(point):
+    return tuple(point.get(key) for key in ("run_id", "revision_id", "selection_id", "selection_token", "source_hash"))
+
+
+def _measurement(point, configuration, original):
+    date_raw = original.get("measurement_date_raw", (original.get("raw_payload") or {}).get(configuration["measurement_date_field"]))
+    time_raw = original.get("measurement_time_raw")
+    measured = _date(point.get("measured_at"))
+    precision, date, time = "unknown", None, None
+    if measured is not None:
+        format_string = configuration.get("measurement_time_format") if configuration.get("measurement_time_field") else configuration["measurement_date_format"]
+        precision = "day"
+        for token, name in (("%H", "hours"), ("%M", "minutes"), ("%S", "seconds")):
+            if token not in format_string:
+                break
+            precision = name
+        date = measured.date().isoformat()
+        if precision != "day":
+            time = measured.time().isoformat(timespec=precision)
+    elif isinstance(date_raw, str):
+        try:
+            parsed = datetime.strptime(date_raw.strip(), configuration["measurement_date_format"])
+            if parsed.strftime(configuration["measurement_date_format"]) == date_raw.strip():
+                date, precision = parsed.date().isoformat(), "day"
+        except ValueError:
+            pass
+    return {"date": date, "time": time, "precision": precision, "date_raw": date_raw, "time_raw": time_raw}
+
+
 def _analyze(manifest: dict[str, Any], references: dict[str, Any], sd_context: dict[str, Any]) -> dict[str, Any]:
     configuration = manifest["profile_snapshot"]
     controls = configuration["controls"]
+    originals = defaultdict(list)
+    for source in manifest["population"]:
+        originals[_observation_identity(source)].append(source)
     all_points, series = [], []
     for control in controls:
         identifier = control["control_id"]
         source_points = [point for point in manifest["included"] + manifest["excluded"] if point["control_id"] == identifier]
-        prepared, actuals, targets, units = [], [], set(), set()
+        prepared, targets, units, minima, maxima = [], set(), set(), set(), set()
         for source in source_points:
             point = json.loads(canonical_json(source))
             point.update(point_key=_point_key(point), eligible=not bool(point.get("reasons")), z=None,
@@ -283,22 +389,44 @@ def _analyze(manifest: dict[str, Any], references: dict[str, Any], sd_context: d
             try:
                 actual = _decimal(point.get("parsed", {}).get("IST"))
                 target = _decimal(point.get("parsed", {}).get("SOLL"))
+                minimum = _decimal(point.get("parsed", {}).get("MIN"))
+                maximum = _decimal(point.get("parsed", {}).get("MAX"))
+                if minimum > maximum:
+                    point["eligible"] = False
+                    point["reasons"] = list(dict.fromkeys([*point.get("reasons", []), "manufacturer_limits_reversed"]))
                 if point["eligible"]:
-                    actuals.append(actual)
                     targets.add(target)
-                    units.add(str(point.get("unit_raw") or point.get("unit") or ""))
+                    minima.add(minimum)
+                    maxima.add(maximum)
+                    units.add(str(point.get("unit_raw") or point.get("unit") or "").strip())
                 point["_actual"], point["_target"] = actual, target
             except QCConfigurationError:
                 point["eligible"] = False
                 point["reasons"] = list(point.get("reasons", [])) + ["numeric_value_invalid"]
             prepared.append(point)
-        conflict = len(targets) > 1 or len(units) > 1 or (units and units != {control["unit"]})
-        if conflict:
+        conflict = len(targets) > 1 or len(units) > 1 or bool(units and units != {control["unit"]})
+        conflicts = (["target_or_unit_conflict"] if conflict else [])
+        conflicts += [reason for values, reason in ((minima, "manufacturer_min_conflict"), (maxima, "manufacturer_max_conflict")) if len(values) > 1]
+        if conflicts:
             for point in prepared:
                 point["eligible"] = False
-                point["reasons"] = list(point.get("reasons", [])) + ["target_or_unit_conflict"]
+                point["reasons"] = list(dict.fromkeys([*point.get("reasons", []), *conflicts]))
         eligible = [point for point in prepared if point["eligible"]]
-        target = next(iter(targets)) if len(targets) == 1 and not conflict else None
+        target = next(iter(targets)) if len(targets) == 1 and not conflicts else None
+        limits = _series_limits(configuration, prepared, target, minima, maxima)
+        for point in prepared:
+            point["limit_findings"] = {kind: _limit_finding(point, limit) for kind, limit in limits.items()}
+            absolute = abs(point["_actual"] - point["_target"]) if point["eligible"] else None
+            point["deviation"] = {"absolute": _metric(absolute, "" if point["eligible"] else "point_ineligible"),
+                "relative_percent": _metric(100 * absolute / point["_target"]) if point["eligible"] and point["_target"] > 0 else
+                    _metric(reason="positive_target_required" if point["eligible"] else "point_ineligible")}
+            matches = originals[_observation_identity(point)]
+            point["measurement"] = _measurement(point, configuration, matches[0] if len(matches) == 1 else {})
+        display_order = sorted(prepared, key=lambda point: (point["measurement"]["date"] or "~", point.get("measured_at") or "~", point["point_key"]))
+        for position, point in enumerate(display_order, 1):
+            point["position"] = position
+        dates = [point["measurement"]["date"] for point in prepared if point["measurement"]["date"]]
+        period = {"start_date": min(dates, default=None), "end_date": max(dates, default=None), "unknown_date_count": len(prepared) - len(dates)}
         qmma = {"available": False, "reason": "target_or_unit_conflict" if conflict else "eligible_values_missing", "value": None,
                 "relative_percent": None, "relative_reason": "positive_target_required", "limit_status": "unavailable", "n": len(eligible)}
         if eligible and target is not None:
@@ -348,28 +476,43 @@ def _analyze(manifest: dict[str, Any], references: dict[str, Any], sd_context: d
             center, sd = _decimal(reference["center"]), _decimal(reference["sd"])
             bands = [{"sd_multiple": multiple, "value": _text(center + multiple * sd)} for multiple in range(-3, 4)]
         series.append({"control_id": identifier, "control_name": control["name"], "unit": control["unit"], "qmma": qmma,
-                       "sd": computed_reference, "bands": bands, "segments": segments,
+                       "descriptive": _descriptive(eligible), "period": period,
+                       "sd": computed_reference, "bands": bands, "segments": segments, "limits": limits,
                        "point_keys": [point["point_key"] for point in prepared],
                        "included_count": len(eligible), "excluded_count": len(prepared) - len(eligible)})
         all_points.extend(prepared)
     runs = _evaluate_runs(all_points, controls, configuration["enabled_rules"])
     run_by_point = {key: run for run in runs for key in run["point_keys"]}
     for item in series:
+        own_points = [point for point in all_points if point["control_id"] == item["control_id"]]
+        own_keys = set(item["point_keys"])
+        own_runs = [run for run in runs if own_keys.intersection(run["point_keys"])]
+        item["findings_summary"] = {kind + "_exceeded_count": sum(point["limit_findings"][kind]["status"] == "exceeded" for point in own_points)
+            for kind in ("manufacturer", "single_value")}
+        item["findings_summary"].update(westgard_reject_count=sum(run["status"] == "reject" for run in own_runs),
+            westgard_warning_count=sum(run["status"] == "warning" for run in own_runs),
+            westgard_status="disabled" if not configuration["enabled_rules"] else ("reject" if any(run["status"] == "reject" for run in own_runs) else
+                ("warning" if any(run["status"] == "warning" for run in own_runs) else
+                ("unavailable" if not own_runs or any(run["status"] == "unavailable" for run in own_runs) else "no_rejection"))),
+            westgard_unavailable_reasons=sorted({finding["reason"] for run in own_runs for finding in run["findings"] if finding["status"] == "unavailable"}))
         selected = [point for point in all_points if point["control_id"] == item["control_id"] and point["eligible"] and point["_date"] is not None]
         chart_points = [{"point_key": point["point_key"], "x": point["chart_x"], "y": _text(point["_actual"]),
             "measured_at": point["measured_at"], "run_id": point["run_id"], "revision_id": point["revision_id"],
             "selection_id": point.get("selection_id"), "validation_id": point.get("validation_id"),
             "raw": point["raw"], "parsed": point["parsed"], "z": point["z"], "order_ambiguous": point["order_ambiguous"],
-            "run_status": run_by_point[point["point_key"]]["status"], "findings": run_by_point[point["point_key"]]["findings"]} for point in selected]
-        ys = [point["_actual"] for point in selected] + [_decimal(band["value"]) for band in item["bands"]]
-        if item["qmma"].get("target") is not None:
-            ys.append(_decimal(item["qmma"]["target"]))
+            "run_status": run_by_point[point["point_key"]]["status"], "findings": run_by_point[point["point_key"]]["findings"],
+            "limit_findings": point["limit_findings"]} for point in selected]
+        for point, frozen in zip(selected, chart_points):
+            frozen.update(position=point["position"], measurement=point["measurement"], deviation=point["deviation"])
+        reference_lines = _reference_lines(item)
+        ys = [point["_actual"] for point in selected] + [_decimal(line["value"]) for line in reference_lines]
         xs = [_decimal(point["chart_x"]) for point in selected]
         xlo, xhi = (min(xs), max(xs)) if xs else (Decimal(0), Decimal(1))
         ylo, yhi = (min(ys), max(ys)) if ys else (Decimal(0), Decimal(1))
         xpad = (xhi - xlo) / 20 if xhi != xlo else Decimal("0.5")
         ypad = (yhi - ylo) / 10 if yhi != ylo else max(abs(ylo) / 20, Decimal(1))
         item["chart"] = {"points": chart_points, "segments": item["segments"], "bands": item["bands"], "unit": item["unit"],
+                         "reference_lines": reference_lines,
                          "target": item["qmma"].get("target"), "x_range": [_text(xlo - xpad), _text(xhi + xpad)],
                          "y_range": [_text(ylo - ypad), _text(yhi + ypad)],
                          "x_label": "Extrahiertes Messdatum / Messzeit", "y_label": f"Messwert ({item['unit']})"}
@@ -377,7 +520,7 @@ def _analyze(manifest: dict[str, Any], references: dict[str, Any], sd_context: d
         point.pop("_actual", None)
         point.pop("_target", None)
         point.pop("_date", None)
-    return {"algorithm_id": ALGORITHM_ID, "renderer_id": RENDERER_ID, "analysis_model_version": 1,
+    return {"algorithm_id": ALGORITHM_ID, "renderer_id": RENDERER_ID, "analysis_model_version": 3,
             "source_manifest": manifest, "sd_references": references, "sd_reference_context": sd_context, "references": REFERENCES,
             "profile_reference": configuration.get("guideline_reference", ""),
             "human_validation": "captured_separately_in_source_manifest", "computed_series": series,
@@ -396,6 +539,8 @@ def analyze_lot(manifest: Mapping[str, Any], sd_references: Mapping[str, Any], *
     source = value["manifest"]
     try:
         token = source["source_token"]
+        if source.get("manifest_version") not in {"qc-sources-v1", "qc-sources-v2"}:
+            raise QCConfigurationError("Die Quellenmanifest-Fassung wird nicht unterstützt.")
         if content_hash({key: item for key, item in source.items() if key != "source_token"}) != token:
             raise QCConfigurationError("Die Prüfsumme des Quellenmanifests stimmt nicht.")
         if len(source["included"]) + len(source["excluded"]) > MAX_POINTS:
