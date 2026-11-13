@@ -1,14 +1,77 @@
 # Analyzer rebuild: execution and qualification record
 
-Status: **GATE_PASSED for final technical qualification: Statistics, source-manifest correction, full regression, fresh ZIP/EXE and visible PDF/Rule-Editor checks. Exact Git/merge/tag/release outcomes are recorded by the publication step in the PR and release provenance manifest. Human acceptance is separate.**
+Status: **Replacement technical qualification after the PR duplicate correction: GATE_PASSED. Exact Git/merge/tag/release outcomes belong to the separate publication step and release provenance. Human acceptance is separate.**
 Date: 2026-11-12; latest technical qualification: 2026-11-13. Implementation checkout: `I:\Projekte\AnalyzerResultExtractorV2`.
-HEAD: `5ae98ea9919215e5aea00232f215ae3f8c0dd1e2`, branch `master`.
+Current correction base: `5f4865978da54d5cc78098b7b9e1b759e538c9eb`, branch `codex/rebuild-v2.0.0`.
 This record preserves the full requested outcome, including final E2E, Windows
 EXE qualification, Git-steward review/improvements, merge and GitHub release.
 The approval record in section 8 authorizes the remaining contracts; execution
 and verification are recorded separately and unfinished work remains incomplete.
 
-### Final technical qualification (2026-11-13): GATE_PASSED
+## Post-push duplicate comparison correction checkpoint (2026-11-13)
+
+The user's authorization to implement review improvements covers the confirmed
+PR P2: the comparison kept original lot/payload while only its name followed the
+accepted revision. Following the full POSTPUSH-REWORK safety copy (copy 1 /
+comparison 0), the existing controller now captures one store and projects
+selected lot/payload/dedupe metadata through the existing ResultStore API.
+Original job/PDF provenance remains; pending newer revisions do not override
+the human selection. Both legacy/smoke consumers reuse this controller DTO and
+the existing presenter, including discard-cache handling. No API, persistence,
+schema, QC mathematics, PDF or rule-data change is involved.
+
+The public-API regression was RED before product edits (**1 failed, 2.61s**).
+The exact focused command in TESTBASELINE then passed **7 tests, 0 skips in
+4.06s**, using normal Windows rights, `-B`, bytecode disabled and fresh
+`.tmp/pytest-postpush-duplicate-20261113/green`. Original/revision/DB bytes and
+mtimes, selected dedupe metadata, 0/False/None, one-store capture, and both
+selection/discard routes are covered. Only the three consumer/controller files,
+two existing test files and these two gate docs changed. Freeze evidence:
+`.tmp/postpush-duplicate-freeze-audit-20261113.json`; protected files/current
+build outputs and previous audits remain unchanged against the fresh snapshot.
+Independent recheck and the parent's replacement full/build/visible
+qualification passed as recorded next. The writer ran no full suite/build/CUA/Git
+write; parent qualification is recorded separately.
+
+### Replacement technical qualification after PR correction: GATE_PASSED
+
+The sole independent reviewer returned GO, no findings: **7 passed, 0 skipped
+in 3.33s**. The canonical builder completed **1243 passed, 2 skipped in 416.84s**,
+then PyInstaller, bundled rules/structure checks and EXE startup. Skips: known
+Windows symlink privilege and one transient Tk library read error. The exact
+wizard test was subsequently rechecked: **2 passed, 0 skipped in 2.93s**, with
+no product/installation/environment repair and no repeated full suite.
+Log: `.tmp/final-postpush-duplicate-qualified-20261113.log`;
+Tk proof: `.tmp/final-postpush-tk-recheck-20261113.xml`.
+
+Replacement portable ZIP: **35,332,280 bytes / 720 entries**, SHA-256
+`e58175a053353e012ddeb382ba6f98fec08db7d73f92f2b2f6f00ccd0a635b8e`.
+EXE SHA-256: `a92658ba3592029b82894a46d1bb1c2f22bc29f5ed31e4947010f78978318d40`.
+All **197** raw product inputs match fingerprint
+`25c62844239fbc35c8e8a1cde4778a1985adb7638b716fd5abfd0d8ae18f0c52`.
+Fresh extraction, ZIP content/integrity and extracted EXE startup passed:
+`.tmp/p5-final-package-verification-20261112-5.json`.
+
+Actual extracted EXE: accepted L2/value 2 against candidate L2/value 2; equal
+0/False/empty values; selected dedupe metadata; original-job provenance; newer
+L3 remained pending. Statistics opened with selected L2. The EXE closed normally.
+The synthetic SQLite bytes, selected/original/history state and raw duplicate
+evidence stayed identical. Three screenshots and
+`.tmp/final-round5-visible-qualification-20261113.json` retain the proof.
+Earlier complete synthetic E2E and QC/PDF qualification are preserved; this
+correction changed no processing, persistence, QC mathematics or PDF code.
+
+Postbuild comparison: **12,524 protected files unchanged** outside the three
+authorized build targets, plus both nested local job files checked separately.
+No source exception was needed; `deploy_smoke` is preserved. Evidence:
+`.tmp/final-postpush-duplicate-release-protected-audit-20261113.json`.
+The preceding ZIP below is superseded for release and retained as evidence.
+Publication remains a separate authorized step; exact commit/actual merge/tag
+and asset identities belong to the PR/steward/release provenance. Human acceptance
+is separate. The documented sample-rule matrix remains 2 green / 0 yellow /
+9 red and does not qualify every supplied rule.
+
+### Predecessor technical qualification before PR correction (2026-11-13)
 
 Independent reviews: Statistics 50 passed / 0 skips / no findings; approved
 build-provenance correction 5 passed / 0 skips / no findings. The final canonical

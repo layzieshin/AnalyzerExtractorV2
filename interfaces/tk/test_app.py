@@ -17,7 +17,7 @@ from src.assaycandidate.api import (
     find_assay_candidates,
     load_known_assay_keys,
 )
-from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
+from src.dbwriter.api import discard_duplicate_candidate, list_duplicate_candidates
 from src.application.api import DesktopSettings, ResultsController
 from src.jobqueue.api import enqueue_pdf_job, list_jobs
 from src.processing.api import retry_failed
@@ -39,9 +39,7 @@ from src.testui.api import (
     default_result_columns,
     filter_rework_items,
     format_device_choice,
-    format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
-    format_duplicate_field_comparison,
     format_extractor_file_row,
     format_queue_job_row,
     format_result_run_detail,
@@ -1404,29 +1402,28 @@ class TestApp(tk.Tk):
         self._log(f"Duplikate geladen: {len(rows)}")
 
     def on_duplicate_selected(self, _event: object = None) -> None:
+        from dataclasses import asdict
+        from interfaces.tk.view_models import format_duplicate_detail_lines
+
         sel = self.tree_duplicates.selection()
         if not sel:
             return
         candidate_id = int(str(sel[0]))
-        detail = get_duplicate_candidate(str(self._sqlite_path()), candidate_id)
+        sqlite_path = self._sqlite_path()
+        controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+        detail = controller.get_duplicate_candidate_detail(candidate_id)
         if not detail:
             return
-        controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(self._sqlite_path())))
-        named = controller.get_duplicate_candidate_detail(candidate_id)
-        if named:
-            detail["candidate"]["assay_name"] = named.candidate.assay_name
-            if named.existing and detail.get("existing"):
-                detail["existing"]["assay_name"] = named.existing.assay_name
-        self._duplicate_details[candidate_id] = detail
-        self._set_text(self.txt_duplicate_detail, format_duplicate_candidate_detail(detail))
+        self._duplicate_details[candidate_id] = asdict(detail)
+        self._set_text(self.txt_duplicate_detail, format_duplicate_detail_lines(detail))
         for item in self.tree_duplicate_fields.get_children():
             self.tree_duplicate_fields.delete(item)
-        for idx, row in enumerate(format_duplicate_field_comparison(detail)):
+        for idx, row in enumerate(detail.field_comparison):
             self.tree_duplicate_fields.insert(
                 "",
                 tk.END,
                 iid=f"{candidate_id}:{idx}",
-                values=(row["field"], row["existing"], row["candidate"], row["same"]),
+                values=(row.field_key, row.existing_value, row.candidate_value, "Nein" if row.changed else "Ja"),
             )
 
     def discard_selected_duplicate(self) -> None:

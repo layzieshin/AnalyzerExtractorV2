@@ -685,17 +685,30 @@ class ResultsController:
         return [_to_duplicate_candidate_item(row) for row in _named_rows(rows, self._project_root)]
 
     def get_duplicate_candidate_detail(self, candidate_id: int) -> DuplicateCandidateDetail | None:
-        raw = get_duplicate_candidate(self._settings_provider().sqlite_path, int(candidate_id))
+        spec = self._capture_store()
+        raw = get_duplicate_candidate(spec["path"], int(candidate_id))
         if raw is None:
             return None
         candidate = raw.get("candidate")
         if not isinstance(candidate, dict):
             return None
         existing = raw.get("existing") if isinstance(raw.get("existing"), dict) else {}
-        if existing.get("run_id"):
-            selected = get_result_run(self._store_spec(), int(existing["run_id"]))
-            existing = {**existing, "_assay_name": _named_rows([selected], self._project_root)[0]["_assay_name"]} if selected else existing
         comparison = raw.get("field_comparison")
+        if existing.get("run_id"):
+            selected = get_result_run(spec, int(existing["run_id"]))
+            if selected:
+                existing = {
+                    **existing,
+                    **{key: selected[key] for key in ("lot_id", "dedupe_key", "dedupe_version", "dedupe_basis", "payload")},
+                    "_assay_name": _named_rows([selected], self._project_root)[0]["_assay_name"],
+                }
+                existing_payload, candidate_payload = existing["payload"], candidate.get("payload")
+                if isinstance(existing_payload, dict) and isinstance(candidate_payload, dict):
+                    comparison = [
+                        {"field": key, "existing": existing_payload.get(key), "candidate": candidate_payload.get(key),
+                         "same": existing_payload.get(key) == candidate_payload.get(key)}
+                        for key in sorted(set(existing_payload) | set(candidate_payload), key=str)
+                    ]
         return DuplicateCandidateDetail(
             candidate=_to_duplicate_candidate_item(_named_rows([candidate], self._project_root)[0]),
             existing=_to_duplicate_existing_run(existing),

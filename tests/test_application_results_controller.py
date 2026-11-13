@@ -739,6 +739,83 @@ def _duplicate_ruleset() -> "RuleSet":
     )
 
 
+def _accepted_alias_duplicate(root: Path):
+    from src.dbwriter.api import append_result_revision, write_record_sqlite
+    from src.extractor.api import AssayRecord
+    from src.resultstore.api import get_result_run
+    from test_result_revisions import _choose, _rule
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "selected-duplicate.sqlite3"
+    spec = {"driver": "sqlite", "path": str(path)}
+    rules = _rule("value")
+    original = {"value": "1", "zero": 0, "flag": False, "nullable": None}
+    selected = {**original, "value": "2"}
+    first = write_record_sqlite(AssayRecord("A", "L1", "original-key", original, "original-device"), rules,
+        str(path), job_id="original-job", pdf_sha256="a" * 64, assay_block_hash="b" * 64)
+    state = get_result_run(spec, first.run_id)
+    snapshot = {"assay_key": "A", "lot_id": "L2", "device_id": "original-device", "dedupe_key": "selected-key",
+        "dedupe_version": "v2", "dedupe_basis": {"device_id": "original-device"}, "payload": selected,
+        "ruleset_file": "A.json", "ruleset": rules.data, "rule_sha256": "c" * 64, "source_verified": True, "error": ""}
+    revision = append_result_revision(str(path), first.run_id, expected_selection_token=state["selection_token"],
+        request_id="accept-candidate", snapshot=snapshot, created_by="RR")
+    _choose(path, first.run_id, revision["revision_id"])
+    duplicate = write_record_sqlite(AssayRecord("A", "L2", "selected-key", selected, "original-device",
+        dedupe_version="v2", dedupe_basis={"device_id": "original-device"}), rules, str(path), job_id="duplicate-job",
+        pdf_sha256="d" * 64, assay_block_hash="e" * 64)
+    assert duplicate.status == "duplicate_pending" and duplicate.existing_run_id == first.run_id
+    return path, spec, first.run_id, duplicate.duplicate_candidate_id, snapshot
+
+
+def test_duplicate_detail_follows_accepted_projection_not_original_or_pending_and_never_writes(tmp_path):
+    import hashlib
+    from src.application.api import DesktopSettings
+    from src.dbwriter.api import append_result_revision
+    from src.resultstore.api import get_result_run
+    path, spec, run_id, candidate_id, snapshot = _accepted_alias_duplicate(tmp_path)
+    controller = ResultsController(tmp_path, settings_provider=lambda: DesktopSettings("sqlite", str(path)))
+    original = get_result_run(spec, run_id)["original_result"]
+    for pending in (False, True):
+        if pending:
+            state = get_result_run(spec, run_id)
+            append_result_revision(str(path), run_id, expected_selection_token=state["selection_token"], request_id="newer-pending",
+                snapshot={**snapshot, "lot_id": "L3", "dedupe_key": "pending-key", "payload": {**snapshot["payload"], "value": "3"}}, created_by="RR")
+        state = get_result_run(spec, run_id)
+        before = hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
+        detail = controller.get_duplicate_candidate_detail(candidate_id)
+        assert detail.existing.run_id == run_id and detail.existing.lot_id == detail.existing.charge == "L2"
+        assert detail.existing.job_id == original["job_id"] and detail.existing.pdf_path == original["pdf_path"]
+        assert detail.existing.created_at == original["created_at"]
+        assert detail.existing.dedupe_key == "selected-key" and detail.existing.dedupe_version == "v2"
+        assert detail.existing.dedupe_basis == snapshot["dedupe_basis"]
+        rows = {row.field_key: row for row in detail.field_comparison}
+        assert {key: (row.existing_value, row.candidate_value, row.changed) for key, row in rows.items()} == {
+            "value": ("2", "2", False), "zero": ("0", "0", False), "flag": ("False", "False", False), "nullable": ("", "", False)}
+        assert get_result_run(spec, run_id) == state and state["original_result"] == original
+        assert (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) == before
+
+
+def test_duplicate_detail_captures_one_store_with_same_ids_in_another_store(tmp_path):
+    import hashlib
+    from src.application.api import DesktopSettings
+
+    first, _, run_id, candidate_id, _ = _accepted_alias_duplicate(tmp_path / "first")
+    second, _, other_run_id, other_candidate_id, _ = _accepted_alias_duplicate(tmp_path / "second")
+    assert (run_id, candidate_id) == (other_run_id, other_candidate_id)
+    reads = []
+
+    def settings():
+        path = first if not reads else second
+        reads.append(path)
+        return DesktopSettings("sqlite", str(path))
+
+    before = [(hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) for path in (first, second)]
+    detail = ResultsController(tmp_path, settings_provider=settings).get_duplicate_candidate_detail(candidate_id)
+    assert reads == [first]
+    assert detail.existing.run_id == run_id and detail.existing.lot_id == "L2"
+    assert all(not field.changed for field in detail.field_comparison)
+    assert [(hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) for path in (first, second)] == before
+
+
 def test_duplicate_controller_list_detail_and_discard(tmp_path: Path) -> None:
     from src.dbwriter.api import write_record_sqlite
     from src.extractor.model import AssayRecord

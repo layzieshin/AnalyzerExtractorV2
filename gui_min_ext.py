@@ -8,7 +8,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
+from src.dbwriter.api import discard_duplicate_candidate, list_duplicate_candidates
 from src.application.api import DesktopSettings, ResultsController
 from src.jobcontroller.api import submit
 from src.ruleresolver.api import validate_rules_integrity
@@ -24,9 +24,7 @@ from src.testui.api import (
     classify_job_outcome,
     format_assay_data_detail,
     format_assay_overview_rows,
-    format_duplicate_candidate_detail,
     format_duplicate_candidate_summary,
-    format_duplicate_field_comparison,
     format_job_result_summary,
     format_partial_writes_note,
     format_rules_report,
@@ -516,38 +514,36 @@ class MinimalBatchGUI(tk.Tk):
         self._log(f"Duplikate geladen: status={status}, count={len(rows)}")
 
     def on_duplicate_selected(self, _event: object = None) -> None:
+        from dataclasses import asdict
+        from interfaces.tk.view_models import format_duplicate_detail_lines
+
         candidate_id = self._selected_duplicate_id()
         if candidate_id is None:
             return
         sqlite_path = self._duplicate_sqlite_path()
         try:
-            detail = get_duplicate_candidate(str(sqlite_path), candidate_id)
+            controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+            detail = controller.get_duplicate_candidate_detail(candidate_id)
         except Exception as e:
             messagebox.showerror("Duplikate", str(e))
             return
         if not detail:
             self._set_duplicate_detail("(kein Kandidat)")
             return
-        controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
-        named = controller.get_duplicate_candidate_detail(candidate_id)
-        if named:
-            detail["candidate"]["assay_name"] = named.candidate.assay_name
-            if named.existing and detail.get("existing"):
-                detail["existing"]["assay_name"] = named.existing.assay_name
-        self._duplicate_details[candidate_id] = detail
-        self._set_duplicate_detail(format_duplicate_candidate_detail(detail))
+        self._duplicate_details[candidate_id] = asdict(detail)
+        self._set_duplicate_detail(format_duplicate_detail_lines(detail))
         for row in self.tree_duplicate_fields.get_children():
             self.tree_duplicate_fields.delete(row)
-        for idx, cmp_row in enumerate(format_duplicate_field_comparison(detail)):
+        for idx, cmp_row in enumerate(detail.field_comparison):
             self.tree_duplicate_fields.insert(
                 "",
                 tk.END,
                 iid=f"{candidate_id}:{idx}",
                 values=(
-                    cmp_row.get("field", ""),
-                    cmp_row.get("existing", ""),
-                    cmp_row.get("candidate", ""),
-                    cmp_row.get("same", ""),
+                    cmp_row.field_key,
+                    cmp_row.existing_value,
+                    cmp_row.candidate_value,
+                    "Nein" if cmp_row.changed else "Ja",
                 ),
             )
 
@@ -558,8 +554,12 @@ class MinimalBatchGUI(tk.Tk):
             return
         detail = self._duplicate_details.get(candidate_id)
         if detail is None:
-            detail = get_duplicate_candidate(str(self._duplicate_sqlite_path()), candidate_id)
-            if detail:
+            from dataclasses import asdict
+            sqlite_path = self._duplicate_sqlite_path()
+            controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+            projected = controller.get_duplicate_candidate_detail(candidate_id)
+            if projected:
+                detail = asdict(projected)
                 self._duplicate_details[candidate_id] = detail
         candidate = detail.get("candidate") if isinstance(detail, dict) else None
         if not isinstance(candidate, dict) or candidate.get("status") != "pending":

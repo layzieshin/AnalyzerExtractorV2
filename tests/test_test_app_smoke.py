@@ -7,6 +7,71 @@ import pytest
 from interfaces.tk import test_app
 
 
+@pytest.mark.parametrize("adapter,clear_cache", [("legacy", False), ("smoke", False), ("smoke", True)])
+def test_duplicate_adapters_show_selected_projection_and_preserve_discard_cache(tmp_path, monkeypatch, adapter, clear_cache):
+    from types import SimpleNamespace
+    import gui_min_ext
+    from src.dbwriter.api import get_duplicate_candidate
+    from test_application_results_controller import _accepted_alias_duplicate
+
+    path, _, run_id, candidate_id, _ = _accepted_alias_duplicate(tmp_path)
+
+    class Tree:
+        def __init__(self):
+            self.rows = {}
+
+        def selection(self):
+            return (str(candidate_id),)
+
+        def get_children(self):
+            return tuple(self.rows)
+
+        def delete(self, iid):
+            del self.rows[iid]
+
+        def insert(self, parent, index, *, iid, values):
+            self.rows[iid] = values
+
+    texts, refreshes, path_reads = [], [], []
+
+    def sqlite_path():
+        path_reads.append(path)
+        return path
+
+    host = SimpleNamespace(project_root=tmp_path, tree_duplicates=Tree(), tree_duplicate_fields=Tree(),
+        _duplicate_details={}, _sqlite_path=sqlite_path, _duplicate_sqlite_path=sqlite_path,
+        txt_duplicate_detail=object(), _set_text=lambda widget, text: texts.append(text),
+        _set_duplicate_detail=texts.append, _log=lambda text: None,
+        refresh_duplicates=lambda: refreshes.append(True), on_refresh_duplicates=lambda: refreshes.append(True))
+    host._selected_duplicate_id = lambda: gui_min_ext.MinimalBatchGUI._selected_duplicate_id(host)
+    module = test_app if adapter == "legacy" else gui_min_ext
+    cls = test_app.LegacyTestApp if adapter == "legacy" else gui_min_ext.MinimalBatchGUI
+    monkeypatch.setattr(module.messagebox, "showerror", lambda *args: pytest.fail(str(args)))
+    monkeypatch.setattr(module.messagebox, "showinfo", lambda *args: pytest.fail(str(args)))
+    monkeypatch.setattr(module.messagebox, "askyesno", lambda *args: True)
+    monkeypatch.setattr(gui_min_ext.simpledialog, "askstring", lambda *args, **kwargs: "")
+
+    cls.on_duplicate_selected(host)
+    assert path_reads == [path]
+    assert "Lot: L2" in texts[-1] and "Charge: L2" in texts[-1] and "Dedupe-Key: selected-key" in texts[-1]
+    assert "Lot: L1" not in texts[-1]
+    rows = {values[0]: values[1:] for values in host.tree_duplicate_fields.rows.values()}
+    assert rows == {"value": ("2", "2", "Ja"), "zero": ("0", "0", "Ja"),
+                    "flag": ("False", "False", "Ja"), "nullable": ("", "", "Ja")}
+    assert set(host.tree_duplicate_fields.rows) == {f"{candidate_id}:{index}" for index in range(4)}
+    cached = host._duplicate_details[candidate_id]
+    assert cached["candidate"]["status"] == "pending" and cached["existing"]["run_id"] == run_id
+    assert cached["existing"]["lot_id"] == "L2"
+    if clear_cache:
+        host._duplicate_details.clear()
+    if adapter == "legacy":
+        cls.discard_selected_duplicate(host)
+    else:
+        cls.on_discard_duplicate_candidate(host)
+    assert refreshes == [True]
+    assert get_duplicate_candidate(str(path), candidate_id)["candidate"]["status"] == "deleted"
+
+
 def test_test_app_sections_are_defined() -> None:
     assert test_app.BASE_SECTION_KEYS == (
         "EXTRACTOR",
