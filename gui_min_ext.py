@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
+from src.application.api import DesktopSettings, ResultsController
 from src.jobcontroller.api import submit
 from src.ruleresolver.api import validate_rules_integrity
 from src.rulesuite.api import activate_draft, create_draft, list_fields, preview_extract, set_field_regex
@@ -97,7 +98,7 @@ class MinimalBatchGUI(tk.Tk):
         row.pack(fill="x", padx=8, pady=6)
 
         tk.Label(row, text="output_mode").pack(side="left")
-        dd_mode = tk.OptionMenu(row, self.var_output_mode, "both", "excel", "sqlite")
+        dd_mode = tk.OptionMenu(row, self.var_output_mode, "sqlite")
         dd_mode.pack(side="left", padx=(4, 8))
         self._register_action(dd_mode)
 
@@ -215,7 +216,7 @@ class MinimalBatchGUI(tk.Tk):
             height=4,
         )
         for col, title, width in (
-            ("assay_key", "Assay", 110),
+            ("assay_key", "Assay", 260),
             ("lot_id", "Lot", 80),
             ("ruleset", "Ruleset", 140),
             ("missing", "Missing", 90),
@@ -487,7 +488,9 @@ class MinimalBatchGUI(tk.Tk):
             return
         status = self.var_duplicate_status.get().strip() or "pending"
         try:
-            rows = list_duplicate_candidates(str(sqlite_path), status=status)
+            from dataclasses import asdict
+            controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+            rows = [asdict(row) for row in controller.list_duplicate_candidates(status=status)]
         except Exception as e:
             messagebox.showerror("Duplikate", str(e))
             return
@@ -503,7 +506,7 @@ class MinimalBatchGUI(tk.Tk):
                 values=(
                     summary.get("candidate_id", ""),
                     summary.get("status", ""),
-                    summary.get("assay_key", ""),
+                    summary.get("assay_name", "Assayname fehlt"),
                     summary.get("device_id", ""),
                     summary.get("detected_at", ""),
                     summary.get("existing_run_id", ""),
@@ -525,6 +528,12 @@ class MinimalBatchGUI(tk.Tk):
         if not detail:
             self._set_duplicate_detail("(kein Kandidat)")
             return
+        controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+        named = controller.get_duplicate_candidate_detail(candidate_id)
+        if named:
+            detail["candidate"]["assay_name"] = named.candidate.assay_name
+            if named.existing and detail.get("existing"):
+                detail["existing"]["assay_name"] = named.existing.assay_name
         self._duplicate_details[candidate_id] = detail
         self._set_duplicate_detail(format_duplicate_candidate_detail(detail))
         for row in self.tree_duplicate_fields.get_children():
@@ -581,9 +590,10 @@ class MinimalBatchGUI(tk.Tk):
 
     def _refresh_device_choices(self, *, log: bool = True) -> None:
         root = self._root_path()
-        devices = list_devices(root)
-        default_id = get_default_device_id(root)
-        status = get_device_config_status(root)
+        spec = {"driver": "sqlite", "path": str(self._duplicate_sqlite_path())}
+        devices = list_devices(root, store_spec=spec)
+        default_id = get_default_device_id(root, store_spec=spec)
+        status = get_device_config_status(root, store_spec=spec)
         self._device_choice_to_id = {}
         menu = self.device_menu["menu"]
         menu.delete(0, "end")
@@ -659,7 +669,7 @@ class MinimalBatchGUI(tk.Tk):
 
     def _read_submit_config(self) -> dict:
         return {
-            "output_mode": self.var_output_mode.get().strip() or "both",
+            "output_mode": "sqlite",
             "sqlite_path": self.var_sqlite_path.get().strip() or None,
             "lock_ttl_s": float(self.var_lock_ttl.get().strip() or "900"),
             "sqlite_busy_timeout_ms": int(self.var_sqlite_busy_timeout.get().strip() or "5000"),
@@ -798,7 +808,7 @@ class MinimalBatchGUI(tk.Tk):
                 tk.END,
                 iid=f"{storage_key}:{idx}",
                 values=(
-                    overview.get("assay_key", ""),
+                    overview.get("assay_display_label", "Assayname fehlt"),
                     overview.get("lot_id", ""),
                     overview.get("ruleset_file", ""),
                     overview.get("missing_required", ""),

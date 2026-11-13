@@ -9,6 +9,74 @@ import pytest
 from src.application.api import PathOpenError, ReportNotFoundError, ResultsController, create_desktop_services
 
 
+def test_assay_names_follow_selected_original_then_job_evidence_and_catalog(tmp_path, monkeypatch):
+    import copy
+    from types import SimpleNamespace
+    import src.application.results_controller as owner
+    rows = [
+        {"id": 1, "assay_key": "same", "revision_id": 2, "source_provenance": {"ruleset": {"assay_name": "Original"}},
+         "result_revisions": [{"revision_id": 2, "result": {"ruleset": {"assay_name": "Gewählter Vollname"}}}],
+         "pending_revision": {"result": {"ruleset": {"assay_name": "Offener Kandidat"}}}},
+        {"id": 2, "assay_key": "same", "source_provenance": {"ruleset": {"assay_name": "Original"}}},
+        {"id": 3, "assay_key": "same", "job_id": "job"},
+        {"id": 4, "assay_key": "catalog"}, {"id": 5, "assay_key": "missing"},
+    ]
+    before = copy.deepcopy(rows)
+    monkeypatch.setattr(owner, "list_result_runs", lambda *args, **kwargs: {"runs": rows, "limit": 500})
+    monkeypatch.setattr(owner, "get_job_evidence", lambda *args: SimpleNamespace(state_available=True, steps=[
+        {"writes": [{"assay_key": "same", "assay_name": "Gespeicherter Writername"}]},
+        {"assays": [{"assay_key": "same", "assay_name": "Splittername"}]}]))
+    catalog_kinds = []
+    monkeypatch.setattr(owner.RuleSuiteController, "list_inventory", lambda self, kind: catalog_kinds.append(kind) or
+        [SimpleNamespace(assay_key="catalog", assay_name="Katalogvollname")])
+    controller = ResultsController(tmp_path, settings_provider=lambda: SimpleNamespace(sqlite_path=str(tmp_path / "db")))
+    listed = controller.list_runs().runs
+    assert [row.assay_name for row in listed] == ["Gewählter Vollname", "Original", "Gespeicherter Writername", "Katalogvollname", "Assayname fehlt"]
+    assert [row.assay_key for row in listed] == ["same", "same", "same", "catalog", "missing"]
+    assert rows == before
+    assert catalog_kinds == ["active"]
+
+
+@pytest.mark.parametrize("writes,assays,expected", [
+    (None, None, "Assay A"),
+    (42, 0, "Assay A"),
+    ({}, {"assay_key": "(1111)", "assay_name": "Kein Listeneintrag"}, "Assay A"),
+    ("kein Array", "auch kein Array", "Assay A"),
+    (True, False, "Assay A"),
+    ([None, 7, "kein Objekt", [], {"assay_key": "(1111)", "assay_name": 99},
+      {"assay_key": "(1111)", "assay_name": []}], [], "Assay A"),
+    (None, [{"assay_key": "(1111)", "assay_name": "Splitterbeleg"}], "Splitterbeleg"),
+    ([None, {"assay_key": "(1111)", "assay_name": " Writerbeleg "}],
+     [{"assay_key": "(1111)", "assay_name": "Splitterbeleg"}], "Writerbeleg"),
+    ([{"assay_key": "anderer Assay", "assay_name": "Fremder Name"}],
+     [False, {"assay_key": "(1111)", "assay_name": None}, {"assay_key": "(1111)", "assay_name": "Splitterbeleg"}], "Splitterbeleg"),
+    ([{"assay_key": "(1111)", "assay_name": " "}], [None, "kein Objekt"], "Assay A"),
+])
+def test_real_job_name_evidence_ignores_unusable_shapes_and_preserves_result_errors(tmp_path, writes, assays, expected):
+    from src.application.api import DesktopSettings
+    from src.jobcontroller.api import get_job_evidence
+    from test_application_rules_controller import _setup_project
+    root = _setup_project(tmp_path)
+    database = root / "runs.sqlite3"
+    _create_runs_db(database)
+    jobs = root / "jobs"
+    jobs.mkdir()
+    for job_id in ("job1", "job2"):
+        (jobs / f"{job_id}.json").write_text(json.dumps({"job_id": job_id, "status": "DONE",
+            "steps": [None, {"step": "writer", "writes": writes}, {"step": "splitter", "assays": assays}]}), encoding="utf-8")
+    paths = [database, *jobs.glob("*.json"), *(root / "rules").rglob("*.json")]
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+    evidence = get_job_evidence(root, "job1")
+    assert evidence.state_available and evidence.steps[0]["writes"] == writes
+    controller = ResultsController(root, settings_provider=lambda: DesktopSettings("sqlite", str(database)))
+    runs = controller.list_runs().runs
+    by_id = {row.id: row for row in runs}
+    assert by_id[1].assay_name == expected
+    assert by_id[2].assay_name == "Assayname fehlt"
+    assert by_id[2].payload_parse_error and by_id[1].assay_key == "(1111)"
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths} == before
+
+
 def _create_runs_db(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -568,7 +636,7 @@ def test_report_status_job_id_without_queue_or_ledger_is_unknown(tmp_path: Path)
     assert report.display_status == "Unbekannt"
 
 
-def test_report_open_uses_archived_current_path(tmp_path: Path) -> None:
+def test_report_open_uses_archived_current_path(tmp_path: Path, monkeypatch) -> None:
     import json
 
     from src.ingestion.api import SOURCE_MANUAL, register_import
@@ -614,6 +682,10 @@ def test_report_open_uses_archived_current_path(tmp_path: Path) -> None:
     controller = ResultsController(root, settings_provider=services.settings.load, path_opener=fake_opener)
     opened_path = controller.open_report_pdf(report.report_id)
     assert opened == [str(archived.resolve(strict=False))]
+    rendered = []
+    monkeypatch.setattr("src.application.results_controller.render_pdf_page", lambda *args, **kwargs: rendered.append((args, kwargs)) or "page")
+    assert controller.render_report_pdf_page(report.report_id, page_index=1, zoom=1.5) == "page"
+    assert rendered == [((report.report_id, str(archived.resolve(strict=False))), {"page_index": 1, "zoom": 1.5})]
 
 
 def test_report_ambiguous_path_blocks_open(tmp_path: Path) -> None:
@@ -651,6 +723,10 @@ def test_report_ambiguous_path_blocks_open(tmp_path: Path) -> None:
     assert detail.archive_status == ""
     with pytest.raises(PathOpenError, match="report_pdf_ambiguous"):
         services.results.open_report_pdf(report.report_id)
+    from src.application.api import PdfPreviewError
+
+    with pytest.raises(PdfPreviewError, match="nicht eindeutig"):
+        services.results.render_report_pdf_page(report.report_id)
 
 
 def _duplicate_ruleset() -> "RuleSet":
@@ -961,6 +1037,8 @@ def test_open_validation_cases_exclude_nonterminal_processing(
 
 def test_failed_processing_status_dominates_validation(tmp_path: Path) -> None:
     from src.jobqueue.api import claim_next_job, enqueue_pdf_job, mark_job_failed
+    from src.application.api import ValidationConflictError
+    from src.resultvalidation.api import validate_run
 
     root = tmp_path / "proj"
     root.mkdir()
@@ -974,7 +1052,11 @@ def test_failed_processing_status_dominates_validation(tmp_path: Path) -> None:
     _create_runs_db_with_pdf(db, str(pdf), job_id=job.job_id)
     services = _configure_results_services(root, db)
     report = services.results.list_recent_reports(limit=1)[0]
-    services.results.validate_report_run(report.report_id, 1, "AB")
+    # Retained legacy metadata can predate the current processing failure. New
+    # validation through the application is now explicitly forbidden here.
+    validate_run({"path": str(db)}, 1, "AB")
+    with pytest.raises(ValidationConflictError, match="DONE"):
+        services.results.validate_report_run(report.report_id, 1, "AB")
     refreshed = services.results.list_recent_reports(limit=1)[0]
     assert refreshed.display_status == "Verarbeitung fehlgeschlagen"
     assert refreshed.validation_status == "Validiert"
@@ -1023,10 +1105,11 @@ def test_validate_does_not_cross_reports_or_overwrite(tmp_path: Path) -> None:
     assert occurrence.validation_history[0].comment == "erste"
 
 
-def test_validation_is_persisted_before_excel_release_failure(
+def test_validation_and_correction_persist_without_excel_or_job_plan_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from src.jobcontroller.api import JobResult
+    import hashlib
+    from openpyxl import Workbook
 
     root = tmp_path / "proj"
     root.mkdir()
@@ -1034,19 +1117,42 @@ def test_validation_is_persisted_before_excel_release_failure(
     _create_runs_db(db)
     services = _configure_results_services(root, db)
     report = {item.job_id: item for item in services.results.list_recent_reports()}["job1"]
+    workbook = root / "existing.xlsx"
+    Workbook().save(workbook)
+    plan = root / "jobs" / "job1.json"
+    plan.parent.mkdir(exist_ok=True)
+    plan.write_text(json.dumps({"status": "DONE", "output_plan": {"version": 2, "output_mode": "both"}}), encoding="utf-8")
+    def snapshot(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
+    before = {path: snapshot(path) for path in (workbook, plan)}
+    with sqlite3.connect(db) as conn:
+        runs_before = conn.execute("SELECT * FROM runs ORDER BY id").fetchall()
+    calls = []
+    def forbidden(*_args, **_kwargs):
+        calls.append("called")
+        raise AssertionError("validation must not invoke any Excel release or writer")
+    monkeypatch.setattr("src.jobcontroller.api.release_validated_run", forbidden)
+    monkeypatch.setattr("src.jobcontroller.jobcontroller.JobController.release_validated_run", forbidden)
+    monkeypatch.setattr("src.writer.api.write_record", forbidden)
+    monkeypatch.setattr("src.writer.api.update_validation_metadata", forbidden)
 
-    def fail_release(_root, job_id, run_id, **kwargs):
-        with sqlite3.connect(db) as conn:
-            stored = conn.execute("SELECT operator_initials FROM run_validations WHERE run_id = 1").fetchone()
-        assert stored == ("AB",)
-        assert job_id == "job1"
-        assert run_id == 1
-        assert kwargs["correction"] is False
-        return JobResult(job_id=job_id, pdf_path="", status="FAILED", details={"error": "excel_write_failed_after_validation:(1111):locked"})
-
-    monkeypatch.setattr("src.application.results_controller.release_validated_run", fail_release)
-    saved = services.results.validate_report_run(report.report_id, 1, "AB")
+    saved = services.results.validate_report_run(report.report_id, 1, "AB", "first")
+    corrected = services.results.correct_report_run(report.report_id, 1, "CD", "correction")
     assert saved.operator_initials == "AB"
-    assert saved.excel_export_status == "failed"
-    assert saved.excel_export_error.startswith("excel_write_failed_after_validation:")
+    assert corrected.operator_initials == "CD"
+    assert corrected.supersedes_validation_id == saved.validation_id
+    assert saved.excel_export_status == corrected.excel_export_status == "not_required"
+    assert saved.excel_export_error == corrected.excel_export_error == ""
     assert services.results.list_open_validation_cases() == []
+    restarted = _configure_results_services(root, db)
+    detail = restarted.results.get_report_detail(report.report_id)
+    occurrence = detail.assay_groups[0].occurrences[0]
+    assert occurrence.current_validation.validation_id == corrected.validation_id
+    assert [item.validation_id for item in occurrence.validation_history] == [saved.validation_id, corrected.validation_id]
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT * FROM runs ORDER BY id").fetchall() == runs_before
+        assert conn.execute("SELECT COUNT(*) FROM run_validations WHERE run_id = 1").fetchone()[0] == 2
+    assert {path: snapshot(path) for path in before} == before
+    assert list(root.rglob("*.xlsx")) == [workbook]
+    assert list(root.rglob("*.tmp")) == list(root.rglob("*.lock")) == []
+    assert calls == []

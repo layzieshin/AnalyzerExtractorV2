@@ -44,6 +44,7 @@ EXPECTED_PHASE3_UI_FILES = frozenset(
         "interfaces/tk/views/dashboard_view.py",
         "interfaces/tk/views/diagnostics_view.py",
         "interfaces/tk/views/results_view.py",
+        "interfaces/tk/views/statistics_view.py",
         "interfaces/tk/views/rules_view.py",
         "interfaces/tk/views/settings_view.py",
         "interfaces/tk/views/validation_view.py",
@@ -84,6 +85,7 @@ CONTROLLER_API_ALLOWLIST = {
             "src.dbwriter.api",
             "src.jobqueue.api",
             "src.jobcontroller.api",
+            "src.qualitycontrol.api",
         }
     ),
     "src/application/rules_controller.py": frozenset(
@@ -97,7 +99,7 @@ CONTROLLER_API_ALLOWLIST = {
             "src.contentsplitter.api",
         }
     ),
-    "src/application/settings_controller.py": frozenset({"src.runtime.api"}),
+    "src/application/settings_controller.py": frozenset({"src.runtime.api", "src.qualitycontrol.api"}),
 }
 PROCESSING_ALLOWED_SRC_APIS = frozenset(
     {"src.jobqueue.api", "src.jobcontroller.api", "src.runtime.api", "src.ingestion.api"}
@@ -593,6 +595,21 @@ def test_application_public_api_has_no_tkinter_names() -> None:
             if token.lower() in source:
                 offenders.append(f"{rel_path}: {token}")
     assert offenders == []
+
+
+def test_pdf_preview_mupdf_import_is_confined_to_spawn_target() -> None:
+    """The threaded desktop must never import/use MuPDF in a preview caller."""
+    preview_path = APPLICATION_ROOT / "pdf_preview.py"
+    source = _read_python_source(preview_path)
+    tree = ast.parse(source)
+    worker = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_render_pdf_worker")
+    worker_nodes = set(ast.walk(worker))
+    imports = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)) and any(name.startswith(("fitz", "pymupdf")) for name in ([alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ""]))]
+    assert imports and all(node in worker_nodes for node in imports)
+    for rel_path in _files_under(APPLICATION_ROOT) + _view_files_to_scan():
+        if rel_path.replace("\\", "/") == "src/application/pdf_preview.py":
+            continue
+        assert not any(module.split(".")[0] in {"fitz", "pymupdf"} for module in _module_imports_in_file(rel_path)), rel_path
 
 
 def test_phase3_ui_files_exact_inventory() -> None:

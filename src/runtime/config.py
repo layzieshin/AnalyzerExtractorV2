@@ -1,16 +1,49 @@
 from __future__ import annotations
 
 import os
+import json
+import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 
+# Accepted compatibility inputs. Every effective configuration is SQLite-only.
 VALID_OUTPUT_MODES = {"both", "excel", "sqlite"}
+
+
+def get_build_info() -> dict[str, object]:
+    """Product identity comes from code/EXE, never from the ARE_HOME data root.
+
+    Runtime does not invoke Git or scan/hash product trees. The builder supplies
+    frozen metadata; source execution reads the one declared project version.
+    """
+    frozen = bool(getattr(sys, "frozen", False))
+    try:
+        if frozen:
+            path = Path(sys.executable).resolve().parent / "build-info.json"
+            if path.stat().st_size > 2 * 1024 * 1024:
+                raise ValueError("build metadata too large")
+            info = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(info, dict) or not isinstance(info.get("version"), str) or not info["version"].strip():
+                raise ValueError("invalid build version")
+            return {**info, "mode": "frozen", "status": "available"}
+        path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+        version = payload["project"]["version"]
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError("invalid source version")
+        return {"version": version, "product": "AnalyzerResultExtractorV2", "mode": "source", "status": "available",
+                "base_commit": "UNAVAILABLE", "dirty_snapshot": None, "source_tree_fingerprint": "", "built_at_utc": ""}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"version": "UNKNOWN", "product": "AnalyzerResultExtractorV2", "mode": "frozen" if frozen else "source",
+                "status": "unavailable", "base_commit": "UNAVAILABLE", "dirty_snapshot": None,
+                "source_tree_fingerprint": "", "built_at_utc": ""}
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    output_mode: str = "both"
+    output_mode: str = "sqlite"
     sqlite_path: str | None = None
     watch_dir: str | None = None
     device_id: str | None = None
@@ -25,20 +58,23 @@ class RuntimeConfig:
     sqlite_retry_count: int = 3
     sqlite_retry_sleep_s: float = 0.2
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "output_mode", "sqlite")
+
     @property
     def enable_excel(self) -> bool:
-        return self.output_mode in ("both", "excel")
+        return False
 
     @property
     def enable_sqlite(self) -> bool:
-        return self.output_mode in ("both", "sqlite")
+        return True
 
 
 def load_runtime_config(project_root: str | Path) -> RuntimeConfig:
     root = Path(project_root)
-    output_mode = os.getenv("ARE_OUTPUT_MODE", "both").strip().lower()
-    if output_mode not in VALID_OUTPUT_MODES:
-        output_mode = "both"
+    # Legacy ARE_OUTPUT_MODE values (and invalid environment values) safely
+    # resolve to SQLite; loading never rewrites persisted user settings.
+    output_mode = "sqlite"
 
     sqlite_path = os.getenv("ARE_SQLITE_PATH", "").strip() or str(root / "output" / "final" / "results.sqlite3")
     watch_dir = os.getenv("ARE_WATCH_DIR", "").strip() or str(root / "input" / "watch")

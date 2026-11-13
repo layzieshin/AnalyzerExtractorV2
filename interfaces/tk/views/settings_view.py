@@ -19,6 +19,9 @@ class SettingsView(ttk.Frame):
         on_pick_sqlite: Callable[[], None],
         on_reload_devices: Callable[[], None],
         on_open_output_folder: Callable[[], None],
+        on_manage_devices: Callable[[], None] | None = None,
+        on_migrate_devices: Callable[[], None] | None = None,
+        on_manage_profiles: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master, style="Content.TFrame")
         self._on_save = on_save
@@ -27,6 +30,9 @@ class SettingsView(ttk.Frame):
         self._on_pick_sqlite = on_pick_sqlite
         self._on_reload_devices = on_reload_devices
         self._on_open_output_folder = on_open_output_folder
+        self._on_manage_devices = on_manage_devices or (lambda: None)
+        self._on_migrate_devices = on_migrate_devices or (lambda: None)
+        self._on_manage_profiles = on_manage_profiles or (lambda: None)
         self._edit_generation = 0
         self._clean_generation = 0
         self._suppress_dirty = False
@@ -36,7 +42,17 @@ class SettingsView(ttk.Frame):
     def _build(self) -> None:
         card = Card(self)
         card.pack(fill="both", expand=True)
-        body = card.body
+        footer = ttk.Frame(card.body, style="CardInner.TFrame")
+        footer.pack(side="bottom", fill="x", pady=(6, 0))
+        scroll = ttk.Scrollbar(card.body, orient="vertical")
+        scroll.pack(side="right", fill="y")
+        self._settings_canvas = tk.Canvas(card.body, highlightthickness=0, yscrollcommand=scroll.set)
+        self._settings_canvas.pack(fill="both", expand=True)
+        scroll.configure(command=self._settings_canvas.yview)
+        body = ttk.Frame(self._settings_canvas, style="CardInner.TFrame")
+        window = self._settings_canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda _event: self._settings_canvas.configure(scrollregion=self._settings_canvas.bbox("all")))
+        self._settings_canvas.bind("<Configure>", lambda event: self._settings_canvas.itemconfigure(window, width=event.width))
         SectionHeader(body, "Einstellungen", subtitle="Konfiguration für Import, Ausgabe und Geräte.").pack(
             fill="x", pady=(0, 12)
         )
@@ -63,15 +79,9 @@ class SettingsView(ttk.Frame):
             anchor="w", pady=(4, 8)
         )
 
-        self._var_excel_after_validation = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            body,
-            text="Excel nach Validierung erzeugen",
-            variable=self._var_excel_after_validation,
-        ).pack(anchor="w", pady=4)
         ttk.Label(
             body,
-            text="SQLite wird immer gespeichert. Excel wird erst nach menschlicher Validierung freigegeben.",
+            text="Ergebnisse und Validierungen werden in SQLite gespeichert. Das Original-PDF dient zur Prüfung.",
             style="Muted.TLabel",
         ).pack(anchor="w")
 
@@ -82,6 +92,11 @@ class SettingsView(ttk.Frame):
         self._device_combo = ttk.Combobox(row_device, textvariable=self._var_device, state="readonly", width=40)
         self._device_combo.pack(side="left", padx=8)
         ttk.Button(row_device, text="Neu laden", command=self._on_reload_devices).pack(side="left")
+        management = ttk.Frame(body, style="CardInner.TFrame")
+        management.pack(fill="x", pady=(4, 6))
+        ttk.Button(management, text="Geräte verwalten", command=self._on_manage_devices).pack(side="left")
+        ttk.Button(management, text="Geräte übernehmen", command=self._on_migrate_devices).pack(side="left", padx=6)
+        ttk.Button(management, text="Prüfprofile verwalten", command=self._on_manage_profiles).pack(side="left")
 
         row_initials = ttk.Frame(body, style="CardInner.TFrame")
         row_initials.pack(fill="x", pady=(8, 4))
@@ -109,7 +124,8 @@ class SettingsView(ttk.Frame):
 
         self._lbl_status = ttk.Label(body, text="", style="Muted.TLabel", wraplength=640)
         self._lbl_status.pack(anchor="w", pady=(4, 8))
-        ttk.Button(body, text="Speichern", style="Primary.TButton", command=self._on_save).pack(anchor="w")
+        self._btn_save = ttk.Button(footer, text="Speichern", style="Primary.TButton", command=self._on_save)
+        self._btn_save.pack(anchor="w")
 
     @property
     def edit_generation(self) -> int:
@@ -124,7 +140,6 @@ class SettingsView(ttk.Frame):
             self._var_watch_input,
             self._var_watch_backup,
             self._var_watch_recursive,
-            self._var_excel_after_validation,
             self._var_sqlite,
             self._var_device,
             self._var_operator_initials,
@@ -143,7 +158,6 @@ class SettingsView(ttk.Frame):
             self._var_watch_input.set(settings.watch_input_path)
             self._var_watch_backup.set(settings.watch_backup_path)
             self._var_watch_recursive.set(settings.watch_recursive)
-            self._var_excel_after_validation.set(settings.output_mode in {"both", "excel"})
             self._var_sqlite.set(settings.sqlite_path)
             self._var_operator_initials.set(str(getattr(settings, "operator_initials", "") or ""))
         finally:
@@ -157,7 +171,7 @@ class SettingsView(ttk.Frame):
         preferred_device_id: str | None,
         preserve_selection: bool = False,
     ) -> None:
-        labels = [f"{item.display_name} ({item.device_id})" for item in devices if item.active]
+        labels = [item.choice_label for item in devices if item.active]
         self._device_combo.configure(values=labels)
         if preserve_selection:
             return
@@ -167,7 +181,7 @@ class SettingsView(ttk.Frame):
             if preferred_device_id:
                 for item in devices:
                     if item.device_id == preferred_device_id:
-                        selected_label = f"{item.display_name} ({item.device_id})"
+                        selected_label = item.choice_label
                         break
             if not selected_label and labels:
                 selected_label = labels[0]
@@ -211,7 +225,7 @@ class SettingsView(ttk.Frame):
         if device_id is None and "(" in device_label and device_label.endswith(")"):
             device_id = device_label.rsplit("(", 1)[-1].rstrip(")")
         return DesktopSettings(
-            output_mode="both" if bool(self._var_excel_after_validation.get()) else "sqlite",
+            output_mode="sqlite",
             sqlite_path=self._var_sqlite.get().strip(),
             watch_enabled=bool(self._var_watch_enabled.get()),
             watch_input_path=self._var_watch_input.get().strip(),

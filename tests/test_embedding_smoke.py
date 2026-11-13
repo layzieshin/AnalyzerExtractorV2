@@ -105,3 +105,37 @@ def test_runtime_lock_helpers_work_for_embedding(tmp_path: Path) -> None:
     assert try_acquire_exclusive(lock_path, 60.0) is True
     assert is_stale_lock(lock_path, 60.0) is False
     release_exclusive(lock_path)
+
+
+def test_existing_cli_harnesses_use_sqlite_submit_default_without_running_pipeline(tmp_path, monkeypatch) -> None:
+    import main as minimal_harness
+    from interfaces.cli import e2e
+    from src.jobcontroller.jobcontroller import JobController
+
+    seen = []
+    def submit_spy(self, pdf_path, project_root, **kwargs):
+        seen.append(kwargs["output_mode"])
+        return JobResult(job_id="unit-spy", pdf_path=pdf_path, status="SKIPPED", details={})
+    monkeypatch.setattr(JobController, "submit", submit_spy)
+    monkeypatch.setenv("ARE_OUTPUT_MODE", "excel")
+    pdf = tmp_path / "unit.pdf"
+    pdf.write_bytes(b"unit-only")
+    e2e.run_one(tmp_path, pdf)
+    minimal_harness.main()
+    assert seen == ["sqlite", "sqlite", "sqlite"]
+
+
+def test_legacy_gui_direct_submit_config_is_sqlite_even_with_old_choice() -> None:
+    from types import SimpleNamespace
+    from gui_min import MinimalBatchGUI as legacy_alias
+    from gui_min_ext import MinimalBatchGUI
+
+    assert legacy_alias is MinimalBatchGUI
+    value = lambda text: SimpleNamespace(get=lambda: text)
+    fake = SimpleNamespace(
+        var_output_mode=value("excel"), var_sqlite_path=value("old.sqlite3"),
+        var_lock_ttl=value("900"), var_sqlite_busy_timeout=value("5000"),
+        var_sqlite_retry_count=value("3"), var_sqlite_retry_sleep=value("0.2"),
+        _selected_device_id=lambda: "dev1",
+    )
+    assert MinimalBatchGUI._read_submit_config(fake)["output_mode"] == "sqlite"

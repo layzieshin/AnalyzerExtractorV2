@@ -4,10 +4,15 @@ from src.extractor.api import AssayRecord
 from src.ruleresolver.api import RuleSet
 
 from .dbwriter import DbWriter
-from .model import DbWriteResult
+from .model import DbWriteResult, ResultRevisionConflictError, ResultRevisionError
+from .revisions import append_result_revision, select_result_revision
 
 __all__ = [
     "DbWriteResult",
+    "ResultRevisionConflictError",
+    "ResultRevisionError",
+    "append_result_revision",
+    "select_result_revision",
     "discard_duplicate_candidate",
     "get_duplicate_candidate",
     "list_duplicate_candidates",
@@ -26,6 +31,7 @@ def write_record_sqlite(
     busy_timeout_ms: int = 5000,
     retry_count: int = 3,
     retry_sleep_s: float = 0.2,
+    source_provenance: dict[str, object] | None = None,
 ) -> DbWriteResult:
     """Public API (DbWriter)"""
     return DbWriter().write_record(
@@ -39,6 +45,7 @@ def write_record_sqlite(
         busy_timeout_ms=busy_timeout_ms,
         retry_count=retry_count,
         retry_sleep_s=retry_sleep_s,
+        source_provenance=source_provenance,
     )
 
 

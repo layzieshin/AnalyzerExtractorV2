@@ -44,7 +44,7 @@ def _same_dedupe_parse(pdf: Path) -> ParsedDocument:
     return ParsedDocument(source_path=str(pdf), pages=[ParsedPage(page_number=1, lines=lines)], meta={"page_count": 1})
 
 
-def test_submit_writes_excel_and_sqlite(tmp_path: Path, monkeypatch):
+def test_submit_both_compatibility_input_writes_sqlite_only(tmp_path: Path, monkeypatch):
     root = tmp_path / "proj"
     (root / "rules").mkdir(parents=True)
     (root / "output" / "final").mkdir(parents=True)
@@ -111,7 +111,7 @@ def test_submit_writes_excel_and_sqlite(tmp_path: Path, monkeypatch):
     assert item["data"]["test"] == "TESTX"
     state = json.loads((root / "jobs" / f"{result.job_id}.json").read_text(encoding="utf-8"))
     assert state["status"] == "DONE"
-    assert state["excel_status"] == "awaiting_validation"
+    assert state["excel_status"] == "not_required"
     assert state["output_plan"]["version"] == 2
     assert state["output_plan"]["assays"][0]["sqlite_run_id"] == item["sqlite_run_id"]
     assert item["missing_required"] == []
@@ -235,7 +235,7 @@ def test_submit_same_pdf_hash_still_skips_already_done(tmp_path: Path, monkeypat
     assert second.details["reason"] == "already_done"
 
 
-def test_submit_both_duplicate_uses_sqlite_ledger_before_excel(tmp_path: Path, monkeypatch):
+def test_submit_both_duplicate_uses_sqlite_ledger_without_excel_sink(tmp_path: Path, monkeypatch):
     root = tmp_path / "proj"
     _write_duplicate_project(root)
     pdf1 = root / "input1.pdf"
@@ -260,10 +260,7 @@ def test_submit_both_duplicate_uses_sqlite_ledger_before_excel(tmp_path: Path, m
     assert second_item["duplicate_candidate_id"] is not None
     assert second_item["existing_run_id"] is not None
     assert any(out["sink"] == "sqlite" and out["status"] == "duplicate_pending" for out in second_item["outputs"])
-    assert any(
-        out["sink"] == "excel" and out["status"] == "skipped_duplicate_pending"
-        for out in second_item["outputs"]
-    )
+    assert {out["sink"] for out in second_item["outputs"]} == {"sqlite"}
 
 
 def test_submit_sqlite_only_duplicate_reports_pending(tmp_path: Path, monkeypatch):
@@ -288,7 +285,7 @@ def test_submit_sqlite_only_duplicate_reports_pending(tmp_path: Path, monkeypatc
     assert not (root / "output" / "final" / "Assay_A.xlsx").exists()
 
 
-def test_submit_excel_only_duplicate_behavior_unchanged(tmp_path: Path, monkeypatch):
+def test_submit_excel_compatibility_input_still_uses_sqlite_duplicate_ledger(tmp_path: Path, monkeypatch):
     root = tmp_path / "proj"
     _write_duplicate_project(root)
     pdf1 = root / "input1.pdf"
@@ -304,12 +301,11 @@ def test_submit_excel_only_duplicate_behavior_unchanged(tmp_path: Path, monkeypa
     assert first.status == "DONE"
     assert second.status == "DONE"
     item = second.details["writes"][0]
-    assert item["duplicate_status"] == "none"
-    assert item["outputs"] == [
-        {
-            "sink": "excel",
-            "excel_path": str(root / "output" / "final" / "Assay_A.xlsx"),
-            "sheet": "LOTA",
-            "status": "skipped",
-        }
-    ]
+    assert item["duplicate_status"] == "pending"
+    assert item["duplicate_candidate_id"] is not None
+    assert item["existing_run_id"] == first.details["writes"][0]["sqlite_run_id"]
+    assert {out["sink"] for out in item["outputs"]} == {"sqlite"}
+    state = json.loads((root / "jobs" / f"{second.job_id}.json").read_text(encoding="utf-8"))
+    assert state["output_plan"]["output_mode"] == "sqlite"
+    assert state["output_plan"]["assays"][0]["excel_status"] == "not_required"
+    assert not list(root.rglob("*.xlsx"))

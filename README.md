@@ -1,5 +1,6 @@
 # PDF Ergebnis-Extractor (Projekt)
 
+- Projektversion: **2.0.0**; aktueller Prüf-/Freigabestand unter `docs/TESTBASELINE.md`
 - Windows 11 Zielumgebung
 - `src/` ist Project Root (in PyCharm markieren)
 - Public APIs existieren ausschließlich in `src/<module>/api.py`
@@ -16,13 +17,29 @@
 python test_app_main.py
 ```
 
-Startet die **Analyzer Result Extractor** Desktop-Oberfläche (Sidebar mit Auswertung, Ergebnisse, Regelwerke, Einstellungen, Diagnose). Primärer Workflow: PDFs verarbeiten, Auto-Import konfigurieren, Ergebnisse und Klärfälle prüfen, Regelwerke validieren.
+Startet die **Analyzer Result Extractor** Desktop-Oberfläche (Sidebar mit Auswertung, Ergebnisse, Statistik, Validierung, Regelwerke, Einstellungen, Diagnose). Primärer Workflow: PDFs verarbeiten, Auto-Import konfigurieren, Ergebnisse und Klärfälle prüfen, Regelwerke validieren.
 
 In **Ergebnisse** werden alle Assays eines Berichts gemeinsam angezeigt. Einzelne Runs können
 mit lokal gespeicherten Operator-Initialen und einem optionalen Kommentar validiert werden.
 Eine bestehende Validation wird nie still überschrieben: Die separate Aktion
 **Validierung korrigieren** legt nach Bestätigung einen neuen, verknüpften Historieneintrag an.
-SQLite bleibt die strukturierte Source of Truth. Excel ist der nachgelagerte Export und kein Validation-Speicher. Schlägt nur die Excel-Ausgabe fehl, bleibt das gespeicherte SQLite-Ergebnis stehen. Die Diagnose zeigt dann genau `Ergebnis gespeichert – Excel-Ausgabe fehlgeschlagen`. **Erneut verarbeiten** wiederholt in diesem Fall nur den eingefrorenen Excel-Export: die PDF und die aktuellen Regelwerke werden nicht neu gelesen, erfolgreiche SQLite-Ergebnisse werden nicht erneut geschrieben.
+SQLite ist die verbindliche Ablage für neue Ergebnisse und append-only Validierungen. In **Validierung** stehen das Original-PDF und die Arbeitsliste nebeneinander. Neue Verarbeitung, Erstvalidierung und Korrektur erzeugen oder ändern keine Excel-Dateien. Vorhandene Arbeitsmappen und historische Ausgabepläne bleiben unverändert und lesbar. Historische Excel-Fehler haben in **Diagnose** keine Wiederholungsaktion.
+
+Assay-Tabellen zeigen den vollständigen gespeicherten Namen. Die ausgewählte Ergebnisfassung bestimmt den Namen; eine noch offene Neuanalyse ersetzt ihn nicht. Fehlt ein belegter Name, steht dort **Assayname fehlt**. Auch gleichnamige Assays bleiben getrennt auswählbar. Bei unbekannten Kandidaten ist ein aus der Datei abgeleiteter **Namenshinweis** ausdrücklich als solcher gekennzeichnet.
+
+### Qualitätskontrolle und PDF-Nachweise
+
+Ist die Uhrzeit getrennt extrahiert, können im bestehenden Prüfprofil **Messzeitfeld (optional)** und **Zeitformat** ausdrücklich zugeordnet werden, etwa `ZEIT` mit `%H:%M` oder `%H:%M:%S` (auch `%H%M` ist möglich). Beide Felder bleiben zunächst leer. Ohne Zuordnung gilt der bisherige Datumsweg; bei Zuordnung muss das Datumsformat ohne Uhrzeit sein. Fehlende, unlesbare oder formatwidrige Messzeiten werden mit Grund ausgeschlossen, ohne Ersatz durch Mitternacht oder Importzeit. Gleiche tatsächliche Zeitpunkte bleiben ohne erfundene Reihenfolge. Jede Änderung legt eine neue Profilfassung an; alte Profile und PDF-Nachweise bleiben erhalten.
+
+In **Einstellungen** werden Geräte und benannte Kontrollprofile gepflegt. **Geräte übernehmen** überführt vorhandene Altgeräte ausdrücklich in den ausgewählten SQLite-Speicher; Originaldateien und historische Kennungen bleiben erhalten. Ein verwendbares Gerät braucht einen Namen und mindestens SN, LNR oder EVA. Ein Profil ordnet dem Assay die extrahierten Messdatums- und Kontrollfelder IST/SOLL/MIN/MAX zu und legt Zahlenformat, Einheit, relative QMMA-Grenze und Westgard-Regeln fest. Änderungen erhalten die früheren Fassungen.
+
+Unter **Statistik** werden Kit-Chargen und ihre menschlich validierten Quellen geprüft. Die Kontrollauswahl zeigt QMMA, optionale SD, Befunde und ein Diagramm mit anklickbaren Messpunkten, Vergrößern und Verschieben. QMMA braucht keine SD. Ohne verwendbare SD sind SD-Bänder und Westgard ausdrücklich nicht verfügbar. Eine manuelle SD oder eine bestätigte validierte Referenzserie wird beim Einrichten der Charge eingefroren; Referenzserien liefern Mittelwert und Stichproben-SD. Gleichdatierte Werte ohne belegte zeitliche Reihenfolge werden nicht künstlich zu einer Messfolge verbunden. Das klassische 2-SD-Prüfsignal bleibt aktiv; die Auswahl **1₂s** steuert die Warnanzeige.
+
+Eine SD-Referenz muss zur belegten Messwertdefinition und Einheit gehören. Bei einer anderen Einheit, IST-Feldzuordnung oder Zahlenschreibweise wird die alte SD mit sichtbarem Grund gesperrt; QMMA bleibt unabhängig verfügbar. Eine bewusst neu eingegebene manuelle SD erhält den Bezug zum aktuellen Profil. Reine Namensänderungen sowie Datums-, Regel-, SOLL- oder MIN/MAX-Anpassungen sperren eine ansonsten passende SD nicht. Nicht belegbare Alt-Referenzen werden nicht umgedeutet; frühere PDF-Nachweise bleiben unverändert.
+
+**Mit PDF abschließen** verlangt eine bewusst gewählte neuere validierte Nachfolgecharge. Analyse und PDF werden gemeinsam als unveränderlicher Nachweis gespeichert. Jede Kontrolle beginnt auf einer eigenen Seite mit Diagramm, kompakten Kennzahlen und ausschließlich ihren Einzelwerten: Messwert, Datum, tatsächlich erfasste Uhrzeit, Anwender und menschlicher Validierer samt Validierungszeit in UTC. Lange Tabellen werden für dieselbe Kontrolle fortgesetzt. Ohne erfasste Uhrzeit steht **Nicht erfasst**; fehlende oder widersprüchliche Anwender-/Validierungsnachweise werden sichtbar benannt. Anwender und Validierer werden nicht aus den Initialen des Chargenabschlusses abgeleitet.
+
+**Nachweisfassungen** zeigt frühere Auswertungen. **PDF speichern** exportiert standardmäßig deren ursprüngliche Bytes an einen neuen Dateinamen. Die zunächst ausgeschaltete Option **Erläuterungen zur Diagrammauswertung mitdrucken** erstellt zusätzlich eine erweiterte Druckfassung aus dem gespeicherten Analysemodell. Legenden, Interpretation und Verfahrensdetails stehen nur in deren Anhang; gespeicherte Nachweise und Berechnungen bleiben unverändert. Bestehende Dateien werden nicht überschrieben. Späte Messwerte benötigen eine begründete Wiederöffnung; alte Nachweise bleiben lesbar. Der Bericht heißt **Validierte Kit-Chargen-Auswertung** und ist kein Nachweis vollständiger Rili-BÄK-Konformität. Die statistischen Befunde verändern keine menschliche Ergebnisvalidierung.
 
 Alltagstauglicher Ablauf: `DOCUMENTATION/13_ui_v21_user_workflow.md`.
 
@@ -103,11 +120,12 @@ Direkter `submit`-Pfad ohne Queue/Arbeitsliste. Nicht mehr der Packaging-Entry; 
   - `$env:ARE_WATCHDOG_ONCE="1"; python watchdog_main.py`
   - `$env:ARE_WORKER_ONCE="1"; python worker_main.py`
 
-## Output-Modi
+## Ausgabe (SQLite)
 
-- `ARE_OUTPUT_MODE=both` (Default: Excel + SQLite)
-- `ARE_OUTPUT_MODE=excel` (nur Excel)
-- `ARE_OUTPUT_MODE=sqlite` (nur SQLite)
+- Effektiver Modus für alle neuen Wege ist `sqlite`: Desktop, Watch/Worker, CLI-Harness und direktes `submit`.
+- `ARE_OUTPUT_MODE=both|excel` und alte gleichnamige Caller-/Settings-Werte bleiben als Kompatibilitätseingaben akzeptiert; sie aktivieren ausschließlich SQLite. Unbekannte Environment-/Worker-Werte fallen sicher auf SQLite zurück; unbekannte direkte `submit`- und Desktop-Settings-Werte werden abgewiesen.
+- Das Laden alter Einstellungen schreibt die Datei nicht um. Erst normales **Speichern** persistiert `output_mode=sqlite` und erhält die übrigen Einstellungen.
+- Historische Exportpläne werden weder migriert noch fortgesetzt oder automatisch abgeschlossen. Die alten Release-/Excel-Retry-APIs liefern ohne Schreibzugriff `SKIPPED: excel_export_retired`.
 - SQLite-Zielpfad:
   - `ARE_SQLITE_PATH=I:/path/to/results.sqlite3`
 - Queue/Pipeline Recovery:
@@ -258,6 +276,8 @@ Ausgabe:
 | ZIP | `packaging/dist_output/AnalyzerResultExtractorV2.zip` |
 
 Entry der gebündelten EXE: `test_app_main.py` (Produkt-Shell, nicht mehr `gui_min.py`).
+
+Der Builder prüft zuerst die vollständige Testsuite und beendet sich bei Fehlern vor Bereinigung oder Build. Die Produktversion stammt aus `pyproject.toml`; `build-info.json` neben der EXE dokumentiert Version, tatsächlichen Ausgangscommit/Arbeitsbaumzustand, Eingabe-Fingerabdruck und Abhängigkeiten. Der Fenstertitel zeigt die geladene Version. `ARE_HOME` beeinflusst den Datenordner, nicht die Produktversion. Ein alter Build ist kein Beleg für den aktuellen Prüfstand.
 
 Auf dem Ziel-PC: ZIP entpacken, `AnalyzerResultExtractorV2.exe` starten.
 Optional `$env:ARE_HOME` auf den entpackten Ordner setzen.

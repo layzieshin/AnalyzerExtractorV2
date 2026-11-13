@@ -98,6 +98,7 @@ def format_assay_overview_rows(writes: Any) -> List[Dict[str, str]]:
             {
                 "assay_key": str(item.get("assay_key", "")),
                 "assay_name": str(item.get("assay_name", "")),
+                "assay_display_label": format_assay_display_label(str(item.get("assay_key", "")), str(item.get("assay_name", ""))),
                 "ruleset_file": str(item.get("ruleset_file", "")),
                 "lot_id": str(item.get("lot_id", "")),
                 "dedupe_key": str(item.get("dedupe_key", "")),
@@ -711,6 +712,7 @@ def format_duplicate_candidate_summary(row: Mapping[str, Any]) -> Dict[str, str]
         "candidate_id": _string_or_empty(row.get("candidate_id")),
         "status": _duplicate_status_label(row.get("status")),
         "assay_key": _string_or_empty(row.get("assay_key")),
+        "assay_name": format_assay_display_label(str(row.get("assay_key") or ""), str(row.get("assay_name") or "")),
         "device_id": _string_or_empty(row.get("device_id")),
         "detected_at": _string_or_empty(row.get("detected_at")),
         "existing_run_id": _string_or_empty(row.get("existing_run_id")),
@@ -812,7 +814,7 @@ def _duplicate_meta_lines(data: Mapping[str, Any], *, candidate: bool) -> List[s
         ("candidate_id", "candidate_id"),
         ("status", "status"),
         ("existing_run_id", "existing_run_id"),
-        ("assay_key", "assay_key"),
+        ("assay_name", "Assay"),
         ("device_id", "device_id"),
         ("dedupe_version", "dedupe_version"),
         ("dedupe_key", "dedupe_key"),
@@ -828,7 +830,7 @@ def _duplicate_meta_lines(data: Mapping[str, Any], *, candidate: bool) -> List[s
             ("run_id", "run_id"),
             ("job_id", "job_id"),
             ("pdf_path", "pdf_path"),
-            ("assay_key", "assay_key"),
+            ("assay_name", "Assay"),
             ("device_id", "device_id"),
             ("dedupe_version", "dedupe_version"),
             ("dedupe_key", "dedupe_key"),
@@ -837,6 +839,8 @@ def _duplicate_meta_lines(data: Mapping[str, Any], *, candidate: bool) -> List[s
     lines: List[str] = []
     for key, label in keys:
         value = data.get(key)
+        if key == "assay_name":
+            value = format_assay_display_label(str(data.get("assay_key") or ""), str(value or ""))
         if value:
             if key == "status":
                 value = _duplicate_status_label(value)
@@ -923,15 +927,8 @@ def format_assay_display_label(
     *,
     ambiguous_names: set[str] | None = None,
 ) -> str:
-    key = str(assay_key or "").strip()
     name = str(assay_name or "").strip()
-    if not name:
-        suffix = _assay_key_suffix(key)
-        return f"Unbekannter Assay ({suffix})" if suffix else "Unbekannter Assay"
-    if ambiguous_names and name in ambiguous_names:
-        suffix = _assay_key_suffix(key)
-        return f"{name} ({suffix})" if suffix else name
-    return name
+    return name or "Assayname fehlt"
 
 
 def build_assay_filter_choices(
@@ -1055,7 +1052,7 @@ def format_result_run_detail(run: Mapping[str, object]) -> str:
     lines = [
         f"Run-ID: {run.get('id', '')}",
         f"Job-ID: {run.get('job_id', '')}",
-        f"Assay: {run.get('assay_key', '')}",
+        f"Assay: {format_assay_display_label(str(run.get('assay_key') or ''), str(run.get('assay_name') or ''))}",
         f"CHARGE: {run.get('lot_id', '')}",
         f"Gerät: {run.get('device_id', '')}",
         f"PDF: {run.get('pdf_path', '')}",
@@ -1096,6 +1093,8 @@ def _format_result_column_value(
     if col_id == "result_date":
         return _string_or_empty(run.get("result_date"))
     if col_id == "meta:assay_key":
+        if run.get("assay_name"):
+            return format_assay_display_label(str(run.get("assay_key") or ""), str(run["assay_name"]))
         assay_key = _string_or_empty(run.get("assay_key")).strip()
         if assay_key in context["assay_labels"]:
             return context["assay_labels"][assay_key]

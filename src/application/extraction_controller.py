@@ -205,11 +205,11 @@ class ExtractionController:
         message = str(details.get("error") or "") if isinstance(details, dict) else ""
         pdf_path = str(getattr(result, "pdf_path", ""))
         return ProcessingOutcome(
-            processed=True,
+            processed=False,
             job_id=str(getattr(result, "job_id", job_id)),
             pdf_path=pdf_path,
             file_name=Path(pdf_path).name if pdf_path else "",
-            queue_status="DONE",
+            queue_status="",
             submit_status=str(getattr(result, "status", "")),
             message=message,
         )
@@ -248,7 +248,7 @@ class ExtractionController:
         diagnoses: list[JobDiagnosisItem] = []
         for job in list_processing_jobs(self._project_root):
             evidence = get_job_evidence(self._project_root, job.job_id)
-            if str(job.status) != "FAILED" and not (evidence and evidence.retry_kind == "export_only"):
+            if str(job.status) != "FAILED" and not (evidence and evidence.retry_kind == "retired"):
                 continue
             item = self.get_job_diagnosis(job.job_id)
             if item is not None:
@@ -285,7 +285,11 @@ class ExtractionController:
             error_label=error_label,
             root_error=root_error,
             context_label=context_label,
-            friendly_message=friendly_processing_message(technical),
+            friendly_message=(
+                "Historischer Ausgabeplan ist schreibgeschützt. Details bleiben zur Diagnose verfügbar."
+                if evidence is not None and evidence.retry_kind == "retired"
+                else friendly_processing_message(technical)
+            ),
             technical_detail=technical,
             normalized_dump_path=normalized_dump,
             block_dump_paths=block_dumps,

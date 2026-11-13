@@ -3,12 +3,17 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.util
+import importlib.metadata
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import zipfile
+import platform
+import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -34,6 +39,8 @@ DESKTOP_RUNTIME_IMPORTS = [
     "src.processing.api",
     "src.ingestion.api",
     "src.runtime.api",
+    "src.qualitycontrol.api",
+    "src.qualitycontrol.pdf_report",
 ]
 
 REQUIRED_IMPORTS = [
@@ -81,11 +88,16 @@ SECRET_NAME_MARKERS = (
 def main() -> None:
     args = _parse_args()
     os.chdir(PROJECT_ROOT)
+    inputs = _product_inputs()
     _preflight()
+    _assert_inputs_unchanged(inputs)
+    build_info = _make_build_info(inputs)
     _clean_outputs()
     _run_pyinstaller(diet_experiment=args.diet_experiment)
     _prune_unneeded_bundle_payload()
     _prepare_runtime_tree()
+    _assert_inputs_unchanged(inputs)
+    _write_build_info(build_info)
     _verify_bundle()
     _run_bundle_smoke_check()
     _write_zip()
@@ -121,11 +133,86 @@ def _preflight() -> None:
         raise SystemExit("[preflight] rules integrity failed:\n" + json.dumps(report, indent=2, ensure_ascii=False))
 
     print("[preflight] running pytest")
-    _run([sys.executable, "-m", "pytest", "tests"], cwd=PROJECT_ROOT)
+    _run([sys.executable, "-m", "pytest", "tests", "-q", "-o", "faulthandler_timeout=60"], cwd=PROJECT_ROOT)
+
+
+def _product_inputs() -> list[dict[str, object]]:
+    """Hash raw build-input bytes, without Git newline normalization or private paths."""
+    runtime_dirs = {"jobs", "locks", "input", "output", "storage", "__pycache__", ".tmp", ".pytest_cache", "build", "dist"}
+    paths = {PROJECT_ROOT / "pyproject.toml", PROJECT_ROOT / "README.md", PROJECT_ROOT / "packaging" / "build_onedir.py"}
+    paths.update(PROJECT_ROOT.glob("*.py"))
+    for package in ("src", "interfaces", "rule_editor"):
+        paths.update(path for path in (PROJECT_ROOT / package).rglob("*") if path.is_file()
+                     and not any(part.casefold() in runtime_dirs for part in path.relative_to(PROJECT_ROOT).parts[:-1])
+                     and path.suffix not in {".pyc", ".pyo"})
+    paths.update(path for path in RULES_SOURCE.rglob("*") if path.is_file()
+                 and not any(part.lower() in {"drafts", "__pycache__"} for part in path.relative_to(RULES_SOURCE).parts)
+                 and path.suffix not in {".pyc", ".pyo"})
+    result = []
+    root = PROJECT_ROOT.resolve()
+    for path in sorted(paths, key=lambda item: item.as_posix()):
+        resolved = path.resolve()
+        if not resolved.is_relative_to(root):
+            raise SystemExit("[preflight] a product input escapes the project root")
+        raw = resolved.read_bytes()
+        result.append({"path": resolved.relative_to(root).as_posix(), "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    return sorted(result, key=lambda item: str(item["path"]))
+
+
+def _fingerprint(inputs: list[dict[str, object]]) -> str:
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _assert_inputs_unchanged(expected: list[dict[str, object]]) -> None:
+    if _fingerprint(_product_inputs()) != _fingerprint(expected):
+        raise SystemExit("[preflight] product inputs changed after qualification; cleanup/publication stopped")
+
+
+def _git_identity() -> tuple[str, bool | None]:
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain", "--untracked-files=normal"], cwd=PROJECT_ROOT,
+            capture_output=True, text=True, check=True, timeout=10).stdout.strip())
+        if len(head) != 40 or any(char not in "0123456789abcdef" for char in head.lower()):
+            raise ValueError("invalid base revision")
+        return head, dirty
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "UNAVAILABLE", None
+
+
+def _make_build_info(inputs: list[dict[str, object]]) -> dict[str, object]:
+    version = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    base_commit, dirty = _git_identity()
+    dependencies = {}
+    for package in ("PyMuPDF", "openpyxl", "PyInstaller"):
+        try:
+            dependencies[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            dependencies[package] = "UNAVAILABLE"
+    return {"product": APP_NAME, "version": version, "built_at_utc": datetime.now(timezone.utc).isoformat(),
+            "base_commit": base_commit, "dirty_snapshot": dirty, "source_tree_fingerprint": _fingerprint(inputs),
+            "fingerprint_contract": "raw-product-input-bytes-v1", "inputs": inputs, "dependencies": dependencies,
+            "python_version": platform.python_version(), "platform": f"{sys.platform}-{platform.machine()}",
+            "source_identity": "dirty-snapshot" if dirty else ("base-commit" if dirty is False else "snapshot-without-git-proof")}
+
+
+def _write_build_info(info: dict[str, object]) -> None:
+    (APP_DIR / "build-info.json").write_text(json.dumps(info, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def _validate_output_targets() -> None:
+    root = PROJECT_ROOT.resolve()
+    expected = (root / "packaging" / "build_work", root / "packaging" / "dist_output" / APP_NAME,
+                root / "packaging" / "dist_output" / f"{APP_NAME}.zip")
+    for actual, allowed in zip((WORK_ROOT, APP_DIR, ZIP_PATH), expected):
+        resolved = actual.resolve()
+        if resolved != allowed.resolve() or not resolved.is_relative_to(root):
+            raise SystemExit("[build] output target differs from the three authorized packaging targets")
 
 
 def _clean_outputs() -> None:
     print("[build] cleaning previous packaging outputs")
+    _validate_output_targets()
     for path in (WORK_ROOT, APP_DIR, ZIP_PATH):
         if path.is_dir():
             shutil.rmtree(path)
@@ -179,6 +266,8 @@ def _prune_unneeded_bundle_payload() -> None:
     if not tzdata_dir.exists():
         print("[build] tzdata prune: nothing to remove")
         return
+    if not tzdata_dir.resolve().is_relative_to(APP_DIR.resolve()):
+        raise SystemExit("[build] tzdata target escapes the application output")
 
     files = [path for path in tzdata_dir.rglob("*") if path.is_file()]
     total_bytes = sum(path.stat().st_size for path in files)
@@ -194,6 +283,8 @@ def _prepare_runtime_tree() -> None:
     _require_dir(APP_DIR)
     rules_target = APP_DIR / "rules"
     if rules_target.exists():
+        if not rules_target.resolve().is_relative_to(APP_DIR.resolve()):
+            raise SystemExit("[build] rule target escapes the application output")
         shutil.rmtree(rules_target)
     shutil.copytree(
         RULES_SOURCE,
@@ -211,6 +302,16 @@ def _verify_bundle() -> None:
     _require_file(exe)
     _require_dir(APP_DIR / "_internal")
     _require_file(APP_DIR / "rules" / "index.json")
+    _require_file(APP_DIR / "build-info.json")
+    build_info = json.loads((APP_DIR / "build-info.json").read_text(encoding="utf-8"))
+    declared = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    if build_info.get("version") != declared or build_info.get("source_tree_fingerprint") != _fingerprint(build_info.get("inputs", [])):
+        raise SystemExit("[verify] product version or input fingerprint differs from build metadata")
+    for item in build_info["inputs"]:
+        if str(item["path"]).startswith("rules/"):
+            target = APP_DIR / str(item["path"])
+            if not target.resolve().is_relative_to(APP_DIR.resolve()) or hashlib.sha256(target.read_bytes()).hexdigest() != item["sha256"]:
+                raise SystemExit("[verify] bundled rule bytes differ from qualified input bytes")
     _require_dir(APP_DIR / "jobs")
     _require_dir(APP_DIR / "output" / "final")
     _require_dir(APP_DIR / "input" / "watch")
@@ -240,6 +341,7 @@ def _run_bundle_smoke_check() -> None:
 
 def _write_zip() -> None:
     print("[build] writing zip")
+    _validate_output_targets()
     if ZIP_PATH.exists():
         ZIP_PATH.unlink()
     with zipfile.ZipFile(ZIP_PATH, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:

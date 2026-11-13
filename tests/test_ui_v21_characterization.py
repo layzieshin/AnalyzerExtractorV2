@@ -60,11 +60,11 @@ def test_runtime_config_exposes_output_mode_and_sqlite_path(tmp_path: Path, monk
     assert cfg.enable_excel is False
 
 
-def test_runtime_config_default_output_mode_is_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_config_default_output_mode_is_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ARE_OUTPUT_MODE", raising=False)
     cfg = load_runtime_config(tmp_path)
-    assert cfg.output_mode == "both"
-    assert cfg.enable_excel is True
+    assert cfg.output_mode == "sqlite"
+    assert cfg.enable_excel is False
     assert cfg.enable_sqlite is True
 
 

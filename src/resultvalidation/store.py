@@ -12,8 +12,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from src.resultstore.api import get_result_run, get_result_store_status
+from src.jobcontroller.api import processing_eligibility_error
 
 from .model import (
     OperatorInitialsRequiredError,
@@ -28,6 +30,7 @@ from .model import (
     ValidationStoreBusyError,
     ValidationStoreMissingError,
     ValidationStoreUnreadableError,
+    ValidationStateConflictError,
 )
 
 _BUSY_TIMEOUT_MS = 5000
@@ -40,7 +43,11 @@ CREATE TABLE IF NOT EXISTS run_validations (
     validated_at_utc TEXT NOT NULL,
     comment TEXT NOT NULL DEFAULT '',
     supersedes_validation_id INTEGER,
-    created_at_utc TEXT
+    created_at_utc TEXT,
+    revision_id INTEGER NOT NULL DEFAULT 0,
+    selection_id INTEGER,
+    selection_token TEXT NOT NULL DEFAULT '',
+    request_id TEXT
 )
 """
 
@@ -51,7 +58,8 @@ ON run_validations(run_id)
 
 _SELECT_COLUMNS = """
 validation_id, run_id, operator_initials, validated_at_utc,
-comment, supersedes_validation_id, created_at_utc
+comment, supersedes_validation_id, created_at_utc,
+revision_id, selection_id, selection_token, request_id
 """
 
 
@@ -87,20 +95,80 @@ def list_run_validations(
     return _validation_list(records)
 
 
+def list_run_validations_readonly(
+    store_spec: Mapping[str, Any], run_ids: Sequence[int],
+) -> RunValidationList:
+    """Strict non-migrating guard, safe beneath another owner's write lock.
+
+    Legacy readers intentionally retain schema creation. This separate API uses
+    a read-only connection and a single read transaction; missing metadata means
+    no validation, and missing binding columns mean original revision zero.
+    """
+    ids = _coerce_run_ids(run_ids)
+    path = _require_database_file(store_spec)
+    try:
+        conn = _connect_readonly(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(run_validations)")}
+            if not columns:
+                return RunValidationList(records=(), latest_by_run_id={})
+            selected = [name.strip() for name in _SELECT_COLUMNS.replace("\n", "").split(",")]
+            defaults = {"revision_id": "0", "selection_id": "NULL", "selection_token": "''", "request_id": "NULL"}
+            selection = ", ".join(name if name in columns else f"{defaults[name]} AS {name}" for name in selected)
+            records: list[RunValidation] = []
+            for chunk in _chunks(ids, 400):
+                marks = ",".join("?" for _ in chunk)
+                records.extend(_row_to_record(row) for row in conn.execute(
+                    f"SELECT {selection} FROM run_validations WHERE run_id IN ({marks}) ORDER BY validation_id", chunk))
+            return _validation_list(sorted(records, key=lambda record: record.validation_id))
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise _translate_sqlite_error(exc) from exc
+
+
+def _connect_readonly(path: Path) -> sqlite3.Connection:
+    try:
+        return sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        if "invalid uri authority" not in str(exc).lower():
+            raise
+        # SQLite builds without URI-authority support reject file://server/...
+        # even though Windows supports the UNC path. An empty URI authority
+        # keeps //server/share in the path instead. Both attempts retain mode=ro:
+        # a file disappearing after the existence check must never be recreated.
+        filename = path.as_posix()
+        prefix = "file://" if filename.startswith("/") else "file:///"
+        return sqlite3.connect(f"{prefix}{quote(filename, safe='/:')}?mode=ro", uri=True)
+
+
 def validate_run(
     store_spec: Mapping[str, Any],
     run_id: int,
     operator_initials: str,
     comment: str = "",
+    *,
+    expected_selection_token: str | None = None,
+    request_id: str | None = None,
+    project_root: str | None = None,
 ) -> RunValidation:
     """Append the first validation. An existing validation is left unchanged."""
     initials = _require_initials(operator_initials)
     note = _normalize_comment(comment)
+    if isinstance(request_id, str):
+        request_id = request_id.strip()
     checked_run_id = _coerce_run_id(run_id)
     path = _require_runs(store_spec, [checked_run_id])
     stamp = _utc_iso()
     with _immediate_connection(path) as conn:
         _ensure_schema(conn)
+        repeated = _repeated_request(conn, checked_run_id, request_id, initials, note, expected_selection_token, False)
+        if repeated is not None:
+            return repeated
+        state = _require_selected_state(store_spec, checked_run_id, expected_selection_token, project_root)
         heads = _effective_records(conn, checked_run_id)
         if len(heads) > 1:
             raise ValidationAmbiguousError(checked_run_id)
@@ -114,6 +182,8 @@ def validate_run(
             comment=note,
             supersedes_validation_id=None,
             created_at_utc=stamp,
+            state=state,
+            request_id=request_id,
         )
     return stored
 
@@ -123,20 +193,32 @@ def correct_validation(
     run_id: int,
     operator_initials: str,
     comment: str = "",
+    *,
+    expected_selection_token: str | None = None,
+    request_id: str | None = None,
+    project_root: str | None = None,
 ) -> RunValidation:
     """Append a correction that points at the previous effective validation."""
     initials = _require_initials(operator_initials)
     note = _normalize_comment(comment)
+    if isinstance(request_id, str):
+        request_id = request_id.strip()
     checked_run_id = _coerce_run_id(run_id)
     path = _require_runs(store_spec, [checked_run_id])
     stamp = _utc_iso()
     with _immediate_connection(path) as conn:
         _ensure_schema(conn)
+        repeated = _repeated_request(conn, checked_run_id, request_id, initials, note, expected_selection_token, True)
+        if repeated is not None:
+            return repeated
+        state = _require_selected_state(store_spec, checked_run_id, expected_selection_token, project_root)
         heads = _effective_records(conn, checked_run_id)
         if not heads:
             raise ValidationMissingError(checked_run_id)
         if len(heads) > 1:
             raise ValidationAmbiguousError(checked_run_id)
+        if heads[0].revision_id != state["revision_id"] or heads[0].selection_id != state["selection_id"]:
+            raise ValidationStateConflictError("Die Validation gehoert zu einem anderen Ergebnisstand. Bitte Datenbestand klaeren.")
         stored = _insert_validation(
             conn,
             run_id=checked_run_id,
@@ -145,6 +227,8 @@ def correct_validation(
             comment=note,
             supersedes_validation_id=heads[0].validation_id,
             created_at_utc=stamp,
+            state=state,
+            request_id=request_id,
         )
     return stored
 
@@ -242,6 +326,57 @@ def _rollback(conn: sqlite3.Connection) -> None:
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_RUN_VALIDATIONS)
     conn.execute(_CREATE_RUN_INDEX)
+    conn.execute("CREATE TABLE IF NOT EXISTS resultvalidation_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    versions = [int(row[0]) for row in conn.execute("SELECT version FROM resultvalidation_schema_migrations")]
+    if versions and versions != [1]:
+        raise ValidationStoreUnreadableError("Unbekannte Validationsversion; bitte Datenbestand klaeren.")
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(run_validations)")}
+    for name, sql_type in {"revision_id": "INTEGER NOT NULL DEFAULT 0", "selection_id": "INTEGER", "selection_token": "TEXT NOT NULL DEFAULT ''", "request_id": "TEXT"}.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE run_validations ADD COLUMN {name} {sql_type}")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_run_validation_request ON run_validations(run_id, request_id) WHERE request_id IS NOT NULL")
+    conn.execute("INSERT OR IGNORE INTO resultvalidation_schema_migrations VALUES (1, ?)", (_utc_iso(),))
+
+
+def _require_selected_state(store_spec: Mapping[str, Any], run_id: int, expected: str | None, project_root: str | None = None) -> dict[str, Any]:
+    # Caller already holds BEGIN IMMEDIATE. Other writers cannot change selection
+    # between this public read-only projection and our append.
+    state = get_result_run(dict(store_spec), run_id)
+    if state is None:
+        raise RunNotFoundError(run_id)
+    if state.get("revision_error") or state.get("payload_parse_error"):
+        raise ValidationStateConflictError("Ergebnis unlesbar; bitte Datenbestand klaeren.")
+    source_root = state.get("source_provenance", {}).get("project_root")
+    if not source_root and state.get("result_revisions"):
+        source_root = state["result_revisions"][-1]["result"].get("source_provenance", {}).get("project_root")
+    eligibility = processing_eligibility_error(project_root or source_root, state["job_id"], require_evidence=bool(source_root))
+    if eligibility:
+        raise ValidationStateConflictError(eligibility)
+    if state.get("pending_revision"):
+        raise ValidationStateConflictError("Bitte zuerst alte oder neue Werte im Vergleich auswaehlen.")
+    if state.get("missing_fields"):
+        raise ValidationStateConflictError("Nacharbeit erforderlich: leere konfigurierte Felder " + ", ".join(state["missing_fields"]))
+    if expected is None:
+        if state.get("selection_id") is not None or state.get("result_revisions"):
+            raise ValidationStateConflictError("Dieser Ergebnisstand braucht eine aktuelle Auswahlkennung. Bitte aktualisieren.")
+    elif expected != state["selection_token"]:
+        raise ValidationStateConflictError("Die Messung hat sich geaendert. Bitte aktualisieren und erneut pruefen.")
+    return state
+
+
+def _repeated_request(conn: sqlite3.Connection, run_id: int, request_id: str | None, initials: str,
+                      comment: str, token: str | None, correction: bool) -> RunValidation | None:
+    if request_id is None:
+        return None
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise ValidationStateConflictError("Die eindeutige Anfragekennung fehlt.")
+    row = conn.execute(f"SELECT {_SELECT_COLUMNS} FROM run_validations WHERE run_id=? AND request_id=?", (run_id, request_id)).fetchone()
+    if row is None:
+        return None
+    record = _row_to_record(row)
+    if (record.operator_initials, record.comment, record.supersedes_validation_id is not None) != (initials, comment, correction) or (token is not None and token != record.selection_token):
+        raise ValidationStateConflictError("Die Anfragekennung wurde bereits fuer andere Validationsdaten verwendet.")
+    return record
 
 
 def _effective_records(conn: sqlite3.Connection, run_id: int) -> list[RunValidation]:
@@ -312,13 +447,16 @@ def _insert_validation(
     comment: str,
     supersedes_validation_id: int | None,
     created_at_utc: str | None,
+    state: dict[str, Any],
+    request_id: str | None,
 ) -> RunValidation:
     cursor = conn.execute(
         """
         INSERT INTO run_validations (
             run_id, operator_initials, validated_at_utc, comment,
-            supersedes_validation_id, created_at_utc
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            supersedes_validation_id, created_at_utc, revision_id, selection_id,
+            selection_token, request_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(run_id),
@@ -327,6 +465,7 @@ def _insert_validation(
             comment,
             supersedes_validation_id,
             created_at_utc,
+            state["revision_id"], state["selection_id"], state["selection_token"], request_id,
         ),
     )
     if cursor.lastrowid is None:
@@ -362,6 +501,10 @@ def _row_to_record(row: sqlite3.Row) -> RunValidation:
         comment=str(row["comment"] if row["comment"] is not None else ""),
         supersedes_validation_id=None if supersedes is None else int(supersedes),
         created_at_utc=None if created_at is None else str(created_at),
+        revision_id=int(row["revision_id"] or 0),
+        selection_id=None if row["selection_id"] is None else int(row["selection_id"]),
+        selection_token=str(row["selection_token"] or ""),
+        request_id=str(row["request_id"] or ""),
     )
 
 

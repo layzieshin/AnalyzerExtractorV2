@@ -1,4 +1,4 @@
-"""Geführte, PDF-first Regelerstellung und -prüfung.
+"""Geführte Regelerstellung, Entwurfsfortsetzung und PDF-Prüfung.
 
 Eigenes modales Fenster:
 1. PDF und Ziel (neue Regel oder vorhandener Entwurf)
@@ -21,13 +21,6 @@ _FULLTEXT_FALLBACK_WARNING = (
     "Assay-Abschnitt nicht gefunden. Der vollständige PDF-Text ist nur eine sichtbare "
     "Authoring-Hilfe und kann für diesen Entwurf geprüft werden."
 )
-_TARGET_CONTROL_NAMES = (
-    "rad_mode_new",
-    "rad_mode_existing",
-    "ent_assay_key",
-    "ent_assay_name",
-    "list_drafts",
-)
 
 
 class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
@@ -39,6 +32,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         on_activate_requested: Callable[[str], None] | None = None,
         *,
         start_intent: str = "neutral",
+        initial_draft_path: str | None = None,
         on_session_closed: Callable[[str | None], None] | None = None,
     ) -> None:
         super().__init__(master)
@@ -94,6 +88,8 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
 
         self._build_ui()
         self._refresh_draft_choices()
+        if initial_draft_path:
+            self._load_existing_draft(initial_draft_path)
         self._show_step(0)
 
         self.update_idletasks()
@@ -110,6 +106,12 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self._card_frames[key].tkraise()
         can_back = idx > 0 and not (key == "fields" and self._field_idx <= 0)
         self.btn_back.config(state=tk.NORMAL if can_back else tk.DISABLED)
+        if hasattr(self, "btn_continue_draft"):
+            if key in {"target", "fields"}:
+                self.btn_continue_draft.pack(side="left", padx=(8, 0))
+                self.btn_continue_draft.config(state=tk.NORMAL if self.draft_path else tk.DISABLED)
+            else:
+                self.btn_continue_draft.pack_forget()
         if key == "fields":
             self.btn_next.config(text="Speichern und nächstes Feld")
         elif key == "custom":
@@ -121,9 +123,16 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self.var_match.set("")
         if key == "target":
             self._refresh_draft_choices()
-            self.var_status.set("PDF laden und danach ausdrücklich neue Regel oder vorhandenen Entwurf wählen.")
+            self._apply_target_control_states()
+            self.var_status.set(
+                "Ziel wählen. Ein Entwurf kann sofort weiterbearbeitet werden; "
+                "PDF-Text ist erst für die Feldprüfung erforderlich."
+            )
         elif key == "fields":
-            self._set_status("Regex und Suchbereich prüfen. Speichern geht nur mit nichtleerem Treffer.")
+            self._set_status(
+                "Nächstes Feld setzt einen nichtleeren Treffer voraus. "
+                "Zum späteren Weiterbearbeiten kann auch ein unvollständiger Stand gespeichert werden."
+            )
         elif key == "custom":
             self._reload_fields()
             self._clear_field_form()
@@ -131,7 +140,10 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self._set_status("Weitere Felder prüfen und hinzufügen oder die Abschlussprüfung starten.")
         elif key == "finish":
             self._render_summary()
-            self._set_status("Struktur und Treffer prüfen, dann den Entwurf öffnen oder aktivieren.")
+            self._set_status(
+                "Auch unvollständige Entwürfe können im Editor weiterbearbeitet werden. "
+                "Nur die ausdrückliche Aktivierung benötigt alle Prüfungen und Nachweise."
+            )
 
     def _on_next(self) -> None:
         if self._busy:
@@ -140,8 +152,6 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         if key == "target":
             if not self._commit_target():
                 return
-            self._reload_fields()
-            self._fields = self._ordered_configured_fields()
             self._field_idx = 0
             if self._fields:
                 self._show_step(1)
@@ -157,19 +167,34 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             else:
                 self._show_step(2)
         elif key == "custom":
-            if not self._all_fields_confirmed():
-                self.var_status.set(
-                    "Abschlussprüfung blockiert: jedes konfigurierte Feld braucht einen nichtleeren Treffer."
-                )
-                return
             self._show_step(3)
         elif key == "finish":
             self._finish()
+
+    def _on_continue_draft(self) -> None:
+        if self._busy:
+            return
+        key = _STEPS[self._step]
+        if key == "target":
+            path = self._pending_draft_path if self.var_mode.get() == "existing" else None
+            if not path:
+                self.var_status.set("Bitte zuerst einen vorhandenen Entwurf auswählen.")
+                return
+            if not self._read_draft_identity(path):
+                return
+        elif key == "fields" and not self._save_current_field(require_match=False):
+            return
+        if self.draft_path:
+            self.var_finish_action.set("editor")
+            self._show_step(3)
 
     def _on_back(self) -> None:
         if self._busy:
             return
         key = _STEPS[self._step]
+        if key in {"fields", "custom", "finish"} and not self._pdf_ready():
+            self._show_step(0)
+            return
         if key == "fields" and self._field_idx > 0:
             self._field_idx -= 1
             self._show_current_field()
@@ -211,10 +236,9 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self._on_open_in_editor(draft)
 
     def _on_mode_changed(self) -> None:
-        if not self._pdf_ready():
-            return
         if self.var_mode.get() == "new":
             self._pending_draft_path = None
+            self.draft_path = None
         self._apply_target_control_states()
 
     def _on_pdf_path_changed(self, *_args: object) -> None:
@@ -263,10 +287,6 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             return
 
     def _apply_target_control_states(self) -> None:
-        if not self._pdf_ready():
-            for name in _TARGET_CONTROL_NAMES:
-                self._configure_target_widget(name, tk.DISABLED)
-            return
         self._configure_target_widget("rad_mode_new", tk.NORMAL)
         self._configure_target_widget("rad_mode_existing", tk.NORMAL)
         mode = self.var_mode.get().strip()
@@ -282,6 +302,8 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self._configure_target_widget("ent_assay_key", tk.DISABLED)
             self._configure_target_widget("ent_assay_name", tk.DISABLED)
             self._configure_target_widget("list_drafts", tk.DISABLED)
+        can_continue = mode == "existing" and bool(self._pending_draft_path)
+        self._configure_target_widget("btn_continue_draft", tk.NORMAL if can_continue else tk.DISABLED)
 
     def _set_status(self, message: str) -> None:
         if getattr(self, "_using_fulltext_fallback", False) and _FULLTEXT_FALLBACK_WARNING not in message:
@@ -292,26 +314,45 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self._draft_choices = []
         if not hasattr(self, "list_drafts"):
             return
-        self.list_drafts.delete(0, tk.END)
+        previous_state = self.list_drafts.cget("state")
+        self.list_drafts.configure(state=tk.NORMAL)
         try:
-            items = self._rules.list_inventory(kind="draft")
-        except Exception as exc:
-            self.var_status.set(f"Entwürfe konnten nicht gelesen werden: {exc}")
-            return
-        for item in items:
-            kind = str(getattr(item, "kind", "") or "")
-            path = str(getattr(item, "path", "") or "").strip()
-            key = str(getattr(item, "assay_key", "") or "").strip()
-            name = str(getattr(item, "assay_name", "") or "").strip()
-            if kind != "draft" or not path or not key:
-                continue
-            self._draft_choices.append({"path": path, "assay_key": key, "assay_name": name})
-            self.list_drafts.insert(tk.END, f"{key}  {name}")
+            self.list_drafts.delete(0, tk.END)
+            try:
+                items = self._rules.list_inventory(kind="draft")
+            except Exception as exc:
+                self.var_status.set(f"Entwürfe konnten nicht gelesen werden: {exc}")
+                return
+            for item in items:
+                kind = str(getattr(item, "kind", "") or "")
+                path = str(getattr(item, "path", "") or "").strip()
+                key = str(getattr(item, "assay_key", "") or "").strip()
+                name = str(getattr(item, "assay_name", "") or "").strip()
+                if kind != "draft" or not path or not key:
+                    continue
+                self._draft_choices.append({"path": path, "assay_key": key, "assay_name": name})
+                self.list_drafts.insert(tk.END, f"{key}  {name}")
+            self._restore_pending_draft_selection()
+        finally:
+            self.list_drafts.configure(state=previous_state)
+
+    def _restore_pending_draft_selection(self) -> bool:
+        previous_state = self.list_drafts.cget("state")
+        self.list_drafts.configure(state=tk.NORMAL)
+        try:
+            self.list_drafts.selection_clear(0, tk.END)
+            pending = self._pending_draft_path
+            for idx, choice in enumerate(self._draft_choices):
+                if pending and os.path.normcase(os.path.abspath(choice["path"])) == os.path.normcase(os.path.abspath(pending)):
+                    self.list_drafts.selection_set(idx)
+                    self.list_drafts.activate(idx)
+                    self.list_drafts.see(idx)
+                    return True
+            return False
+        finally:
+            self.list_drafts.configure(state=previous_state)
 
     def _on_draft_selected(self, _event: object = None) -> None:
-        if not self._pdf_ready():
-            self.var_status.set("Zuerst eine echte PDF laden. Danach kann ein Entwurf gewählt werden.")
-            return
         if not self._draft_choices:
             return
         sel = self.list_drafts.curselection()
@@ -319,14 +360,29 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             return
         choice = self._draft_choices[sel[0]]
         self.var_mode.set("existing")
-        self._pending_draft_path = choice["path"]
-        self.var_key.set(choice["assay_key"])
-        self.var_name.set(choice["assay_name"])
-        self.var_status.set(f"Entwurf gewählt: {choice['assay_key']}.")
+        if self._read_draft_identity(choice["path"]):
+            self._apply_target_control_states()
+            self.var_status.set(
+                f"Entwurf gewählt: {self.var_key.get()}. Direkt weiterbearbeiten "
+                "oder eine PDF für die Feldprüfung laden."
+            )
+        else:
+            restored = self._restore_pending_draft_selection()
+            if not restored:
+                self._pending_draft_path = None
+            self._apply_target_control_states()
+            self.var_status.set(
+                "Entwurfswechsel fehlgeschlagen. Der bisherige Entwurf bleibt ausgewählt."
+                if restored
+                else "Entwurfswechsel fehlgeschlagen. Bitte einen Entwurf auswählen."
+            )
 
     def _commit_target(self) -> bool:
         if not self._pdf_ready():
-            self.var_status.set("Zuerst eine echte PDF laden. Ohne PDF-Text wird kein Entwurf angefasst.")
+            self.var_status.set(
+                "Für die Feldprüfung zuerst PDF-Text laden. "
+                "Ein gewählter Entwurf kann direkt weiterbearbeitet werden."
+            )
             return False
         mode = self.var_mode.get().strip()
         if mode == "new":
@@ -357,7 +413,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self.draft_path = None
             self.var_status.set(
                 "Dieser Entwurf existiert bereits und wird nicht überschrieben. "
-                "Bitte 'Vorhandenen Entwurf mit PDF prüfen/bearbeiten' wählen."
+                "Bitte 'Vorhandenen Entwurf weiterbearbeiten / mit PDF prüfen' wählen."
             )
             return False
         if status != "created":
@@ -391,49 +447,54 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                     "Es wird kein Entwurf erzeugt. "
                     "Öffnen Sie die aktive Regel über die Assay-Verwaltung als Entwurf "
                     "und wählen Sie diesen anschließend ausdrücklich im Modus "
-                    "'Vorhandenen Entwurf mit PDF prüfen/bearbeiten'."
+                    "'Vorhandenen Entwurf weiterbearbeiten / mit PDF prüfen'."
                 )
                 return True
         return False
 
-    def _commit_existing_draft(self) -> bool:
-        path = str(self._pending_draft_path or "").strip()
+    def _commit_existing_draft(self, draft_path: str | None = None) -> bool:
+        path = str(draft_path or self._pending_draft_path or "").strip()
         if not path:
             self.var_status.set("Bitte einen vorhandenen Entwurf ausdrücklich auswählen.")
             return False
         try:
             data = self._rules.load_draft(path)
+            key = str(data.get("assay_key", "")).strip()
+            name = str(data.get("assay_name", "")).strip()
+            fields = self._fields_from_draft_data(data)
         except Exception as exc:
             messagebox.showerror("Entwurf", str(exc), parent=self)
             return False
-        key = str(data.get("assay_key", "")).strip()
-        name = str(data.get("assay_name", "")).strip()
         if not key or not name:
             self.var_status.set("Der Entwurf enthält keinen gültigen Assay-Schlüssel oder Assay-Namen.")
             return False
+        try:
+            outcome, assay_text = self._derive_assay_text(key, name)
+        except Exception as exc:
+            self.var_status.set(f"Assay-Abschnitt konnte nicht abgeleitet werden: {exc}")
+            return False
+        self._pending_draft_path = path
+        self.draft_path = path
+        self._fields = fields
+        self.var_mode.set("existing")
         self.var_key.set(key)
         self.var_name.set(name)
-        outcome = self._apply_derived_assay_text()
-        if outcome == "error":
-            return False
-        self.draft_path = path
-        self._reload_fields()
+        self._publish_derived_assay_text(outcome, assay_text)
         return True
 
     def _load_existing_draft(self, draft_path: str) -> bool:
         """Liest einen ausdrücklich gewählten Entwurf, ohne ihn neu zu erzeugen."""
-        self._pending_draft_path = draft_path
-        self.var_mode.set("existing")
-        return self._commit_existing_draft() if self._pdf_ready() else self._read_draft_identity(draft_path)
+        return self._commit_existing_draft(draft_path) if self._pdf_ready() else self._read_draft_identity(draft_path)
 
     def _read_draft_identity(self, draft_path: str) -> bool:
         try:
             data = self._rules.load_draft(draft_path)
+            key = str(data.get("assay_key", "")).strip()
+            name = str(data.get("assay_name", "")).strip()
+            fields = self._fields_from_draft_data(data)
         except Exception as exc:
             messagebox.showerror(_WINDOW_TITLE, str(exc), parent=self.master)
             return False
-        key = str(data.get("assay_key", "")).strip()
-        name = str(data.get("assay_name", "")).strip()
         if not key or not name:
             messagebox.showerror(
                 _WINDOW_TITLE,
@@ -442,25 +503,28 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             )
             return False
         self._pending_draft_path = draft_path
+        self.draft_path = draft_path
+        self._fields = fields
+        self.var_mode.set("existing")
         self.var_key.set(key)
         self.var_name.set(name)
-        self._reload_fields_from(draft_path)
         return True
 
     def _ordered_configured_fields(self) -> list[dict]:
         path = self.draft_path or self._pending_draft_path
         if not path:
             return []
-        data = self._rules.load_draft(path)
-        fields = data.get("extract_rules", {}).get("fields", [])
-        if not isinstance(fields, list):
-            return []
-        return [field for field in fields if isinstance(field, dict)]
+        return self._fields_from_draft_data(self._rules.load_draft(path))
+
+    @staticmethod
+    def _fields_from_draft_data(data: dict) -> list[dict]:
+        extract_rules = data.get("extract_rules", {})
+        fields = extract_rules.get("fields", []) if isinstance(extract_rules, dict) else []
+        return [field for field in fields if isinstance(field, dict)] if isinstance(fields, list) else []
 
     def _reload_fields_from(self, path: str) -> None:
         data = self._rules.load_draft(path)
-        fields = data.get("extract_rules", {}).get("fields", [])
-        self._fields = [field for field in fields if isinstance(field, dict)] if isinstance(fields, list) else []
+        self._fields = self._fields_from_draft_data(data)
 
     def _reload_fields(self) -> None:
         if not self.draft_path:
@@ -535,34 +599,36 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self._clear_derived_assay_text()
         self._set_preview_text(text)
         self._apply_target_control_states()
-        self.var_status.set(f"PDF-Text geladen ({len(text)} Zeichen). Ziel jetzt wählen.")
+        self.var_status.set(f"PDF-Text geladen ({len(text)} Zeichen). Ziel wählen oder mit der Feldprüfung fortfahren.")
 
     def _apply_derived_assay_text(self) -> str:
         key = self.var_key.get().strip()
         name = self.var_name.get().strip()
+        try:
+            outcome, text = self._derive_assay_text(key, name)
+        except Exception as exc:
+            self._using_fulltext_fallback = False
+            self.assay_text = ""
+            self._derived_for = None
+            self.var_status.set(f"Assay-Abschnitt konnte nicht abgeleitet werden: {exc}")
+            return "error"
+        self._publish_derived_assay_text(outcome, text)
+        return outcome
+
+    def _derive_assay_text(self, key: str, name: str) -> tuple[str, str]:
         normalized = str(getattr(self, "_normalized_pdf_text", "") or "")
         block = ""
         if key and name and normalized.strip() and hasattr(self._rules, "derive_assay_block"):
-            try:
-                block = str(self._rules.derive_assay_block(normalized, key, name)).strip()
-            except Exception as exc:
-                self._using_fulltext_fallback = False
-                self.assay_text = ""
-                self._derived_for = None
-                self.var_status.set(f"Assay-Abschnitt konnte nicht abgeleitet werden: {exc}")
-                return "error"
-        if block:
-            self._using_fulltext_fallback = False
-            self.assay_text = block
-            self._derived_for = self._current_target_identity()
-            self._set_preview_text(block)
-            return "block"
-        self._using_fulltext_fallback = True
-        self.assay_text = normalized
+            block = str(self._rules.derive_assay_block(normalized, key, name)).strip()
+        return ("block", block) if block else ("fulltext", normalized)
+
+    def _publish_derived_assay_text(self, outcome: str, text: str) -> None:
+        self._using_fulltext_fallback = outcome == "fulltext"
+        self.assay_text = text
         self._derived_for = self._current_target_identity()
-        self._set_preview_text(normalized)
-        self.var_status.set(_FULLTEXT_FALLBACK_WARNING)
-        return "fulltext"
+        self._set_preview_text(text)
+        if self._using_fulltext_fallback:
+            self.var_status.set(_FULLTEXT_FALLBACK_WARNING)
 
     def _all_fields_confirmed(self) -> bool:
         if not self.draft_path or not self.assay_text.strip():
@@ -640,19 +706,20 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             return
         self._show_match(key, result)
 
-    def _save_current_field(self) -> bool:
+    def _save_current_field(self, *, require_match: bool = True) -> bool:
         if not self.draft_path or not self._fields:
             self.var_status.set("Es ist kein Entwurf geladen.")
             return False
         key = self.var_f_key.get().strip()
         regex = self.var_f_regex.get().strip()
-        if not regex:
+        if require_match and not regex:
             self.var_status.set("Der Regex darf nicht leer sein.")
             return False
-        probed = self._test_current_pattern()
-        if probed is None or not self._row_has_nonempty_value(probed):
-            self.var_status.set(f"Feld {key}: kein nichtleerer Treffer. Regex oder Suchbereich anpassen.")
-            return False
+        if require_match:
+            probed = self._test_current_pattern()
+            if probed is None or not self._row_has_nonempty_value(probed):
+                self.var_status.set(f"Feld {key}: kein nichtleerer Treffer. Regex oder Suchbereich anpassen.")
+                return False
         try:
             search_from = self._build_search_from()
             self._rules.update_field(
@@ -661,14 +728,15 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                 regex=regex,
                 search_from=search_from if self.var_f_mode.get() != "none" else {},
             )
+            self._reload_fields()
         except Exception as exc:
             messagebox.showerror("Feld", str(exc), parent=self)
             return False
-        self._reload_fields()
-        row = self._locate_row_for_key(key)
-        if row is None or not self._row_has_nonempty_value(row):
-            self.var_status.set(f"Feld {key}: nach dem Speichern kein nichtleerer Treffer.")
-            return False
+        if require_match:
+            row = self._locate_row_for_key(key)
+            if row is None or not self._row_has_nonempty_value(row):
+                self.var_status.set(f"Feld {key}: nach dem Speichern kein nichtleerer Treffer.")
+                return False
         try:
             self._field_idx = next(
                 idx for idx, field in enumerate(self._fields) if str(field.get("key", "")).strip() == key
@@ -807,11 +875,11 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         else:
             if mode == "update":
                 self.lbl_mode_summary.config(
-                    text="Aktive Regel wird geändert. Problem-PDF und eine davon verschiedene Referenz-PDF sind erforderlich."
+                    text="Nur zur Aktivierung der geänderten aktiven Regel: Problem-PDF und eine davon verschiedene Referenz-PDF sind erforderlich."
                 )
                 self.frm_reference.pack(fill="x", before=self.lbl_required_summary)
             else:
-                self.lbl_mode_summary.config(text="Neuanlage: eine Referenz-PDF ist nicht erforderlich.")
+                self.lbl_mode_summary.config(text="Aktivierung einer Neuanlage: eine Referenz-PDF ist nicht erforderlich.")
                 self.frm_reference.pack_forget()
                 self.var_reference_pdf.set("")
         if getattr(self, "_using_fulltext_fallback", False):
@@ -833,7 +901,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                         + (
                             "Alle konfigurierten Felder sind getroffen."
                             if complete
-                            else "Abschluss erst möglich, wenn jedes Feld einen nichtleeren Treffer hat."
+                            else "Weiterbearbeiten ist möglich; zur Aktivierung braucht jedes Feld einen nichtleeren Treffer."
                         )
                     ),
                     fg="#2f6b2f" if complete else "#9a6700",
@@ -843,6 +911,11 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                     self.list_summary.insert(tk.END, f"  Feld {row.get('key')}: {label}")
             except Exception as exc:
                 self.lbl_required_summary.config(text=f"Feldprüfung fehlgeschlagen: {exc}", fg="#a33")
+        else:
+            self.lbl_required_summary.config(
+                text="Feldtreffer noch nicht geprüft. Der Entwurf kann ohne Aktivierung im Editor weiterbearbeitet werden.",
+                fg="#9a6700",
+            )
         try:
             structure = self._rules.validate_draft(self.draft_path)
         except Exception as exc:
@@ -863,18 +936,24 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
     def _finish(self) -> None:
         if not self.draft_path:
             return
+        action = self.var_finish_action.get()
+        if action == "editor":
+            self._shutdown("editor")
+            return
+        if action != "activate":
+            return
         pdf_path = self.var_pdf.get().strip()
         if not self._pdf_ready():
             messagebox.showwarning(
                 "PDF fehlt",
-                "Der Abschluss braucht eine erfolgreich geladene PDF.",
+                "Die Aktivierung braucht eine erfolgreich geladene PDF.",
                 parent=self,
             )
             return
         if not self._all_fields_confirmed():
             messagebox.showwarning(
                 "Felder unvollständig",
-                "Der Abschluss ist blockiert, solange nicht jedes konfigurierte Feld "
+                "Die Aktivierung ist blockiert, solange nicht jedes konfigurierte Feld "
                 "einen nichtleeren Treffer im PDF-Text hat.",
                 parent=self,
             )
@@ -887,7 +966,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         if not structure.get("ok"):
             messagebox.showwarning(
                 "Strukturprüfung",
-                "Der Abschluss ist blockiert, solange die Strukturprüfung Fehler meldet.",
+                "Die Aktivierung ist blockiert, solange die Strukturprüfung Fehler meldet.",
                 parent=self,
             )
             return
@@ -933,8 +1012,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                 )
             messagebox.showerror("Nachweis fehlgeschlagen", message, parent=self)
             return
-        action = self.var_finish_action.get()
-        self._shutdown("activate" if action == "activate" else "editor")
+        self._shutdown("activate")
 
     def _set_preview_text(self, text: str) -> None:
         if not hasattr(self, "txt_preview"):

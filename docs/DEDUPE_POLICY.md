@@ -2,6 +2,12 @@
 
 ## Current Contract
 
+Package 3a (2026-11-12): every new processing path writes SQLite only. Legacy
+`both`/`excel` inputs normalize to `sqlite`. Duplicate candidates retain their
+SQLite ledger IDs and produce no Excel sink, including no skipped Excel output.
+Existing workbooks and frozen historical plans remain unchanged; historical
+exports cannot be resumed. `excel_rules` and historical readers remain compatible.
+
 `src.extractor.api.extract_record()` builds a structured dedupe identity.
 
 Default Dedupe V2:
@@ -19,6 +25,27 @@ The extracted `AssayRecord` contains:
 - `dedupe_version`
 - `dedupe_basis`
 - `device_id`
+
+## Result correction aliases (Package 3b)
+
+Genuine reanalysis can correct identity-bearing fields while keeping the stable
+`runs.id`. Original rows and their uniqueness guard remain unchanged.
+`run_identity_aliases` adds append-only claims for identities of accepted
+revisions. Candidates and rejected revisions claim nothing; earlier accepted
+aliases remain authoritative even after another correction.
+
+DbWriter takes `BEGIN IMMEDIATE` before looking up original keys and aliases.
+Accepting a revision checks collisions, adds its alias and appends the human
+selection in that same transaction. A key owned by another run rejects selection
+with an explicit duplicate-clarification message; ownership is never reassigned.
+An interrupted selection rolls back its alias as well.
+
+Normal ingestion consults both original keys and accepted aliases under its
+write lock. Only the exact original identified job/PDF/block/payload attempt can
+return `already_persisted`. Another import matching any accepted identity still
+creates ordinary `duplicate_pending` evidence. Reanalysis selection changes a
+whole effective result; it does not implement the separate duplicate queue's
+reserved Add/Overwrite operations.
 
 ## Device Source
 
@@ -42,7 +69,7 @@ that status through `get_device_config_status()`.
 
 ## Storage
 
-Excel writes the technical basis columns:
+Historical workbooks contain the technical basis columns (new processing does not write them):
 
 ```text
 assay_key, device_id, lot_id, dedupe_key, dedupe_version
@@ -74,20 +101,16 @@ Important boundary:
   example with a different PDF file that has the same fachliche dedupe identity
   or after an intentional force rerun / deleted job state.
 
-In `output_mode=both`, SQLite is now the ledger and runs before Excel. Excel is
-written only when SQLite returns `inserted`. If SQLite returns
-`duplicate_pending`, Excel is not written and the job result reports an Excel
-status of `skipped_duplicate_pending`.
+All accepted new modes use the SQLite ledger. `inserted`/`already_persisted`
+retain stable run IDs; `duplicate_pending` retains the candidate and existing-run
+IDs. New results/plans list SQLite sinks only and keep compatibility metadata
+`excel_status=not_required`, `export_retry_available=false`.
 
-Known ledger-first recovery case: if SQLite returns `inserted` but the following
-Excel write fails, the run is already present in the SQLite ledger. A later
-rerun can therefore be reported as `duplicate_pending` and will not
-automatically backfill Excel. Inspect the run/candidate manually in the
-**Duplikate** tab; explicit Add/Overwrite/Excel-recovery semantics remain
-follow-up work (see Follow-Up below).
-
-In `output_mode=excel`, behavior stays Excel-only. No SQLite duplicate queue is
-created in that mode.
+Historical note (AP-12B, retired by Package 3a): the former `both` mode ran SQLite
+before Excel, and the former `excel` mode bypassed SQLite. Those historical
+outputs and plans remain diagnostic evidence. They are never backfilled,
+migrated, resumed, or automatically marked complete. An old Excel failure must
+not trigger full re-extraction or create a new duplicate candidate.
 
 ## Duplicate Review in the Main App
 
@@ -103,8 +126,8 @@ Discarding a candidate changes only the candidate audit state:
 - `duplicate_decision_log` receives an action entry with `discard`.
 - The existing `runs` row and Excel output remain unchanged.
 
-Overwrite, add-entry behavior, and Excel recovery for the ledger-first failure
-case remain follow-up work. They need separate write semantics and audit rules.
+Overwrite and add-entry behavior remain follow-up work requiring separate write
+semantics and audit rules. Excel recovery is retired; historical files stay unchanged.
 
 AP-12B.1 only records candidates. AP-12B.2 adds the first GUI review action:
 `deleted`. `added` and `overwritten` are reserved for later packages.
@@ -125,8 +148,9 @@ AP-12B.1 and AP-12B.2 are done:
 Still open (future packages):
 
 - **Add** — accept candidate as additional entry with audit trail
-- **Overwrite** — replace existing run/Excel row with explicit semantics
-- **Excel recovery** — backfill Excel after ledger-first insert + Excel write failure
+- **Overwrite** — replace an existing SQLite run with explicit semantics and audit trail
+
+Excel recovery is not an available or planned action under the Package-3a contract.
 
 AP-12A established the visible dedupe basis and legacy skip behavior for duplicates
 in Excel/SQLite.

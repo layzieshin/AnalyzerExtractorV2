@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -17,7 +18,9 @@ from src.assaycandidate.api import (
     load_known_assay_keys,
 )
 from src.dbwriter.api import discard_duplicate_candidate, get_duplicate_candidate, list_duplicate_candidates
-from src.jobqueue.api import enqueue_pdf_job, list_jobs, retry_failed_job
+from src.application.api import DesktopSettings, ResultsController
+from src.jobqueue.api import enqueue_pdf_job, list_jobs
+from src.processing.api import retry_failed
 from src.ruleresolver.api import resolve_ruleset, validate_rules_integrity
 from src.rulesuite.api import create_draft_from_template_if_missing, list_rulesets
 from src.runtime.api import list_devices, load_runtime_config, resolve_app_root
@@ -136,7 +139,7 @@ class TestApp(tk.Tk):
         self._db_runs_by_id: dict[str, dict[str, object]] = {}
         self._db_visible_columns: list[str] = default_result_columns()
         self._db_column_catalog: dict[str, str] = {}
-        self._db_assay_choice_to_key: dict[str, str] = {}
+        self._db_assay_choices: list[dict[str, str]] = []
         self._db_display_context: dict[str, object] = {"assay_labels": {}, "payload_labels": {}}
         self._db_rulesets: list[dict[str, object]] = []
         self._tree_db_sorter: TreeviewSorter | None = None
@@ -265,7 +268,7 @@ class TestApp(tk.Tk):
         ttk.Combobox(
             form,
             textvariable=self.var_output_mode,
-            values=("excel", "sqlite", "both"),
+            values=("sqlite",),
             state="readonly",
             width=12,
         ).grid(row=0, column=1, sticky="w", padx=6, pady=(8, 4))
@@ -359,8 +362,8 @@ class TestApp(tk.Tk):
             height=4,
         )
         for col, title, width in (
-            ("assay_key", "Assay-Key", 90),
-            ("name", "Name", 150),
+            ("assay_key", "Assay", 190),
+            ("name", "Namenshinweis", 150),
             ("file", "Datei", 170),
             ("line_no", "Zeile", 55),
             ("status", "Status", 95),
@@ -476,8 +479,8 @@ class TestApp(tk.Tk):
         return {"driver": "sqlite", "path": str(self._sqlite_path())}
 
     def _selected_db_assay_key(self) -> str:
-        label = self.var_db_assay.get().strip()
-        return self._db_assay_choice_to_key.get(label, label)
+        index = self.cmb_db_assay.current()
+        return self._db_assay_choices[index]["assay_key"] if 0 <= index < len(self._db_assay_choices) else ""
 
     def _build_db_display_context(self, assay_key: str) -> dict[str, object]:
         column_mapping: dict[str, str] = {}
@@ -505,7 +508,7 @@ class TestApp(tk.Tk):
             self.cmb_db_charge.configure(values=[])
             self.var_db_assay.set("")
             self.var_db_charge.set("")
-            self._db_assay_choice_to_key = {}
+            self._db_assay_choices = []
             self._db_rulesets = []
             self._db_display_context = {"assay_labels": {}, "payload_labels": {}}
             self._db_runs = []
@@ -520,13 +523,16 @@ class TestApp(tk.Tk):
         except Exception:
             self._db_rulesets = []
 
-        assay_keys = [row["assay_key"] for row in list_result_assays(self._database_store_spec())]
-        choices = build_assay_filter_choices(self._db_rulesets, assay_keys)
-        self._db_assay_choice_to_key = {row["label"]: row["assay_key"] for row in choices}
+        controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(self._sqlite_path())))
+        assays = controller.list_assays()
+        choices = [{"label": row.assay_name or "Assayname fehlt", "assay_key": row.assay_key} for row in assays]
+        assay_keys = [row.assay_key for row in assays]
+        previous = self._selected_db_assay_key()
+        self._db_assay_choices = choices
         labels = [row["label"] for row in choices]
         self.cmb_db_assay.configure(values=labels)
-        if labels and self.var_db_assay.get() not in labels:
-            self.var_db_assay.set(labels[0])
+        if labels:
+            self.cmb_db_assay.current(next((index for index, row in enumerate(choices) if row["assay_key"] == previous), 0))
         elif not labels:
             self.var_db_assay.set("")
         self.on_db_assay_selected()
@@ -558,6 +564,9 @@ class TestApp(tk.Tk):
             charge=charge,
         )
         self._db_runs = list(result.get("runs") or [])
+        controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(self._sqlite_path())))
+        names = {row.id: row.assay_name for row in controller.list_runs(assay_key=assay_key, charge=charge).runs}
+        self._db_runs = [{**row, "assay_name": names.get(row.get("id"), "Assayname fehlt")} for row in self._db_runs]
         self._db_runs_by_id = {str(run.get("id")): run for run in self._db_runs if run.get("id") is not None}
         self._db_display_context = self._build_db_display_context(assay_key)
         self._db_column_catalog = build_result_column_catalog(self._db_runs, self._db_display_context)
@@ -692,7 +701,7 @@ class TestApp(tk.Tk):
     def _refresh_devices(self) -> None:
         choices: list[str] = []
         self._device_choice_to_id = {}
-        for device in list_devices(self.project_root):
+        for device in list_devices(self.project_root, store_spec={"driver": "sqlite", "path": str(self._sqlite_path())}):
             row = format_device_choice(device)
             label = row["label"]
             if not label:
@@ -937,7 +946,7 @@ class TestApp(tk.Tk):
                 skipped += 1
                 continue
             try:
-                retry_failed_job(str(self.project_root), row["job_id"])
+                retry_failed(str(self.project_root), row["job_id"])
                 restarted += 1
             except Exception as e:
                 skipped += 1
@@ -1184,7 +1193,7 @@ class TestApp(tk.Tk):
                 tk.END,
                 iid=candidate_id,
                 values=(
-                    candidate.get("assay_key") or "-",
+                    candidate.get("assay_name") or "Assayname fehlt",
                     candidate.get("assay_name_hint") or "-",
                     candidate.get("test_file") or "-",
                     candidate.get("line_no") or "-",
@@ -1228,6 +1237,11 @@ class TestApp(tk.Tk):
                 "Assay-Kandidaten: rules/index.json konnte nicht gelesen werden; Status ungeprueft."
             )
         annotated = annotate_assay_candidates(candidates, known_keys)
+        try:
+            names = {row["assay_key"]: row.get("assay_name", "") for row in list_rulesets(str(self.project_root))}
+        except (OSError, RuntimeError, ValueError):
+            names = {}
+        annotated = [{**row, "assay_name": names.get(row.get("assay_key"), "")} for row in annotated]
         if not annotated:
             self._clear_rework_candidates("Keine Kandidaten erkannt.")
             return
@@ -1348,7 +1362,7 @@ class TestApp(tk.Tk):
                 skipped += 1
                 continue
             try:
-                retry_failed_job(str(self.project_root), str(item["job_id"]))
+                retry_failed(str(self.project_root), str(item["job_id"]))
                 restarted += 1
             except Exception as e:
                 skipped += 1
@@ -1367,7 +1381,9 @@ class TestApp(tk.Tk):
         if not sqlite_path.exists():
             self._log(f"SQLite nicht gefunden: {sqlite_path}")
             return
-        rows = list_duplicate_candidates(str(sqlite_path), status=self.var_duplicate_status.get())
+        from dataclasses import asdict
+        controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(sqlite_path)))
+        rows = [asdict(row) for row in controller.list_duplicate_candidates(status=self.var_duplicate_status.get())]
         for row in rows:
             summary = format_duplicate_candidate_summary(row)
             candidate_id = summary["candidate_id"]
@@ -1378,7 +1394,7 @@ class TestApp(tk.Tk):
                 values=(
                     summary["candidate_id"],
                     summary["status"],
-                    summary["assay_key"],
+                    summary["assay_name"],
                     summary["device_id"],
                     summary["detected_at"],
                     summary["existing_run_id"],
@@ -1395,6 +1411,12 @@ class TestApp(tk.Tk):
         detail = get_duplicate_candidate(str(self._sqlite_path()), candidate_id)
         if not detail:
             return
+        controller = ResultsController(self.project_root, settings_provider=lambda: DesktopSettings("sqlite", str(self._sqlite_path())))
+        named = controller.get_duplicate_candidate_detail(candidate_id)
+        if named:
+            detail["candidate"]["assay_name"] = named.candidate.assay_name
+            if named.existing and detail.get("existing"):
+                detail["existing"]["assay_name"] = named.existing.assay_name
         self._duplicate_details[candidate_id] = detail
         self._set_text(self.txt_duplicate_detail, format_duplicate_candidate_detail(detail))
         for item in self.tree_duplicate_fields.get_children():
@@ -1473,6 +1495,7 @@ class AnalyzerDesktopApp(tk.Tk):
     VIEW_KEYS = (
         "dashboard",
         "results",
+        "statistics",
         "validation",
         "rules",
         "settings",
@@ -1482,6 +1505,7 @@ class AnalyzerDesktopApp(tk.Tk):
     TASK_PROCESSING = "processing_queue"
     TASK_BOOTSTRAP = "bootstrap"
     TASK_SETTINGS_SAVE = "settings-save"
+    TASK_PDF_PREVIEW = "validation-pdf-preview"
 
     def __init__(
         self,
@@ -1503,6 +1527,7 @@ class AnalyzerDesktopApp(tk.Tk):
             DashboardView,
             DiagnosticsView,
             ResultsView,
+            StatisticsView,
             RulesView,
             SettingsView,
             ValidationView,
@@ -1548,6 +1573,9 @@ class AnalyzerDesktopApp(tk.Tk):
 
         self._services: DesktopAppServices | None = None
         self._settings = None
+        self._qc_configuration_generation = 0
+        self._qc_source_generation = 0
+        self._qc_source_latest = None
         self._device_label_map: dict[str, str] = {}
         self._bootstrapped = False
         self._create_desktop_services = create_desktop_services
@@ -1562,6 +1590,8 @@ class AnalyzerDesktopApp(tk.Tk):
         self._settings_save_latest_edit_generation = 0
         self._settings_save_inflight_id: int | None = None
         self._current_view = "dashboard"
+        self._validation_window_restore: tuple[str, str] | None = None
+        self._validation_pdf_pending: tuple[int, str, int, int, float] | None = None
         self._nav_buttons: dict[str, ttk.Button] = {}
         self._validation_badge: StatusBadge | None = None
         self._views: dict[str, ttk.Frame] = {}
@@ -1619,11 +1649,25 @@ class AnalyzerDesktopApp(tk.Tk):
             on_save_validation=self._save_selected_validation,
             on_correct_validation=self._correct_selected_validation,
         )
+        self._views["statistics"] = StatisticsView(
+            content,
+            on_refresh=self._open_qc_lots,
+            on_qc_selected=self._load_qc_lot,
+            on_configure_qc=self._configure_qc_lot,
+            on_reopen_qc=self._reopen_qc_lot,
+            on_close_qc=self._close_qc_lot,
+            on_qc_report_selected=self._load_qc_report_version,
+            on_export_qc=self._export_qc_report,
+        )
         self._views["validation"] = ValidationView(
             content,
             on_refresh=self.refresh_current_view,
             on_save=self._save_pending_validation,
             on_open_pdf=self._open_validation_pdf,
+            on_preview=self._request_validation_pdf,
+            on_reanalyze=self._reanalyze_validation_cases,
+            on_choose=self._choose_validation_result,
+            on_edit_rules=self.open_rule_editor,
         )
         self._views["rules"] = RulesView(
             content,
@@ -1639,6 +1683,9 @@ class AnalyzerDesktopApp(tk.Tk):
             on_pick_sqlite=self._pick_sqlite_path,
             on_reload_devices=self._reload_devices,
             on_open_output_folder=self._open_output_folder,
+            on_manage_devices=lambda: self._open_qc_configuration("devices"),
+            on_migrate_devices=lambda: self._open_qc_configuration("migrate"),
+            on_manage_profiles=lambda: self._open_qc_configuration("profiles"),
         )
         self._views["diagnostics"] = DiagnosticsView(
             content,
@@ -1696,6 +1743,11 @@ class AnalyzerDesktopApp(tk.Tk):
     def show_view(self, key: str, *, refresh: bool = True) -> None:
         if key not in self.VIEW_KEYS:
             return
+        previous = self._current_view
+        if previous == "validation" and key != "validation":
+            self._views["validation"].suspend_pdf_preview()
+            self._validation_pdf_pending = None
+            self._restore_validation_window()
         self._current_view = key
         for view_key, frame in self._views.items():
             if view_key == key:
@@ -1705,8 +1757,82 @@ class AnalyzerDesktopApp(tk.Tk):
         for view_key, button in self._nav_buttons.items():
             style = "NavActive.TButton" if view_key == key else "Nav.TButton"
             button.configure(style=style)
+        if key == "validation" and previous != "validation":
+            self._maximize_validation_window()
+            self._views["validation"].resume_pdf_preview()
         if refresh:
             self.refresh_current_view()
+
+    def _maximize_validation_window(self) -> None:
+        """Keep normal title bars and remember the window state before validation."""
+        if self.__dict__.get("_validation_window_restore") is not None:
+            return
+        try:
+            previous_state, previous_geometry = self.state(), self.geometry()
+            self._validation_window_restore = (previous_state, previous_geometry)
+            try:
+                self.state("zoomed")
+            except tk.TclError:
+                # Some X11 Tk builds expose maximize as an attribute instead.
+                self.attributes("-zoomed", True)
+        except tk.TclError:
+            pass
+
+    def _restore_validation_window(self) -> None:
+        previous = self.__dict__.get("_validation_window_restore")
+        self._validation_window_restore = None
+        if previous is None:
+            return
+        state, geometry = previous
+        try:
+            try:
+                self.state("normal")
+                self.attributes("-zoomed", False)
+            except tk.TclError:
+                pass
+            if state == "normal" and geometry:
+                self.geometry(geometry)
+            self.state(state if state in {"normal", "zoomed", "iconic"} else "normal")
+        except tk.TclError:
+            pass
+
+    def _request_validation_pdf(self, request: tuple[int, str, int, int, float]) -> None:
+        self._validation_pdf_pending = request
+        self._submit_validation_pdf_preview()
+
+    def _submit_validation_pdf_preview(self) -> None:
+        if not self._require_services() or self._current_view != "validation" or self._task_runner.shutdown:
+            return
+        request = self.__dict__.get("_validation_pdf_pending")
+        if request is None or self._task_runner.is_active(self.TASK_PDF_PREVIEW):
+            return
+        if request != self._views["validation"].pdf_request():
+            return
+        _generation, report_id, _run_id, page_index, zoom = request
+
+        def work() -> object:
+            assert self._services is not None
+            return self._services.results.render_report_pdf_page(report_id, page_index=page_index, zoom=zoom)
+
+        def finish(page: object = None, error: BaseException | None = None) -> None:
+            from src.application.api import PdfPreviewError
+
+            if self._current_view == "validation":
+                view = self._views["validation"]
+                if error is None:
+                    view.render_pdf_page(request, page)
+                else:
+                    message = str(error) if isinstance(error, PdfPreviewError) else "Die PDF-Vorschau konnte nicht geladen werden. Bitte aktualisieren."
+                    view.render_pdf_error(request, message)
+            if request != self.__dict__.get("_validation_pdf_pending"):
+                self._submit_validation_pdf_preview()
+
+        self._task_runner.submit(
+            self.TASK_PDF_PREVIEW,
+            work,
+            on_success=lambda page: finish(page),
+            on_error=lambda error: finish(error=error),
+        )
 
     def _friendly_error_parts(self, error: BaseException | str) -> tuple[str, str]:
         from interfaces.tk.view_models import user_error_dialog_parts
@@ -1763,6 +1889,9 @@ class AnalyzerDesktopApp(tk.Tk):
     def refresh_current_view(self) -> None:
         if not self._require_services():
             return
+        if self._current_view == "statistics":
+            self._open_qc_lots()
+            return
         self._refresh_generation += 1
         generation = self._refresh_generation
         view_key = self._current_view
@@ -1775,6 +1904,7 @@ class AnalyzerDesktopApp(tk.Tk):
         assert self._services is not None
         settings = self._services.settings.load()
         payload: dict[str, object] = {"view": view_key, "settings": settings}
+        payload["build_info"] = self._services.settings.get_build_info()
         validation_cases = self._services.results.list_open_validation_cases()
         payload["validation_open_count"] = len(validation_cases)
         if view_key == "dashboard":
@@ -1798,8 +1928,13 @@ class AnalyzerDesktopApp(tk.Tk):
         return payload
 
     def _apply_view_payload(self, view_key: str, payload: dict[str, object]) -> None:
+        from interfaces.tk.desktop_theme import APP_TITLE
+
         settings = payload["settings"]
         self._settings = settings
+        if isinstance(payload.get("build_info"), dict):
+            version = str(payload["build_info"].get("version") or "UNKNOWN")
+            self.title(f"{APP_TITLE} · Version {version if version != 'UNKNOWN' else 'unbekannt'}")
         self._set_validation_badge(int(payload.get("validation_open_count") or 0))
         if view_key == "dashboard":
             dashboard = self._views["dashboard"]
@@ -1820,7 +1955,7 @@ class AnalyzerDesktopApp(tk.Tk):
         elif view_key == "settings":
             devices = getattr(payload["devices"], "devices", ())
             self._device_label_map = {
-                f"{item.display_name} ({item.device_id})": item.device_id for item in devices
+                item.choice_label: item.device_id for item in devices
             }
             self._views["settings"].render_settings(
                 settings,
@@ -1986,11 +2121,17 @@ class AnalyzerDesktopApp(tk.Tk):
         if item.validation_ambiguous:
             self._show_info_dialog(self, "Validierung", "Die Validierungshistorie ist nicht eindeutig.")
             return
+        if item.comparison or item.missing_fields or item.revision_error:
+            self._show_info_dialog(self, "Validierung", "Bitte zuerst den Vergleich oder die Nacharbeit abschliessen.")
+            return
         initials = str(validation.validation_initials() or "").strip()
         if not initials:
             self._show_info_dialog(self, "Validierung", "Bitte Initialen fuer die Validierung angeben.")
             return
         comment = str(validation.validation_comment() or "").strip()
+        binding = {}
+        if item.selection_token:
+            binding = {"expected_selection_token": item.selection_token, "store_path": item.store_path, "request_id": uuid.uuid4().hex}
         key = f"validation-{item.report_id}-{item.run_id}"
         if self._task_runner.is_active(key):
             self._show_info_dialog(self, "Validierung", "Die Validierung wird bereits gespeichert.")
@@ -1998,7 +2139,7 @@ class AnalyzerDesktopApp(tk.Tk):
 
         def work() -> tuple[object, object]:
             assert self._services is not None
-            saved = self._services.results.validate_report_run(item.report_id, item.run_id, initials, comment)
+            saved = self._services.results.validate_report_run(item.report_id, item.run_id, initials, comment, **binding)
             return saved, self._services.results.list_open_validation_cases()
 
         def on_success(result: tuple[object, object]) -> None:
@@ -2006,15 +2147,76 @@ class AnalyzerDesktopApp(tk.Tk):
             validation.clear_comment()
             validation.render_cases(items)
             self._set_validation_badge(len(items))
-            export_error = str(getattr(saved, "excel_export_error", "") or "")
-            if export_error:
-                self._show_error_dialog(
-                    self,
-                    "Validierung gespeichert",
-                    "Die Validierung wurde gespeichert. Der Excel-Export ist fehlgeschlagen und kann unter Diagnose erneut versucht werden.",
-                )
 
         self._task_runner.submit(key, work, on_success=on_success, on_error=self._show_task_error)
+
+    def _reanalyze_validation_cases(self) -> None:
+        if not self._require_services():
+            return
+        view = self._views["validation"]
+        cases = view.selected_items()
+        initials = str(view.validation_initials() or "").strip()
+        if not cases or not initials:
+            self._show_info_dialog(self, "Neuanalyse", "Bitte Messungen auswaehlen und Initialen angeben.")
+            return
+        key = "validation-reanalysis"
+        if self._task_runner.is_active(key):
+            return
+        request_id = uuid.uuid4().hex
+        view.set_reanalysis_busy(True)
+
+        def work():
+            result = self._services.results.reanalyze_selected_cases(cases, initials, request_id=request_id)
+            return result, self._services.results.list_open_validation_cases()
+
+        def success(result):
+            batch, items = result
+            view.set_reanalysis_busy(False)
+            if self._current_view == "validation":
+                view.render_cases(items)
+            self._set_validation_badge(len(items))
+            failed = [f"Messung {item.run_id}: {item.error}" for item in batch.items if item.error]
+            if failed:
+                self._show_info_dialog(self, "Nacharbeit erforderlich", "\n\n".join(failed))
+
+        def error(exc):
+            view.set_reanalysis_busy(False)
+            self._show_task_error(exc)
+
+        self._task_runner.submit(key, work, on_success=success, on_error=error)
+
+    def _choose_validation_result(self, action: str) -> None:
+        if not self._require_services():
+            return
+        view = self._views["validation"]
+        case = view.selected_item()
+        initials = str(view.validation_initials() or "").strip()
+        if case is None or case.comparison is None or not initials:
+            self._show_info_dialog(self, "Ergebnis auswaehlen", "Bitte einen aktuellen Vergleich auswaehlen und Initialen angeben.")
+            return
+        key = f"validation-choice-{case.run_id}"
+        if self._task_runner.is_active(key) or self._task_runner.is_active("validation-reanalysis"):
+            return
+        request_id = uuid.uuid4().hex
+        comment = str(view.validation_comment() or "").strip()
+        view.set_reanalysis_busy(True)
+
+        def work():
+            self._services.results.choose_reanalysis_result(case, action, initials, request_id=request_id, note=comment)
+            return self._services.results.list_open_validation_cases()
+
+        def success(items):
+            view.set_reanalysis_busy(False)
+            if self._current_view == "validation":
+                view.render_cases(items)
+                view.clear_comment()
+            self._set_validation_badge(len(items))
+
+        def error(exc):
+            view.set_reanalysis_busy(False)
+            self._show_task_error(exc)
+
+        self._task_runner.submit(key, work, on_success=success, on_error=error)
 
     def _open_validation_pdf(self) -> None:
         if not self._require_services():
@@ -2079,13 +2281,16 @@ class AnalyzerDesktopApp(tk.Tk):
         if self._task_runner.is_active(key):
             self._show_info_dialog(self, "Validierung", "Die Validierung wird bereits gespeichert.")
             return
+        results_view = self._views["results"]
+        token, store_path = getattr(results_view, "validation_result_binding", lambda: ("", ""))()
+        binding = {"expected_selection_token": token, "store_path": store_path, "request_id": uuid.uuid4().hex} if token else {}
 
         def work() -> tuple[object, object, object]:
             assert self._services is not None
             if correct:
-                saved = self._services.results.correct_report_run(report_id, run_id, initials, comment)
+                saved = self._services.results.correct_report_run(report_id, run_id, initials, comment, **binding)
             else:
-                saved = self._services.results.validate_report_run(report_id, run_id, initials, comment)
+                saved = self._services.results.validate_report_run(report_id, run_id, initials, comment, **binding)
             detail = self._services.results.get_report_detail(report_id)
             reports = self._services.results.list_recent_reports()
             return saved, detail, reports
@@ -2099,12 +2304,6 @@ class AnalyzerDesktopApp(tk.Tk):
                 return
             results.clear_validation_comment()
             self._apply_report_detail(results, detail)
-            if str(getattr(saved, "excel_export_error", "") or ""):
-                self._show_error_dialog(
-                    self,
-                    "Validierung gespeichert",
-                    "Die Validierung wurde gespeichert. Der Excel-Export ist fehlgeschlagen und kann unter Diagnose erneut versucht werden.",
-                )
 
         self._task_runner.submit(key, work, on_success=on_success, on_error=self._show_task_error)
 
@@ -2247,11 +2446,245 @@ class AnalyzerDesktopApp(tk.Tk):
         def on_success(result: tuple[object, object]) -> None:
             inventory, timing = result
             self._device_label_map = {
-                f"{item.display_name} ({item.device_id})": item.device_id for item in inventory.devices
+                item.choice_label: item.device_id for item in inventory.devices
             }
             settings_view.render_settings(self._settings, devices=inventory.devices, timing=timing)
 
         self._task_runner.submit("devices-reload", work, on_success=on_success, on_error=self._show_task_error)
+
+    def _qc_store_is_displayed(self, store_path: str) -> bool:
+        current = str(getattr(self._settings, "sqlite_path", "") or "")
+        return bool(current and Path(current).resolve() == Path(store_path).resolve())
+
+    def _qc_initials(self) -> str:
+        return str(getattr(self._settings, "operator_initials", "") or "")
+
+    def _show_qc_error(self, exc: BaseException) -> None:
+        from src.application.api import QualityControlApplicationError
+
+        if isinstance(exc, QualityControlApplicationError):
+            self._show_error_dialog(self, "Qualitätskontrolle", str(exc))
+        else:
+            self._show_task_error(exc)
+
+    def _submit_qc_write(self, work, dialog, store_path: str, *, results=False) -> None:
+        if not self._qc_store_is_displayed(store_path):
+            self._show_error_dialog(self, "Qualitätskontrolle", "Der Ergebnisspeicher wurde gewechselt. Bitte den Dialog schließen und neu laden.")
+            return
+        dialog.save_button.configure(state="disabled")
+
+        def success(_result):
+            if dialog.winfo_exists():
+                dialog.destroy()
+            if self._qc_store_is_displayed(store_path):
+                self._open_qc_lots() if results else self._reload_devices()
+
+        def error(exc):
+            if dialog.winfo_exists():
+                dialog.save_button.configure(state="normal")
+            self._show_qc_error(exc)
+
+        if not self._task_runner.submit("qc-write", work, on_success=success, on_error=error):
+            dialog.save_button.configure(state="normal")
+
+    def _open_qc_configuration(self, kind: str) -> None:
+        from uuid import uuid4
+        from interfaces.tk.widgets.dialogs import show_qc_initials_dialog, show_qc_inventory_dialog, show_qc_profile_dialog
+
+        if not self._require_services():
+            return
+        self._qc_configuration_generation += 1
+        generation = self._qc_configuration_generation
+
+        def work():
+            state = self._services.settings.get_qc_configuration()
+            assays, fields = [], {}
+            if kind == "profiles":
+                for item in self._services.rules.list_inventory(kind="active"):
+                    key = str(getattr(item, "assay_key", "") or "")
+                    if key:
+                        label = str(getattr(item, "assay_name", "") or "Assayname fehlt")
+                        assays.append((label, key))
+                        fields[key] = self._services.rules.list_fields(key)
+            return state, assays, fields
+
+        def loaded(payload):
+            state, assays, fields = payload
+            if generation != self._qc_configuration_generation or not self._qc_store_is_displayed(state.store_path):
+                return
+            if kind == "devices":
+                def submit(snapshot, initials, dialog):
+                    request = uuid4().hex
+                    self._submit_qc_write(lambda: self._services.settings.save_qc_inventory(state, snapshot, initials, request), dialog, state.store_path)
+                show_qc_inventory_dialog(self, state, initials=self._qc_initials(), on_submit=submit)
+            elif kind == "profiles":
+                def submit(snapshot, expected, initials, dialog):
+                    request = uuid4().hex
+                    self._submit_qc_write(lambda: self._services.settings.save_qc_profile(state, snapshot,
+                        expected_version_id=expected, operator_initials=initials, request_id=request), dialog, state.store_path)
+                show_qc_profile_dialog(self, state, initials=self._qc_initials(), assays=assays, field_choices=fields, on_submit=submit)
+            elif kind == "migrate":
+                if not state.legacy_source_sha256:
+                    self._show_error_dialog(self, "Geräte übernehmen", state.legacy_message)
+                    return
+                def submit(initials, _reason, dialog):
+                    request = uuid4().hex
+                    self._submit_qc_write(lambda: self._services.settings.migrate_qc_devices(state, initials, request), dialog, state.store_path)
+                show_qc_initials_dialog(self, title="Geräte übernehmen",
+                    message="Vorhandene Geräte und historische Kennungen in den ausgewählten Ergebnisspeicher übernehmen. Die Originaldatei bleibt als Nachweis erhalten.",
+                    initials=self._qc_initials(), on_submit=submit)
+
+        self._task_runner.submit(f"qc-configuration-{generation}", work, on_success=loaded, on_error=self._show_qc_error)
+
+    def _open_qc_lots(self) -> None:
+        if not self._require_services() or self._task_runner.is_active("qc-lots"):
+            return
+        self._qc_source_generation += 1
+        self._qc_source_latest = None
+        displayed_store = str(getattr(self._settings, "sqlite_path", "") or "")
+
+        def loaded(cases):
+            if not self._qc_store_is_displayed(displayed_store):
+                return
+            if cases and not self._qc_store_is_displayed(cases[0].store_path):
+                return
+            self._views["statistics"].render_qc_lots(cases)
+
+        self._task_runner.submit("qc-lots", self._services.results.list_qc_lots, on_success=loaded, on_error=self._show_qc_error)
+
+    def _load_qc_lot(self) -> None:
+        view = self._views["statistics"]
+        case, profile = view.selected_qc_case(), view.selected_qc_profile_version()
+        if case is None or not profile:
+            return
+        self._qc_source_generation += 1
+        self._qc_source_latest = (self._qc_source_generation, case, profile)
+        view.set_qc_loading()
+        if not self._task_runner.is_active("qc-sources"):
+            self._start_qc_source_latest()
+
+    def _start_qc_source_latest(self) -> None:
+        if self._qc_source_latest is None:
+            return
+        generation, case, profile = self._qc_source_latest
+
+        def work():
+            detail = self._services.results.get_qc_lot_detail(case, profile_version_id=profile)
+            return detail, self._services.results.get_qc_analysis(detail), self._services.results.list_qc_report_versions(detail.case)
+
+        def finish(payload=None, error=None):
+            if generation != self._qc_source_generation:
+                if self._qc_source_latest is not None and self._qc_source_latest[0] == self._qc_source_generation:
+                    self._start_qc_source_latest()
+                return
+            self._qc_source_latest = None
+            view = self._views["statistics"]
+            selected = view.selected_qc_case()
+            if not self._qc_store_is_displayed(case.store_path) or selected is None or selected.lot_key != case.lot_key or view.selected_qc_profile_version() != profile:
+                return
+            if error:
+                self._show_qc_error(error)
+            elif payload is not None:
+                detail, analysis, versions = payload
+                view.render_qc_detail(detail)
+                view.render_qc_analysis(analysis, versions)
+
+        self._task_runner.submit("qc-sources", work, on_success=lambda payload: finish(payload), on_error=lambda exc: finish(error=exc))
+
+    def _load_qc_report_version(self) -> None:
+        view = self._views["statistics"]
+        detail = view.selected_qc_detail()
+        if detail is None:
+            return
+        version = view.selected_qc_report_version()
+        self._qc_source_generation += 1
+        generation = self._qc_source_generation
+        self._qc_source_latest = None
+        view.set_qc_analysis_loading()
+        def work():
+            return (self._services.results.get_qc_analysis(detail, evidence_lot_version_id=version),
+                    self._services.results.list_qc_report_versions(detail.case))
+        def loaded(payload):
+            selected = view.selected_qc_case()
+            if (generation != self._qc_source_generation or not self._qc_store_is_displayed(detail.case.store_path)
+                    or selected is None or selected.lot_key != detail.case.lot_key or view.selected_qc_report_version() != version):
+                return
+            view.render_qc_analysis(*payload)
+        def failed(exc):
+            selected = view.selected_qc_case()
+            if (generation == self._qc_source_generation and self._qc_store_is_displayed(detail.case.store_path)
+                    and selected is not None and selected.lot_key == detail.case.lot_key):
+                self._show_qc_error(exc)
+        self._task_runner.submit(f"qc-report-{generation}", work, on_success=loaded, on_error=failed)
+
+    def _close_qc_lot(self) -> None:
+        from uuid import uuid4
+        from interfaces.tk.widgets.dialogs import show_qc_close_dialog
+
+        view = self._views["statistics"]
+        detail, analysis = view.selected_qc_detail(), view.selected_qc_analysis()
+        if detail is None or analysis is None or analysis.evidence_lot_version_id is not None or detail.case.state != "open":
+            return
+        generation = self._qc_source_generation
+        def loaded(witnesses):
+            selected = view.selected_qc_case()
+            if (generation != self._qc_source_generation or not self._qc_store_is_displayed(detail.case.store_path)
+                    or selected is None or selected.lot_key != detail.case.lot_key or view.selected_qc_analysis() is not analysis):
+                return
+            if not witnesses:
+                self._show_error_dialog(self, "Chargenabschluss", "Keine passende neuere validierte Folgecharge mit neuerem Messdatum vorhanden.")
+                return
+            def submit(witness, initials, dialog):
+                request = uuid4().hex
+                self._submit_qc_write(lambda: self._services.results.close_qc_lot(detail, analysis, witness,
+                    operator_initials=initials, request_id=request), dialog, detail.case.store_path, results=True)
+            show_qc_close_dialog(self, detail, witnesses, initials=self._qc_initials(), on_submit=submit)
+        self._task_runner.submit("qc-witnesses", lambda: self._services.results.list_qc_close_witnesses(detail),
+            on_success=loaded, on_error=self._show_qc_error)
+
+    def _export_qc_report(self) -> None:
+        view = self._views["statistics"]
+        analysis = view.selected_qc_analysis()
+        if analysis is None or analysis.evidence_lot_version_id is None:
+            return
+        destination = filedialog.asksaveasfilename(parent=self, title="Gespeicherten PDF-Nachweis exportieren",
+            initialfile="QC-Auswertung.pdf", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")], confirmoverwrite=False)
+        if not destination:
+            return
+        generation = self._qc_source_generation
+        include_explanations = view._qc_include_explanations.get()
+        def saved(result):
+            if generation == self._qc_source_generation and self._qc_store_is_displayed(analysis.case.store_path):
+                self._show_info_dialog(self, "PDF-Nachweis", "Die erweiterte Druckfassung wurde gespeichert." if include_explanations else "Der gespeicherte PDF-Nachweis wurde unverändert exportiert.")
+        self._task_runner.submit("qc-export", lambda: self._services.results.export_qc_report(analysis.case,
+            evidence_lot_version_id=analysis.evidence_lot_version_id, destination=destination, include_explanations=include_explanations), on_success=saved, on_error=self._show_qc_error)
+
+    def _configure_qc_lot(self) -> None:
+        from uuid import uuid4
+        from interfaces.tk.widgets.dialogs import show_qc_lot_dialog
+
+        detail = self._views["statistics"].selected_qc_detail()
+        if detail is None:
+            return
+        def submit(references, initials, dialog):
+            request = uuid4().hex
+            self._submit_qc_write(lambda: self._services.results.save_qc_lot(detail, references,
+                operator_initials=initials, request_id=request), dialog, detail.case.store_path, results=True)
+        show_qc_lot_dialog(self, detail, initials=self._qc_initials(), on_submit=submit)
+
+    def _reopen_qc_lot(self) -> None:
+        from uuid import uuid4
+        from interfaces.tk.widgets.dialogs import show_qc_initials_dialog
+
+        detail = self._views["statistics"].selected_qc_detail()
+        if detail is None or detail.case.state != "closed":
+            return
+        def submit(initials, reason, dialog):
+            request = uuid4().hex
+            self._submit_qc_write(lambda: self._services.results.reopen_qc_lot(detail,
+                operator_initials=initials, request_id=request, reason=reason), dialog, detail.case.store_path, results=True)
+        show_qc_initials_dialog(self, title="Charge wieder öffnen", message="Frühere Auswertungen und PDF-Nachweise bleiben unverändert erhalten.",
+            initials=self._qc_initials(), require_reason=True, on_submit=submit)
 
     def _open_output_folder(self) -> None:
         if not self._require_services():
@@ -2361,9 +2794,8 @@ class AnalyzerDesktopApp(tk.Tk):
 
         def work() -> tuple[object, tuple[ProcessingOutcome, ...]]:
             diagnosis = self._services.extraction.get_job_diagnosis(job_id)
-            if diagnosis is not None and getattr(diagnosis, "retry_kind", "") == "export_only":
-                outcome = self._services.extraction.retry_excel_export(job_id)
-                return outcome, (outcome,)
+            if diagnosis is not None and getattr(diagnosis, "retry_kind", "") in {"retired", "export_only"}:
+                return diagnosis, ()
             item = self._services.extraction.retry_failed(job_id)
             outcomes = self._drain_processing_queue()
             return item, outcomes

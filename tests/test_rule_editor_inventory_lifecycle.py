@@ -96,6 +96,7 @@ def test_rule_editor_window_exposes_multiselect_inventory_filters() -> None:
         assert all(variable.get() for variable in app.inventory_filter_vars.values())
         columns = tuple(app.tree_rulesets["columns"])
         assert columns == ("type", "key", "name", "fields", "modified", "status")
+        assert tuple(app.tree_rulesets["displaycolumns"]) == ("type", "name", "fields", "modified", "status")
         texts = _widget_texts(app.page_inventory)
         for label in _MAIN_ACTIONS:
             assert label in texts

@@ -23,6 +23,7 @@ from src.resultvalidation.api import (
     correct_validation,
     get_run_validation,
     list_run_validations,
+    list_run_validations_readonly,
     replace_validation,
     validate_run,
 )
@@ -258,6 +259,10 @@ def test_existing_database_without_validation_table_is_extended(tmp_path: Path) 
         "comment",
         "supersedes_validation_id",
         "created_at_utc",
+        "revision_id",
+        "selection_id",
+        "selection_token",
+        "request_id",
     }
     assert by_name["validation_id"][5] == 1
     assert by_name["created_at_utc"][3] == 0
@@ -380,6 +385,9 @@ def test_public_api_and_architecture_boundary() -> None:
         "run_id",
         "operator_initials",
         "comment",
+        "expected_selection_token",
+        "request_id",
+        "project_root",
     ]
     assert inspect.signature(validate_run).parameters["comment"].default == ""
     assert list(inspect.signature(replace_validation).parameters) == [
@@ -387,6 +395,9 @@ def test_public_api_and_architecture_boundary() -> None:
         "run_id",
         "operator_initials",
         "comment",
+        "expected_selection_token",
+        "request_id",
+        "project_root",
     ]
     assert set(RunValidation.__dataclass_fields__) == {
         "validation_id",
@@ -396,6 +407,10 @@ def test_public_api_and_architecture_boundary() -> None:
         "comment",
         "supersedes_validation_id",
         "created_at_utc",
+        "revision_id",
+        "selection_id",
+        "selection_token",
+        "request_id",
     }
 
     resultstore_imports: list[str] = []
@@ -412,7 +427,7 @@ def test_public_api_and_architecture_boundary() -> None:
             for module in modules:
                 if module == "sqlite3" or module.startswith("sqlite3."):
                     assert path.name == "store.py"
-                if module.startswith("src.") and module != "src.resultstore.api":
+                if module.startswith("src.") and module not in {"src.resultstore.api", "src.jobcontroller.api"}:
                     if module == "src.resultvalidation" or module.startswith("src.resultvalidation."):
                         continue
                     pytest.fail(f"{path.name} imports {module}")
@@ -424,7 +439,8 @@ def test_public_api_and_architecture_boundary() -> None:
                     assert "insert into runs" not in lowered
                     assert "update " not in lowered
                     assert "delete " not in lowered
-                    assert "alter " not in lowered
+                    if "alter " in lowered:
+                        assert "alter table run_validations add column" in lowered
                     assert " from runs" not in lowered
                     assert "join runs" not in lowered
     assert resultstore_imports == ["store.py"]
@@ -443,3 +459,100 @@ def _string_literals(node: ast.AST) -> list[str]:
         if isinstance(child, ast.Constant) and isinstance(child.value, str):
             literals.append(child.value)
     return literals
+
+
+def _simulate_rejected_unc_authority(monkeypatch, path: Path, *, disappear: Path | None = None):
+    from urllib.parse import quote
+    from src.resultvalidation import store
+
+    encoded_name = quote(path.name)
+    first_uri = f"file://medistar/share/{encoded_name}?mode=ro"
+    normalized_uri = f"file:////medistar/share/{encoded_name}?mode=ro"
+    class SourcePath:
+        def is_file(self):
+            return path.is_file()
+        def as_uri(self):
+            return first_uri.removesuffix("?mode=ro")
+        def as_posix(self):
+            return f"//medistar/share/{path.name}"
+
+    real_connect = sqlite3.connect
+    targets, statements = [], []
+    def connect(target, *args, **kwargs):
+        targets.append((target, kwargs.get("uri")))
+        assert kwargs.get("uri") is True
+        if target == first_uri:
+            if disappear is not None:
+                path.rename(disappear)
+            raise sqlite3.OperationalError("invalid uri authority: medistar")
+        assert target == normalized_uri
+        connection = real_connect(f"{path.as_uri()}?mode=ro", uri=True)
+        # The database is genuinely read-only, even without query_only. This
+        # also detects accidental fallback to a creating read/write connection.
+        connection.execute("PRAGMA query_only=OFF")
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("CREATE TABLE forbidden_by_readonly(value TEXT)")
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(store, "_resolve_sqlite_path", lambda _spec: SourcePath())
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return real_connect, targets, statements, (first_uri, normalized_uri)
+
+
+@pytest.mark.parametrize("metadata_present", [False, True])
+@pytest.mark.parametrize("outer_writer", [False, True])
+def test_readonly_authority_fallback_preserves_bytes_schema_and_outer_writer(tmp_path, monkeypatch, metadata_present, outer_writer):
+    path = tmp_path / "store" / "validation # ü %.sqlite"
+    _create_runs_db(path, [(1, _MEASUREMENT)])
+    stored = None
+    if metadata_present:
+        # Retained legacy metadata is seeded directly so this test exercises
+        # only the new strict reader, including URI-special filename characters.
+        with sqlite3.connect(str(path)) as connection:
+            connection.execute("""CREATE TABLE run_validations (
+                validation_id INTEGER PRIMARY KEY, run_id INTEGER,
+                operator_initials TEXT, validated_at_utc TEXT, comment TEXT,
+                supersedes_validation_id INTEGER, created_at_utc TEXT)""")
+            connection.execute("INSERT INTO run_validations VALUES (1, 1, 'RR', '2026-11-12T00:00:00+00:00', 'legacy', NULL, NULL)")
+        stored = RunValidation(1, 1, "RR", "2026-11-12T00:00:00+00:00", "legacy", None)
+    real_connect, targets, statements, uris = _simulate_rejected_unc_authority(monkeypatch, path)
+    outer = real_connect(str(path), isolation_level=None) if outer_writer else None
+    if outer is not None:
+        outer.execute("BEGIN IMMEDIATE")
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    files = {item.name for item in path.parent.iterdir()}
+    try:
+        result = list_run_validations_readonly(_spec(path), [1])
+        assert result.latest(1) == stored
+        assert targets == [(uris[0], True), (uris[1], True)]
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+        assert {item.name for item in path.parent.iterdir()} == files
+        assert statements[0] == "PRAGMA query_only=ON"
+        assert "BEGIN" in statements and not any("IMMEDIATE" in statement or "CREATE" in statement for statement in statements)
+    finally:
+        if outer is not None:
+            outer.rollback()
+            outer.close()
+
+
+def test_readonly_missing_file_never_opens_or_creates_database(tmp_path, monkeypatch):
+    path = tmp_path / "missing.sqlite"
+    monkeypatch.setattr(sqlite3, "connect", lambda *_a, **_k: pytest.fail("missing file must not be opened"))
+    with pytest.raises(ValidationStoreMissingError):
+        list_run_validations_readonly(_spec(path), [1])
+    assert not path.exists() and list(tmp_path.iterdir()) == []
+
+
+def test_readonly_authority_fallback_does_not_recreate_disappearing_source(tmp_path, monkeypatch):
+    path = tmp_path / "store" / "source.sqlite"
+    preserved = path.with_name("preserved.sqlite")
+    _create_runs_db(path, [(1, _MEASUREMENT)])
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    _, targets, _, uris = _simulate_rejected_unc_authority(monkeypatch, path, disappear=preserved)
+    with pytest.raises(ValidationStoreUnreadableError):
+        list_run_validations_readonly(_spec(path), [1])
+    assert targets == [(uris[0], True), (uris[1], True)]
+    assert not path.exists()
+    assert (preserved.read_bytes(), preserved.stat().st_mtime_ns) == before
+    assert {item.name for item in path.parent.iterdir()} == {"preserved.sqlite"}

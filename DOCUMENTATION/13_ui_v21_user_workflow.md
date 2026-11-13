@@ -1,14 +1,14 @@
 # UI V2.1 — Ablauf für die Produkt-Shell
 
-**Stand:** 2026-09-24  
+**Stand:** 2026-11-12 (Paket 3b; unabhängige Prüfung noch offen)
 **Gilt für:** `AnalyzerDesktopApp`, Fenster **Analyzer Result Extractor**  
 **Nicht der Alltag:** Tab-Oberfläche `LegacyTestApp` (nur Support, siehe unten)
 
-SQLite auf diesem PC ist die führende, strukturierte Ablage der Ergebnisse und Validierungen. Excel ist ein nachgelagerter Export. Ein späteres QMTool oder PostgreSQL gehört nicht zu dieser Version und ist hier keine zweite Wahrheit.
+SQLite auf diesem PC ist die verbindliche Ablage neuer Ergebnisse und Validierungen. Das Original-PDF dient zur Prüfung. Ein späterer PDF-Nachweis folgt separat. Neue Verarbeitung und Validierung ändern keine Excel-Dateien; vorhandene Arbeitsmappen bleiben erhalten. Ein späteres QMTool oder PostgreSQL gehört nicht zu dieser Version.
 
 ## Start
 
-`AnalyzerResultExtractorV2.exe` starten oder auf dem Entwicklungs-PC `python test_app_main.py`. Ohne gesetztes `ARE_LEGACY_UI` öffnet sich die Sidebar mit **Auswertung**, **Ergebnisse**, **Regelwerke**, **Einstellungen** und **Diagnose**.
+`AnalyzerResultExtractorV2.exe` starten oder auf dem Entwicklungs-PC `python test_app_main.py`. Ohne gesetztes `ARE_LEGACY_UI` öffnet sich die Sidebar mit **Auswertung**, **Ergebnisse**, **Validierung**, **Regelwerke**, **Einstellungen** und **Diagnose**.
 
 ## Einstellungen
 
@@ -19,12 +19,14 @@ Unter **Einstellungen** vor dem ersten Lauf prüfen und mit **Speichern** sicher
 | **Automatischer Import aktiv** | Beobachtet den Eingabeordner |
 | **Eingabeordner** / **Archivordner** | Quelle und Ziel für Auto-Import |
 | **Unterordner einbeziehen** | Auch PDFs in Unterordnern |
-| **Ausgabemodus** | `both` (SQLite und Excel), `sqlite` (nur Datenbank) oder `excel` (nur Excel) |
+| **Ablage** | Neue Ergebnisse und Validierungen werden immer in SQLite gespeichert |
 | **Gerät** | Gerätezuordnung; **Neu laden** aktualisiert die Liste |
 | **Operator-Initialen** | Vorschlag für die Validierung, keine Benutzerverwaltung |
 | **SQLite-Pfad** unter **Erweitert** | Nur ändern, wenn die Datenbank nicht am üblichen Ort liegen soll |
 
-**Ausgabeordner öffnen** zeigt den Excel-Ordner. Auto-Import ist standardmäßig aus, bis er hier aktiviert und gespeichert wird.
+**Ausgabeordner öffnen** zeigt den üblichen Ausgabeordner mit der Ergebnisdatenbank und vorhandenen historischen Dateien. Auto-Import ist standardmäßig aus, bis er hier aktiviert und gespeichert wird.
+
+Alte Excel-Einstellungen werden beim Laden wirksam auf SQLite umgestellt, ohne die Einstellungsdatei zu verändern. Erst **Speichern** sichert SQLite und erhält die anderen Einstellungen. Es gibt keine Excel-Auswahl mehr.
 
 ## Manueller Mehrfachimport
 
@@ -39,7 +41,7 @@ Manuell gewählte PDFs werden nicht in den Archivordner verschoben.
 
 In **Auswertung** zeigt **Automatischer Import** den Zustand **Aktiv** oder **Inaktiv**, dazu Eingabe, Archiv und Unterordner. Die Ordner selbst stehen unter **Einstellungen**.
 
-Neue PDFs im Eingabeordner werden im Hintergrund erkannt und verarbeitet. Erst ein erfolgreich abgeschlossener Watch-Import (**Fertig**) wird in den Archivordner gelegt. Schlägt die Verarbeitung fehl, bleibt die PDF im Eingabeordner.
+Neue PDFs im Eingabeordner werden im Hintergrund erkannt und verarbeitet. Nach erfolgreicher Verarbeitung wird die Watch-Datei archiviert; das wartet nicht auf die spätere menschliche Validierung. **Fertig** bestätigt den Abschluss. Bei einem SQLite-Fehler bleibt die PDF im Eingabeordner.
 
 | Status | Bedeutung | Nächste Aktion |
 |--------|-----------|----------------|
@@ -53,7 +55,7 @@ Neue PDFs im Eingabeordner werden im Hintergrund erkannt und verarbeitet. Erst e
 
 ## Ergebnisse und Validierung
 
-**Ergebnisse** listet die gespeicherten Berichte. **Details anzeigen** öffnet die Messungen eines Berichts. **PDF öffnen** und **Ausgabeordner öffnen** führen zur Quelle bzw. zur Excel-Ausgabe.
+**Ergebnisse** listet die gespeicherten Berichte. **Details anzeigen** öffnet die Messungen eines Berichts. **PDF öffnen** und **Ausgabeordner öffnen** führen zum Original-PDF bzw. zum üblichen Ausgabeordner.
 
 Eine Messung auswählen. Der Bereich **Validierung** zeigt Initialen, Kommentar und die Historie.
 
@@ -64,7 +66,7 @@ Eine Messung auswählen. Der Bereich **Validierung** zeigt Initialen, Kommentar 
 | **Validiert** | Alle Messungen des Berichts sind validiert | Keine weitere Pflicht |
 | **Prüfung erforderlich** | Fehler, Klärfall oder uneindeutige Historie | **Diagnose** bzw. Historie lesen, nicht still überschreiben |
 
-Eine vorhandene Validierung wird nicht überschrieben. **Validierung korrigieren** fragt nach und legt einen neuen Eintrag an, der auf den bisherigen verweist.
+Eine vorhandene Validierung wird nicht überschrieben. **Validierung korrigieren** fragt nach und legt einen neuen SQLite-Eintrag an, der auf den bisherigen verweist. Erstvalidierung und Korrektur bleiben nach einem Neustart erhalten; sie ändern weder Messwerte noch Arbeitsmappen oder historische Ausgabepläne.
 
 ## Diagnose und Nacharbeit
 
@@ -73,22 +75,43 @@ Eine vorhandene Validierung wird nicht überschrieben. **Validierung korrigieren
 Bei einem fehlgeschlagenen Lauf den Eintrag wählen:
 
 1. **Details** zeigt Fehlerart, Hinweis und, falls vorhanden, Assay-Kandidaten.
-2. Fehlt ein Regelwerk: Kandidat wählen, **Draft aus Kandidat** bestätigen, im Rule Editor ergänzen und aktivieren, danach hier **Erneut verarbeiten**.
-3. Liegt der Fehler nicht am Regelwerk: **Erneut verarbeiten**. Die Oberfläche meldet `Fehlerhafte Verarbeitung wird erneut ausgeführt …`.
+2. Fehlt ein Regelwerk: Kandidat wählen, **Draft aus Kandidat** bestätigen, im Rule Editor ergänzen und aktivieren, danach hier **Erneut versuchen**.
+3. Liegt der Fehler nicht am Regelwerk und handelt es sich um einen neuen Verarbeitungsfehler: **Erneut versuchen**. Die Oberfläche meldet `Fehlerhafte Verarbeitung wird erneut ausgeführt …`.
 
 Erneutes Auswählen derselben PDF oder ein neuer Auto-Import setzt einen fehlgeschlagenen Lauf nicht von selbst zurück.
 
-## Export-only Retry
+## Historische Excel-Fehler
 
-Sind die strukturierten Daten gespeichert und scheitert nur Excel, lautet der Hinweis genau:
+Alte Fehler und eingefrorene Ausgabepläne bleiben zur Diagnose lesbar. **Details** zeigt den gespeicherten technischen Stand. Die Anzeige erklärt, dass der historische Ausgabeplan schreibgeschützt ist; **Erneut versuchen** ist dafür deaktiviert.
 
-`Ergebnis gespeichert – Excel-Ausgabe fehlgeschlagen`
+Es wird kein alter Export fortgesetzt, keine Arbeitsmappe geändert und keine PDF erneut extrahiert, um Excel zu reparieren. Vorhandene Dateien und gespeicherte Zustände bleiben durch die Umstellung erhalten. Ein alter fehlgeschlagener Stand wird nicht automatisch als fertig markiert.
 
-Die Fehlerart ist **Excel-Ausgabe**. **Erneut verarbeiten** wiederholt dann nur diese Excel-Ausgabe. Die PDF wird nicht neu gelesen, die aktuellen Regelwerke werden nicht neu angewendet, und das bereits gespeicherte SQLite-Ergebnis wird nicht noch einmal geschrieben. Bereits geschriebene Excel-Zeilen werden nicht doppelt angelegt.
+## Offene Messungen erneut analysieren
 
-Bleibt die Excel-Datei gesperrt, bleibt der Eintrag fehlgeschlagen. Dieselbe Aktion nach dem Freigeben der Datei erneut ausführen. Danach soll der Status **Fertig** sein. Ein Watch-Import wird erst dann archiviert.
+In **Validierung** bleiben links das Original-PDF und rechts die Arbeitsliste.
+Eine oder mehrere noch unvalidierte Messungen mit Strg/Umschalt markieren und
+**Erneut analysieren** wählen. Die Fälle werden nacheinander mit dem jetzt
+aktiven Regelwerk und ihrem ursprünglichen Gerät geprüft. Die fokussierte
+markierte Zeile bestimmt PDF, Vergleich und spätere Einzelentscheidung.
 
-`Excel-Ausgabe fehlgeschlagen` ohne den Zusatz „Ergebnis gespeichert“ heißt: für diesen Lauf liegt kein erfolgreiches SQLite-Ergebnis vor. **Erneut verarbeiten** ist weiterhin dieselbe Schaltfläche.
+Der Vergleich zeigt sämtliche alten und neuen Felder sowie Quellen-, Regel- und
+Identitätsnachweise. Geänderte Werte sind hervorgehoben. **Alte Werte behalten**
+oder **Neue Werte übernehmen** wählt jeweils das ganze Ergebnis. Danach die
+gewählten Werte prüfen und separat **Validierung speichern** wählen. Die
+Neuanalyse und die Auswahl erzeugen keine automatische Validierung.
+
+Jedes im Regelwerk konfigurierte Feld muss gefüllt sein, auch ein dort als
+optional bezeichnetes Feld. Das gilt für die alten und die neuen Werte. Bei
+fehlenden Feldern **Regelwerk bearbeiten**, die Regel prüfen/aktivieren und
+erneut analysieren. Vollständige alte Werte können nach belegter Quelle
+ausdrücklich beibehalten werden, wenn die neue Extraktion fehlschlägt.
+
+Fehlende/mehrdeutige Originalquellen, ein abweichender PDF-Nachweis oder eine
+Kollision der korrigierten Messungsidentität mit einer anderen Messung müssen
+zuerst geklärt werden. Alte Ergebnisse, Analyseversuche und Entscheidungen
+bleiben in der Historie. Bereits validierte Messungen sind nicht für diese
+Neuanalyse freigegeben. Nach einem Wechsel der Datenbank oder einem inzwischen
+geänderten Ergebnis fordert die Anwendung zum Aktualisieren auf.
 
 ## Klärfälle und Duplikate
 

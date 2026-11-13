@@ -58,6 +58,7 @@ def build_inventory_view(host: tk.Misc, parent: tk.Widget) -> None:
     host.tree_rulesets, host.inventory_tree_frame = create_scrollable_treeview(
         container,
         columns=("type", "key", "name", "fields", "modified", "status"),
+        displaycolumns=("type", "name", "fields", "modified", "status"),
         show="headings",
         height=14,
         horizontal=True,

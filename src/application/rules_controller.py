@@ -113,7 +113,8 @@ class RuleSuiteController:
         candidates = find_assay_candidates(str(normalized_text or ""))
         known_keys = load_known_assay_keys(str(self._project_root / "rules" / "index.json"))
         annotated = annotate_assay_candidates(candidates, known_keys)
-        return tuple(_to_assay_candidate_item(row) for row in annotated)
+        names = {item.assay_key: item.assay_name for item in self.list_inventory(kind="active")}
+        return tuple(_to_assay_candidate_item({**row, "assay_name": names.get(row.get("assay_key"), "")}) for row in annotated)
 
     def discover_assay_candidates_for_job(self, job_id: str) -> tuple[AssayCandidateItem, ...]:
         sources = get_job_diagnostic_sources(self._project_root, job_id)
@@ -133,7 +134,8 @@ class RuleSuiteController:
                     seen.add(candidate_id)
                 discovered.append(candidate)
         annotated = annotate_assay_candidates(discovered, known_keys)
-        return tuple(_to_assay_candidate_item(row) for row in annotated)
+        names = {item.assay_key: item.assay_name for item in self.list_inventory(kind="active")}
+        return tuple(_to_assay_candidate_item({**row, "assay_name": names.get(row.get("assay_key"), "")}) for row in annotated)
 
     def validate_rules_integrity(self) -> dict[str, Any]:
         rules_dir = self._project_root / "rules"
@@ -561,6 +563,7 @@ def _to_assay_candidate_item(row: dict[str, Any]) -> AssayCandidateItem:
         reason=str(row.get("reason") or ""),
         confidence=str(row.get("confidence") or ""),
         known_status=str(row.get("known_status") or ""),
+        assay_name=str(row.get("assay_name") or "Assayname fehlt"),
     )
 
 

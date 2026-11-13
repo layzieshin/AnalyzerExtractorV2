@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .revisions import project_run
+
 _UTC = timezone.utc
 _UTC_MIN = datetime.min.replace(tzinfo=_UTC)
 
@@ -106,20 +108,9 @@ def list_result_charges(store_spec: dict[str, Any], assay_key: str) -> list[dict
     if not str(assay_key or "").strip():
         return []
 
-    path = _resolve_path(store_spec)
-    with _connect_readonly(path) as conn:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT lot_id
-            FROM runs
-            WHERE assay_key = ?
-              AND lot_id IS NOT NULL
-              AND TRIM(lot_id) != ''
-            ORDER BY lot_id
-            """,
-            (assay_key,),
-        ).fetchall()
-    return [{"lot_id": str(row[0]), "charge": str(row[0])} for row in rows]
+    runs = list_result_runs(store_spec, assay_key=assay_key, limit=None)["runs"]
+    lots = sorted({str(row["lot_id"]) for row in runs if str(row.get("lot_id") or "").strip()})
+    return [{"lot_id": lot, "charge": lot} for lot in lots]
 
 
 def list_result_runs(
@@ -127,7 +118,7 @@ def list_result_runs(
     *,
     assay_key: str | None = None,
     charge: str | None = None,
-    limit: int = 500,
+    limit: int | None = 500,
     offset: int = 0,
 ) -> dict[str, Any]:
     status = get_result_store_status(store_spec)
@@ -140,28 +131,33 @@ def list_result_runs(
     if not select_cols:
         return {"runs": [], "limit": limit, "offset": offset, "truncated": False, "total_returned": 0}
 
-    where_parts: list[str] = []
-    params: list[Any] = []
-    if assay_key and CORE_ASSAY_COLUMN in columns:
-        where_parts.append("assay_key = ?")
-        params.append(assay_key)
-    if charge and "lot_id" in columns:
-        where_parts.append("lot_id = ?")
-        params.append(charge)
-
-    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
     order_sql = "ORDER BY id DESC" if "id" in columns else ""
-    query = f"SELECT {', '.join(select_cols)} FROM runs {where_sql} {order_sql} LIMIT ? OFFSET ?"
-    params.extend((int(limit) + 1, max(0, int(offset))))
+    # Identity and lot can be corrected by a selected revision. Filter and page
+    # only after projection, otherwise revised lots disappear from their filter.
+    query = f"SELECT rowid, {', '.join(select_cols)} FROM runs {order_sql}"
 
     with _connect_readonly(path) as conn:
-        rows = conn.execute(query, params).fetchall()
+        rows = conn.execute(query).fetchall()
+        runs = []
+        for row in rows:
+            run = project_run(conn, _row_to_run(dict(zip(select_cols, row[1:]))))
+            run["_source_rowid"] = int(row[0])
+            runs.append(run)
+        grouped = _group_prepared_runs(runs, columns)
+        report_ids = {_source_row_id(run): report_id for report_id, group in grouped.items() for run in group}
+        for run in runs:
+            run["report_id"] = report_ids.get(_source_row_id(run), "")
+            run.pop("_source_rowid", None)
+    if assay_key and CORE_ASSAY_COLUMN in columns:
+        runs = [run for run in runs if run["assay_key"] == assay_key]
+    if charge and "lot_id" in columns:
+        runs = [run for run in runs if run["lot_id"] == charge]
+    runs = runs[max(0, int(offset)):]
 
-    truncated = len(rows) > limit
+    truncated = limit is not None and len(runs) > limit
     if truncated:
-        rows = rows[:limit]
+        runs = runs[:limit]
 
-    runs = [_row_to_run(dict(zip(select_cols, row))) for row in rows]
     return {
         "runs": runs,
         "limit": limit,
@@ -257,9 +253,9 @@ def get_result_run(store_spec: dict[str, Any], run_id: int) -> dict[str, Any] | 
             f"SELECT {', '.join(select_cols)} FROM runs WHERE id = ?",
             (int(run_id),),
         ).fetchone()
-    if row is None:
-        return None
-    return _row_to_run(dict(zip(select_cols, row)))
+        if row is None:
+            return None
+        return project_run(conn, _row_to_run(dict(zip(select_cols, row))))
 
 
 def _resolve_path(store_spec: dict[str, Any]) -> Path:
@@ -407,9 +403,13 @@ def _group_runs_into_reports(
     runs: list[dict[str, Any]] = []
     for row in rows:
         sqlite_rowid = int(row[0])
-        run = _row_to_run(dict(zip(select_cols, row[1:])))
+        run = project_run(conn, _row_to_run(dict(zip(select_cols, row[1:]))))
         run["_source_rowid"] = sqlite_rowid
         runs.append(run)
+    return _group_prepared_runs(runs, columns)
+
+
+def _group_prepared_runs(runs: list[dict[str, Any]], columns: list[str]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
 
     has_job_id = "job_id" in columns

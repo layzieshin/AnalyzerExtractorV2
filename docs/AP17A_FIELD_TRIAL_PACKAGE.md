@@ -122,20 +122,15 @@ Im Rule Editor (Inventar-Startseite **Regelwerke**):
 Nach Aktivierung neues Regelwerk ins Feldversuch-Paket kopieren (Rebuild) oder
 `rules/` auf Ziel-PC aktualisieren (nur mit Bedacht, Index muss passen).
 
-## Excel-Ausgabe nach gespeichertem Ergebnis
+## SQLite-Ablage und historische Ausgabeplaene (Paket 3a)
 
-SQLite ist die strukturierte Ablage. Excel ist der nachgelagerte Export. Sind die Ergebnisdaten gespeichert und scheitert nur die Excel-Datei, zeigt Auswertung und Diagnose genau:
+Neue Verarbeitung, Erstvalidierung und Korrektur speichern ausschliesslich in SQLite. Das Original-PDF dient zur Pruefung; ein spaeterer PDF-Nachweis folgt separat. Es wird keine neue Excel-Datei erzeugt oder eine vorhandene Arbeitsmappe geaendert.
 
-`Ergebnis gespeichert – Excel-Ausgabe fehlgeschlagen`
+Alte `both`-/`excel`-Einstellungen sind Kompatibilitaetseingaben und wirken als SQLite. Laden aendert die Datei nicht; normales Speichern persistiert SQLite und erhaelt die anderen Werte. In der Oberflaeche gibt es keine Excel-Auswahl.
 
-Die Fehlerart in **Diagnose** ist `Excel-Ausgabe`.
+Historische Excel-Fehler und eingefrorene Plaene bleiben zur Diagnose lesbar. Ihre Wiederholung ist deaktiviert; auch alte Release-/Retry-API-Aufrufe schreiben nicht. Historische Plaene werden weder migriert noch automatisch abgeschlossen oder durch erneute Extraktion repariert. Vorhandene Dateien werden durch diese Umstellung nicht geloescht.
 
-1. Ansicht **Diagnose** oeffnen und den Eintrag waehlen.
-2. **Erneut verarbeiten** — das ist die vorhandene Diagnose-Aktion, kein zweiter Button.
-3. Wiederholt wird nur die fehlgeschlagene Excel-Ausgabe aus dem eingefrorenen Plan. Die PDF und die aktuellen Regelwerke werden nicht neu gelesen. Das bereits gespeicherte SQLite-Ergebnis wird nicht erneut geschrieben.
-4. Bleibt die Excel-Datei gesperrt, bleibt der Vorgang fehlgeschlagen und erneut ausfuehrbar. Nach erfolgreichem Export wird der Lauf `Fertig`. Watch-Importe werden erst dann archiviert.
-
-`Excel-Ausgabe fehlgeschlagen` ohne den Zusatz „Ergebnis gespeichert“ bedeutet, dass keine strukturierte SQLite-Ablage fuer diesen Lauf vorliegt (reiner Excel-Modus oder SQLite war nicht erfolgreich). Auch dann ist **Erneut verarbeiten** die vorhandene Aktion; ohne versionierten Plan laeuft die Verarbeitung vollstaendig erneut.
+Watch-Importe werden nach erfolgreicher Queue-Verarbeitung (`DONE`) archiviert. Menschliche Erstvalidierung und Korrektur folgen unabhaengig davon. SQLite-Fehler archivieren nicht.
 
 ## Duplikate und Ergebnisreview (Default)
 
@@ -149,7 +144,7 @@ Overwrite und Add fuer Duplikate sind nicht implementiert. Es gibt keine Aktion,
 | Ordner | Inhalt |
 |--------|--------|
 | `jobs/` | Queue- und Pipeline-States |
-| `output/final/` | Excel-Ausgaben |
+| `output/final/` | SQLite-Ergebnisdatenbank und vorhandene historische Dateien |
 | `rules/` | Aktive Regelwerke (nicht manuell editieren ohne Ruecksprache) |
 | `input/watch/` | PDF-Eingang |
 

@@ -681,8 +681,10 @@ def test_run_watch_cycle_wraps_ingestion_failures(tmp_path: Path, monkeypatch: p
         services.extraction.run_watch_cycle()
 
 
-def test_watch_archives_before_validation_and_export_retry_needs_no_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mode", ["sqlite", "both", "excel"])
+@pytest.mark.parametrize("sqlite_fails", [False, True])
+def test_watch_archive_depends_on_sqlite_done_and_never_on_validation_or_excel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, sqlite_fails: bool
 ) -> None:
     import json
     import sqlite3
@@ -745,20 +747,36 @@ def test_watch_archives_before_validation_and_export_retry_needs_no_source(
             meta={"page_count": 1},
         ),
     )
+    from openpyxl import Workbook
+    import hashlib
+
+    workbook = root / "output" / "final" / "Frozen.xlsx"
+    Workbook().save(workbook)
+    workbook_before = (hashlib.sha256(workbook.read_bytes()).hexdigest(), workbook.stat().st_mtime_ns)
     excel_calls = {"count": 0}
-    real_excel = __import__("src.writer.api", fromlist=["write_record"]).write_record
-
-    def excel_twice_then_ok(record_obj, ruleset, output_dir, **kwargs):
+    def forbid_excel(*_args, **_kwargs):
         excel_calls["count"] += 1
-        if excel_calls["count"] < 3:
-            raise RuntimeError("excel down")
-        return real_excel(record_obj, ruleset, output_dir, **kwargs)
+        raise AssertionError("watch processing/validation must not call Excel")
 
-    monkeypatch.setattr("src.writer.api.write_record", excel_twice_then_ok)
+    monkeypatch.setattr("src.writer.api.write_record", forbid_excel)
+    monkeypatch.setattr("src.writer.api.update_validation_metadata", forbid_excel)
+    if sqlite_fails:
+        def fail_sqlite(*_args, **_kwargs):
+            raise RuntimeError("SQLite unavailable")
+        monkeypatch.setattr("src.dbwriter.api.write_record_sqlite", fail_sqlite)
     sqlite_path = root / "output" / "final" / "res.sqlite3"
-    config = ProcessingConfig(output_mode="both", sqlite_path=str(sqlite_path), device_id="dev1")
+    config = ProcessingConfig(output_mode=mode, sqlite_path=str(sqlite_path), device_id="dev1")
 
     first = process_next_pending(root, config, worker_id="w-watch")
+    if sqlite_fails:
+        assert first.queue_status == "FAILED"
+        failed_record = get_import_record(root, record.ingestion_id)
+        assert failed_record.archive_status != ARCH_ARCHIVED
+        assert pdf.is_file()
+        assert not sqlite_path.exists()
+        assert excel_calls["count"] == 0
+        assert (hashlib.sha256(workbook.read_bytes()).hexdigest(), workbook.stat().st_mtime_ns) == workbook_before
+        return
     assert first.queue_status == "DONE"
     updated = get_import_record(root, record.ingestion_id)
     assert updated is not None
@@ -773,29 +791,37 @@ def test_watch_archives_before_validation_and_export_retry_needs_no_source(
         if path.suffix != ".json"
     }
 
+    state_path = root / "jobs" / f"{record.processing_job_id}.json"
+    state_before = (state_path.read_bytes(), state_path.stat().st_mtime_ns)
+    with sqlite3.connect(sqlite_path) as conn:
+        assert not conn.execute("SELECT name FROM sqlite_master WHERE name = 'run_validations'").fetchall()
+    services = create_desktop_services(root)
+    from dataclasses import replace
+    services.settings.save(replace(services.settings.load(), sqlite_path=str(sqlite_path)))
+    report = services.results.list_recent_reports()[0]
+    validated = services.results.validate_report_run(report.report_id, ids[0], "AB")
+    corrected = services.results.correct_report_run(report.report_id, ids[0], "CD")
+    assert validated.excel_export_status == corrected.excel_export_status == "not_required"
     released = release_validated_run(
-        root,
-        record.processing_job_id,
-        ids[0],
-        operator_initials="AB",
-        validated_at_utc="2026-09-25T10:00:00+00:00",
-        validation_id=1,
+        root, record.processing_job_id, ids[0], operator_initials="AB",
+        validated_at_utc=validated.validated_at_utc, validation_id=validated.validation_id,
     )
-    assert released.status == "FAILED"
-    from src.application.api import create_desktop_services
-    assert create_desktop_services(root).extraction.list_job_diagnoses()[0].retry_kind == "export_only"
-    second = retry_excel_export(root, record.processing_job_id)
-    assert second.status == "FAILED"
-    third = retry_excel_export(root, record.processing_job_id)
-    assert third.status == "DONE"
-    assert create_desktop_services(root).extraction.list_job_diagnoses() == []
+    assert released.status == "SKIPPED"
+    assert retry_excel_export(root, record.processing_job_id).status == "SKIPPED"
+    assert services.extraction.list_job_diagnoses() == []
     with sqlite3.connect(sqlite_path) as conn:
         assert [row[0] for row in conn.execute("SELECT id FROM runs ORDER BY id")] == ids
+    assert (state_path.read_bytes(), state_path.stat().st_mtime_ns) == state_before
     assert dumps == {
         path.name: path.read_bytes()
         for path in (root / "jobs").glob(f"{record.processing_job_id}*")
         if path.suffix != ".json"
     }
+    assert get_import_record(root, record.ingestion_id).archive_status == ARCH_ARCHIVED
+    assert excel_calls["count"] == 0
+    assert (hashlib.sha256(workbook.read_bytes()).hexdigest(), workbook.stat().st_mtime_ns) == workbook_before
+    assert list(root.rglob("*.xlsx")) == [workbook]
+    assert list(root.rglob("*.tmp")) == list(root.rglob("*.lock")) == []
 
 
 def test_empty_configured_field_keeps_watch_source_and_writes_no_sink(

@@ -66,6 +66,11 @@ class WizardUiMixin:
         nav = tk.Frame(self)
         nav.pack(fill="x", padx=12, pady=(0, 12))
         tk.Button(nav, text="Abbrechen", command=self._on_cancel).pack(side="left")
+        self.btn_continue_draft = tk.Button(
+            nav,
+            text="Entwurf speichern / später weiterbearbeiten",
+            command=self._on_continue_draft,
+        )
         self.btn_next = tk.Button(nav, text="Weiter", width=42, command=self._on_next)
         self.btn_next.pack(side="right")
         self.btn_back = tk.Button(nav, text="Zurück", width=10, command=self._on_back)
@@ -77,8 +82,9 @@ class WizardUiMixin:
         tk.Label(
             form,
             text=(
-                "Zuerst die Beispiel- oder Problem-PDF laden. Ohne erfolgreich geladenen PDF-Text "
-                "wird kein Entwurf erzeugt oder verändert und es geht nicht zu den Feldern."
+                "Das Ziel kann schon vor dem Laden einer PDF gewählt werden. Einen vorhandenen Entwurf "
+                "können Sie sofort im Editor weiterbearbeiten. Für die Feldprüfung und eine neue Regel "
+                "ist erfolgreich geladener PDF-Text erforderlich."
             ),
             anchor="w",
             justify="left",
@@ -113,7 +119,7 @@ class WizardUiMixin:
 
         self.rad_mode_existing = tk.Radiobutton(
             choice,
-            text="Vorhandenen Entwurf mit PDF prüfen/bearbeiten",
+            text="Vorhandenen Entwurf weiterbearbeiten / mit PDF prüfen",
             variable=self.var_mode,
             value="existing",
             command=self._on_mode_changed,
@@ -160,7 +166,7 @@ class WizardUiMixin:
         tk.Button(btns, text="Prüfen", command=self._on_check_field).pack(side="left")
         tk.Label(
             btns,
-            text="Speichern und nächstes Feld schreibt nur bei gültigem Regex und nichtleerem Treffer.",
+            text="Nächstes Feld: nur mit Treffer. Später weiterbearbeiten: speichert auch ohne Treffer.",
             fg="#666",
         ).pack(side="right")
 
@@ -229,7 +235,7 @@ class WizardUiMixin:
         tk.Label(
             self.frm_reference,
             text=(
-                "Änderung einer aktiven Regel: Die Problem-PDF muss mit diesem Entwurf bestehen. "
+                "Nur zur Aktivierung einer geänderten aktiven Regel: Die Problem-PDF muss mit diesem Entwurf bestehen. "
                 "Zusätzlich eine andere Referenz-PDF wählen, mit der die bisherige Regel funktioniert hat. "
                 "Alte und neue Regel müssen auf dieser Referenz dieselben Werte liefern."
             ),
@@ -245,7 +251,7 @@ class WizardUiMixin:
         tk.Button(ref_row, text="PDF auswählen …", command=self._on_pick_reference_pdf).pack(side="left", padx=(6, 0))
         tk.Radiobutton(
             form,
-            text="Entwurf im Editor öffnen (empfohlen)",
+            text="Entwurf im Editor weiterbearbeiten (auch unvollständig, ohne Aktivierung)",
             variable=self.var_finish_action,
             value="editor",
         ).pack(anchor="w", padx=6)

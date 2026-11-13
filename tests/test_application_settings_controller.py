@@ -8,12 +8,40 @@ import pytest
 from src.application.api import SettingsLoadError, SettingsValidationError, create_desktop_services
 
 
-def test_settings_env_fallback_and_both_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("mode", ["both", "excel", "sqlite"])
+def test_loading_legacy_mode_is_read_only_and_normal_save_persists_sqlite(tmp_path: Path, mode: str) -> None:
+    path = tmp_path / "storage" / "desktop_settings.json"
+    path.parent.mkdir()
+    payload = {
+        "output_mode": mode,
+        "sqlite_path": str(tmp_path / "existing.sqlite3"),
+        "watch_enabled": True,
+        "watch_input_path": str(tmp_path / "watch"),
+        "watch_backup_path": str(tmp_path / "archive"),
+        "watch_recursive": True,
+        "device_id": "dev1",
+        "operator_initials": "AB",
+    }
+    path.write_text(json.dumps(payload, indent=3), encoding="utf-8")
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+
+    settings = create_desktop_services(tmp_path).settings
+    loaded = settings.load()
+    assert loaded.output_mode == "sqlite"
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    assert not path.with_suffix(".json.tmp").exists()
+
+    saved = settings.save(loaded)
+    assert saved.output_mode == "sqlite"
+    assert json.loads(path.read_text(encoding="utf-8")) == {**payload, "output_mode": "sqlite"}
+
+
+def test_settings_env_fallback_and_sqlite_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ARE_OUTPUT_MODE", raising=False)
     services = create_desktop_services(tmp_path)
     settings = services.settings.load()
 
-    assert settings.output_mode == "both"
+    assert settings.output_mode == "sqlite"
     assert settings.sqlite_path.endswith("results.sqlite3")
     assert settings.watch_dir.endswith("input\\watch") or settings.watch_dir.endswith("input/watch")
 
@@ -215,7 +243,7 @@ def test_atomic_save_replaces_file(tmp_path: Path) -> None:
 
     updated = loaded.__class__(
         output_mode="excel",
-        sqlite_path=loaded.sqlite_path,
+        sqlite_path=str(tmp_path / "changed.sqlite3"),
         watch_input_path=loaded.watch_input_path,
         device_id=loaded.device_id,
     )
@@ -223,7 +251,8 @@ def test_atomic_save_replaces_file(tmp_path: Path) -> None:
     after = path.read_text(encoding="utf-8")
 
     assert before != after
-    assert json.loads(after)["output_mode"] == "excel"
+    assert json.loads(after)["output_mode"] == "sqlite"
+    assert json.loads(after)["sqlite_path"] == str(tmp_path / "changed.sqlite3")
 
 
 def test_watch_enabled_false_persists_after_true(tmp_path: Path) -> None:
@@ -379,6 +408,8 @@ def test_operator_initials_reject_non_string(tmp_path: Path) -> None:
 
 
 def test_device_inventory_and_reload_use_runtime_api(tmp_path: Path) -> None:
+    from src.qualitycontrol.api import MutationContext, legacy_device_source, migrate_legacy_devices
+
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "devices.json").write_text(
@@ -394,6 +425,10 @@ def test_device_inventory_and_reload_use_runtime_api(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     services = create_desktop_services(tmp_path)
+    assert services.settings.get_device_inventory().status == "migration_required"
+    spec = {"driver": "sqlite", "path": services.settings.load().sqlite_path}
+    migrate_legacy_devices(spec, tmp_path, expected_source_sha256=legacy_device_source(tmp_path)["sha256"],
+                           context=MutationContext("RR", "settings-migration"))
     inventory = services.settings.get_device_inventory()
     assert inventory.status == "ok"
     assert inventory.default_device_id == "analyzer_i_1"

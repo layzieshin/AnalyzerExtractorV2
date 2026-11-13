@@ -56,7 +56,7 @@ def test_desktop_services_keep_live_settings_without_rebuild(tmp_path: Path) -> 
     )
     services.settings.save(updated)
 
-    assert services.settings.load().output_mode == "excel"
+    assert services.settings.load().output_mode == "sqlite"
     assert services.settings.load().sqlite_path == str(root / "live.sqlite3")
     assert services.settings.load().device_id == "live-device"
 
@@ -83,3 +83,12 @@ def test_public_api_does_not_export_generic_path_opener_symbols() -> None:
 
     for forbidden in ("PathOpener", "default_path_opener", "open_path"):
         assert forbidden not in application_api.__all__
+
+
+def test_pdf_preview_public_api_is_report_scoped() -> None:
+    from src.application import api as application_api
+
+    assert "ReportPdfPage" in application_api.__all__
+    assert "PdfPreviewError" in application_api.__all__
+    assert "render_pdf_page" not in application_api.__all__
+    assert callable(application_api.ResultsController.render_report_pdf_page)

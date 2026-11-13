@@ -137,6 +137,7 @@ def test_discover_assay_candidates_returns_application_dtos(tmp_path: Path) -> N
     assert first.assay_key == "(1111)"
     assert first.reason == "test_line"
     assert first.known_status == "known"
+    assert first.assay_name == "Assay A"
 
 
 def test_discover_assay_candidates_for_job_reads_beyond_display_cap(tmp_path: Path) -> None:

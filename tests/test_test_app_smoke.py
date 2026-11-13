@@ -533,7 +533,7 @@ def test_test_app_retry_failed_jobs_retries_only_failed_selection(tmp_path, monk
     def fake_retry(project_root: str, job_id: str):
         calls.append((project_root, job_id))
 
-    monkeypatch.setattr(test_app, "retry_failed_job", fake_retry)
+    monkeypatch.setattr(test_app, "retry_failed", fake_retry)
     monkeypatch.setattr(test_app.TestApp, "_log", lambda self, message: logs.append(message))
     monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: refresh_calls.append(1))
 
@@ -576,6 +576,64 @@ def test_test_app_retry_failed_jobs_retries_only_failed_selection(tmp_path, monk
         assert any("Erneut gestartet: 1 Ergebnis(se). Übersprungen: 1." in line for line in logs)
     finally:
         app.destroy()
+
+
+@pytest.mark.parametrize("action", ["retry_selected_failed_jobs", "retry_selected_rework_items"])
+@pytest.mark.parametrize("plan_kind", ["historical", "corrupt_sqlite", "unreadable", "non_object", "missing", "new_failure"])
+def test_legacy_retry_actions_refuse_retired_evidence_and_allow_new_failures(tmp_path, monkeypatch, action, plan_kind) -> None:
+    import hashlib
+    from types import SimpleNamespace
+    from src.jobqueue.api import claim_next_job, enqueue_pdf_job, list_jobs, mark_job_failed
+    from src.processing import service
+
+    pdf = tmp_path / "failed.pdf"
+    pdf.write_bytes(b"legacy-retry-guard")
+    job = enqueue_pdf_job(str(tmp_path), str(pdf), source="test-app-manual")
+    assert claim_next_job(str(tmp_path), "w") is not None
+    mark_job_failed(str(tmp_path), job.job_id, "no_assay_detected", worker_id="w")
+    state = {"job_id": job.job_id, "status": "FAILED", "error": "no_assay_detected"}
+    if plan_kind == "historical":
+        state["output_plan"] = {"version": 2, "output_mode": "both"}
+    elif plan_kind == "corrupt_sqlite":
+        state["output_plan"] = {
+            "version": 2, "output_mode": "sqlite", "sqlite_path": "results.sqlite3",
+            "sqlite_status": "pending", "assays": "CORRUPT",
+        }
+    state_path = tmp_path / "jobs" / f"{job.job_id}.json"
+    if plan_kind != "missing":
+        payload = {"unreadable": "{broken", "non_object": "[]"}.get(plan_kind, json.dumps(state, indent=3))
+        state_path.write_text(payload, encoding="utf-8")
+    queue_path = tmp_path / "jobs" / "queue" / f"{job.job_id}.json"
+    def snapshot(path):
+        return (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) if path.exists() else None
+    state_before, queue_before = snapshot(state_path), snapshot(queue_path)
+    low_level_calls = []
+    real_retry = service.retry_failed_job
+    def low_level_retry(*args, **kwargs):
+        low_level_calls.append(job.job_id)
+        return real_retry(*args, **kwargs)
+    monkeypatch.setattr(service, "retry_failed_job", low_level_retry)
+    logs, refreshes = [], []
+    selection = SimpleNamespace(selection=lambda: ["selected"])
+    row = {"job_id": job.job_id, "queue_status": "FAILED", "file": pdf.name}
+    app = SimpleNamespace(
+        project_root=tmp_path, tree_files=selection, tree_rework=selection,
+        _watch_rows={"selected": row}, _rework_items={"selected": row},
+        _log=logs.append, refresh_queue=lambda: refreshes.append("queue"),
+        refresh_rework_items=lambda: refreshes.append("rework"),
+    )
+    getattr(test_app.TestApp, action)(app)
+    assert snapshot(state_path) == state_before
+    if plan_kind in {"missing", "new_failure"}:
+        assert list_jobs(str(tmp_path))[0].status == "PENDING"
+        assert low_level_calls == [job.job_id]
+        assert not any("historical_output_plan_read_only" in line for line in logs)
+    else:
+        assert list_jobs(str(tmp_path))[0].status == "FAILED"
+        assert low_level_calls == []
+        assert snapshot(queue_path) == queue_before
+        assert any("historical_output_plan_read_only" in line for line in logs)
+    assert refreshes == (["queue", "rework"] if action == "retry_selected_rework_items" else ["queue"])
 
 
 def test_test_app_process_queue_uses_common_worker(tmp_path, monkeypatch) -> None:
@@ -1030,7 +1088,7 @@ def test_test_app_rework_retry_updates_queue_and_rework(tmp_path, monkeypatch) -
             }
         ],
     )
-    monkeypatch.setattr(test_app, "retry_failed_job", lambda _root, job_id: retry_calls.append(job_id))
+    monkeypatch.setattr(test_app, "retry_failed", lambda _root, job_id: retry_calls.append(job_id))
     monkeypatch.setattr(test_app.TestApp, "refresh_queue", lambda self: refresh_queue_calls.append(1))
     monkeypatch.setattr(test_app.TestApp, "refresh_rework_items", lambda self: refresh_rework_calls.append(1))
 
@@ -1198,6 +1256,17 @@ def test_test_app_preview_assay_candidates_shows_known_and_unknown(tmp_path, mon
         json.dumps({"assays": [{"assay_key": "(1c9e)", "ruleset_file": "ANA Screen IgG.json"}]}),
         encoding="utf-8",
     )
+    full_name = "Vollständiger ANA-Assayname"
+    rule_path = tmp_path / "rules" / "ANA Screen IgG.json"
+    rule_path.write_text(json.dumps({
+        "assay_key": "(1c9e)", "assay_name": full_name, "lot_rule": {"regex": r"Lot:\s*(\w+)"},
+        "extract_rules": {"fields": [{"key": "TEST", "regex": r"Test:\s*(.+)", "required": True}], "dedupe_fields": ["TEST"]},
+        "excel_rules": {"excel_filename_template": "{assay_name}.xlsx", "sheetname_template": "{lot_id}", "column_mapping": {"TEST": "TEST"}},
+    }), encoding="utf-8")
+    catalog = test_app.list_rulesets(str(tmp_path))
+    assert catalog[0]["valid"] and catalog[0]["assay_name"] == full_name
+    index_path = tmp_path / "rules" / "index.json"
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (index_path, rule_path)}
     monkeypatch.setattr(
         test_app,
         "list_jobs",
@@ -1223,12 +1292,21 @@ def test_test_app_preview_assay_candidates_shows_known_and_unknown(tmp_path, mon
 
         rows = [app.tree_rework_candidates.item(iid, "values") for iid in app.tree_rework_candidates.get_children()]
         assert len(rows) == 2
-        statuses = {row[0]: row[4] for row in rows}
-        assert statuses["(1c9e)"] == "bekannt"
-        assert statuses["(abcd)"] == "unbekannt"
-        assert (tmp_path / "rules" / "index.json").read_text(encoding="utf-8") == json.dumps(
-            {"assays": [{"assay_key": "(1c9e)", "ruleset_file": "ANA Screen IgG.json"}]}
-        )
+        by_key = {app._rework_candidates_by_id[iid]["assay_key"]: (iid, app.tree_rework_candidates.item(iid, "values"))
+            for iid in app.tree_rework_candidates.get_children()}
+        assert set(by_key) == {"(1c9e)", "(abcd)"}
+        assert by_key["(1c9e)"][1][0] == full_name
+        assert by_key["(abcd)"][1][0] == "Assayname fehlt"
+        assert by_key["(1c9e)"][1][1] == "ANA Screen IgG" and full_name != by_key["(1c9e)"][1][1]
+        assert by_key["(abcd)"][1][1] == "New Assay"
+        assert app.tree_rework_candidates.heading("name", "text") == "Namenshinweis"
+        assert {key: row[1][4] for key, row in by_key.items()} == {"(1c9e)": "bekannt", "(abcd)": "unbekannt"}
+        for key, (iid, _values) in by_key.items():
+            assert iid == key
+            app.tree_rework_candidates.selection_set(iid)
+            selected = str(app.tree_rework_candidates.selection()[0])
+            assert app._rework_candidates_by_id[selected]["assay_key"] == key
+        assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
     finally:
         app.destroy()
 
@@ -1509,6 +1587,39 @@ def test_test_app_database_tab_controls_exist(tmp_path) -> None:
         assert hasattr(app, "cmb_db_assay")
         assert hasattr(app, "cmb_db_charge")
         assert app.tree_db_runs.cget("yscrollcommand")
+    finally:
+        app.destroy()
+
+
+def test_legacy_database_uses_full_name_and_preserves_run_identity(tmp_path):
+    from test_application_results_controller import _create_runs_db
+    _write_valid_rules_for_smoke(tmp_path)
+    database = tmp_path / "names.sqlite3"
+    _create_runs_db(database)
+    app = _make_test_app(tmp_path)
+    try:
+        app.var_sqlite_path.set(str(database))
+        app.refresh_database()
+        assert tuple(app.cmb_db_assay.cget("values")) == ("Assay A", "Assayname fehlt")
+        app.cmb_db_assay.current(0)
+        app.show_database_runs()
+        assert app.tree_db_runs.get_children() == ("1",)
+        column = app._db_visible_columns.index("meta:assay_key")
+        assert app.tree_db_runs.item("1", "values")[column] == "Assay A"
+        assert app._db_runs_by_id["1"]["assay_key"] == "(1111)"
+    finally:
+        app.destroy()
+
+
+def test_legacy_assay_filter_preserves_duplicate_name_selection_by_index(tmp_path):
+    app = _make_test_app(tmp_path)
+    try:
+        app._db_assay_choices = [{"label": "Gleicher Vollname", "assay_key": "A"}, {"label": "Gleicher Vollname", "assay_key": "B"}]
+        app.cmb_db_assay.configure(values=[row["label"] for row in app._db_assay_choices])
+        for index, key in enumerate(("A", "B")):
+            app.cmb_db_assay.current(index)
+            assert app.var_db_assay.get() == "Gleicher Vollname"
+            assert app._selected_db_assay_key() == key
     finally:
         app.destroy()
 
