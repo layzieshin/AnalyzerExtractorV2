@@ -761,9 +761,9 @@ def test_schema_missing_pdf_path_or_created_at_returns_empty_legacy_reports(tmp_
     (r"\\server\share\runs.sqlite3", True), ("//server/share/runs.sqlite3", True),
     ("/local/runs.sqlite3", False), (r"C:\local\runs.sqlite3", False)])
 def test_network_path_classification_is_explicitly_synthetic(path, expected):
-    from pathlib import PureWindowsPath, PosixPath
+    from pathlib import PureWindowsPath, PurePosixPath
     from src.resultstore.sqlite_store import _is_unc_or_network_path
-    value = PureWindowsPath(path) if "\\" in path else PosixPath(path)
+    value = PureWindowsPath(path) if "\\" in path else PurePosixPath(path)
     assert _is_unc_or_network_path(value) is expected
 
 

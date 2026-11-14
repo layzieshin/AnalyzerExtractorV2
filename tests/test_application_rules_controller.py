@@ -394,7 +394,7 @@ def test_controller_crud_routes_only_through_rulesuite_api(tmp_path: Path) -> No
 
 
 def active_state(root):
-    return {str(path.relative_to(root)): path.read_bytes() for path in (root / "rules").rglob("*.json") if "drafts" not in path.parts}
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in (root / "rules").rglob("*.json") if "drafts" not in path.parts}
 
 
 @pytest.mark.parametrize("stage", ["controller_verify", "locked_verify"])
