@@ -36,7 +36,7 @@ def test_percentage_limits_need_no_sd_and_never_remove_the_112_from_qmma():
     before = copy.deepcopy(source)
     result = analyze_lot(source, {}).to_dict()
     series = result["computed_series"][0]
-    assert (result["analysis_model_version"], result["algorithm_id"], result["renderer_id"]) == (3, "arev2-qc-analysis-v4", "arev2-qc-pdf-v4")
+    assert (result["analysis_model_version"], result["algorithm_id"], result["renderer_id"]) == (4, "arev2-qc-analysis-v5", "arev2-qc-pdf-v5")
     assert series["qmma"]["n"] == 4 and series["qmma"]["value"] == series["qmma"]["relative_percent"] == "6"
     assert series["limits"]["manufacturer"] == {"available": True, "reason": "", "lower": "80", "upper": "120"}
     assert series["limits"]["single_value"] == {"enabled": True, "available": True, "reason": "", "percent": "10", "lower": "90", "upper": "110"}

@@ -7,15 +7,14 @@ rechecks the complete manifest while the QC writer holds BEGIN IMMEDIATE.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime
 from collections.abc import Mapping
 from typing import Any
 
-from src.resultstore.api import list_result_runs
+from src.resultstore.api import list_result_runs, list_pending_report_candidates, get_report_device_context
 from src.resultvalidation.api import ResultValidationError, ValidationAmbiguousError, list_run_validations_readonly
 
 from .model import QCConfigurationError, QCStoreError, QCUsageSnapshot, content_hash
-from .profiles import get_profile, list_profiles, parse_decimal, parse_measurement_date
+from .profiles import get_profile, list_profiles, parse_decimal, interpret_measurement, interpret_numeric
 from .store import get_inventory, resolve_store_path
 
 
@@ -39,6 +38,8 @@ def _validations(store_spec: Mapping[str, Any], ids: list[int]) -> tuple[dict[in
 
 
 def _matches_validation(record: Any, row: dict[str, Any]) -> bool:
+    if getattr(record, "device_assignment_id", 0) != int(row.get("device_assignment_id") or 0):
+        return False
     if record.revision_id != int(row.get("revision_id") or 0) or record.selection_id != row.get("selection_id"):
         return False
     if record.selection_token:
@@ -47,20 +48,25 @@ def _matches_validation(record: Any, row: dict[str, Any]) -> bool:
             and not row.get("result_revisions") and not row.get("pending_revision"))
 
 
-def get_lot_sources(store_spec: Mapping[str, Any], *, profile_version_id: int, kit_lot: str) -> dict[str, Any]:
+def get_lot_sources(store_spec: Mapping[str, Any], *, profile_version_id: int, kit_lot: str, device_id: str | None = None) -> dict[str, Any]:
     profile = get_profile(store_spec, profile_version_id)
     inventory = get_inventory(store_spec)
     configuration = profile["snapshot"]
+    # Every fresh capture uses feature-specific eligibility. Profile versions
+    # still govern their explicit parsing choices, never current eligibility.
+    effective_device = device_id or configuration["device_id"]
+    if not effective_device or (configuration["device_id"] and configuration["device_id"] != effective_device):
+        raise QCConfigurationError("Für diese Auswertung bitte genau ein passendes Gerät wählen.")
     separate_time = bool(configuration.get("measurement_time_field"))
     # Do not normalize kit-lot text: its exact extracted identity is the key.
     if not isinstance(kit_lot, str) or not kit_lot.strip():
         raise QCConfigurationError("Eine genaue extrahierte Kit-Charge ist erforderlich.")
     all_rows = list_result_runs(dict(store_spec), limit=None)["runs"]
-    rows = [row for row in all_rows if row.get("device_id") == configuration["device_id"]
+    rows = [row for row in all_rows if row.get("effective_device_id", row.get("device_id")) == effective_device
             and row.get("assay_key") == configuration["assay_key"] and row.get("lot_id") == kit_lot]
     records, errors = _validations(store_spec, [int(row["id"]) for row in rows if row.get("id") is not None])
-    device = next((row for row in inventory["snapshot"]["devices"] if row["device_id"] == configuration["device_id"]), None)
-    inventory_usable = bool(inventory["version_id"] and device and device["active"] and not device["incomplete"])
+    device = next((row for row in inventory["snapshot"]["devices"] if row["device_id"] == effective_device), None)
+    inventory_usable = bool(inventory["version_id"] and device and device["active"] and device.get("display_name"))
     head = next((item["version_id"] for item in list_profiles(store_spec) if item["profile_id"] == profile["profile_id"]), 0)
     population, included, excluded = [], [], []
     for row in sorted(rows, key=lambda item: int(item.get("id") or 0)):
@@ -85,29 +91,13 @@ def get_lot_sources(store_spec: Mapping[str, Any], *, profile_version_id: int, k
         if not isinstance(payload, dict):
             payload = {}
             reasons.append("result_unreadable")
-        try:
-            measured_at = parse_measurement_date(payload.get(configuration["measurement_date_field"]), configuration["measurement_date_format"])
-        except QCConfigurationError:
-            measured_at = None
-            reasons.append("measurement_date_invalid")
-        if separate_time:
-            time_raw = payload.get(configuration["measurement_time_field"])
-            if time_raw is None or (isinstance(time_raw, str) and not time_raw.strip()):
-                measured_at = None
-                reasons.append("measurement_time_missing")
-            else:
-                try:
-                    parsed_time = datetime.fromisoformat(parse_measurement_date(time_raw, configuration["measurement_time_format"])).time()
-                    if measured_at is not None:
-                        measured_at = datetime.combine(datetime.fromisoformat(measured_at).date(), parsed_time).isoformat()
-                except QCConfigurationError:
-                    measured_at = None
-                    reasons.append("measurement_time_invalid")
+        measurement = interpret_measurement(payload, configuration)
+        time_raw = measurement["time_raw"]
+        temporal_reasons = list(measurement["reasons"])
+        measured_at = (measurement["date"] + ("T" + measurement["time"] if measurement["time"] else "")) if measurement["date"] else None
         grouping_field = configuration["run_grouping_field"]
         grouping_raw = payload.get(grouping_field) if grouping_field else None
         analytical_run = str(grouping_raw).strip() if grouping_raw is not None else ""
-        if grouping_field and not analytical_run:
-            reasons.append("analytical_run_group_missing")
         if not grouping_field:
             analytical_run = f"stored-run:{run_id}"
         source = {"run_id": run_id, "revision_id": int(row.get("revision_id") or 0), "selection_id": row.get("selection_id"),
@@ -115,8 +105,9 @@ def get_lot_sources(store_spec: Mapping[str, Any], *, profile_version_id: int, k
                   "validation_error": errors.get(run_id, ""), "raw_payload": payload, "source_hash": content_hash(row),
                   "pdf_sha256": row.get("pdf_sha256"), "assay_block_hash": row.get("assay_block_hash"),
                   "ruleset_file": row.get("ruleset_file"), "job_id": row.get("job_id"), "report_id": row.get("report_id"),
-                  "measurement_date_raw": payload.get(configuration["measurement_date_field"]), "measured_at": measured_at,
+                  "measurement_date_raw": measurement["date_raw"], "measured_at": measured_at,
                   "analytical_run_id": analytical_run, "run_group_raw": grouping_raw, "reasons": list(reasons)}
+        source["measurement"] = measurement
         if separate_time:
             source["measurement_time_raw"] = time_raw
         population.append(source)
@@ -128,14 +119,32 @@ def get_lot_sources(store_spec: Mapping[str, Any], *, profile_version_id: int, k
                      "unit_raw": payload.get(control["unit_field"]) if control["unit_field"] else control["unit"],
                      "unit": control["unit"], "measured_at": measured_at, "analytical_run_id": analytical_run,
                      "parsed": {}, "reasons": list(reasons)}
+            point["numeric_interpretations"] = {}
+            point["measurement"] = measurement
+            point["feature_reasons"] = {"time": temporal_reasons, "grouping": ["analytical_run_group_missing"] if grouping_field and not analytical_run else []}
+            if configuration.get("dimensionless"):
+                point["unit"] = point["unit_raw"] = "1"
+            elif not str(point["unit_raw"] or "").strip():
+                point["reasons"].append("unit_unconfirmed")
+            elif not point["unit"]:
+                point["unit"] = str(point["unit_raw"]).strip()
             for key, raw in point["raw"].items():
                 try:
-                    point["parsed"][key] = str(parse_decimal(raw, configuration["numeric_grammar"]))
+                    numeric_source = row.get("source_provenance", {})
+                    if row.get("revision_id"):
+                        revision = next((item["result"] for item in row.get("result_revisions", []) if item["revision_id"] == row["revision_id"]), {})
+                        numeric_source = {**numeric_source, **{name: revision.get(name) for name in ("ruleset", "rule_source_text", "rule_sha256")}}
+                    interpreted = interpret_numeric(raw, configuration["numeric_grammar"], field_key=control["fields"][key], source=numeric_source)
+                    point["numeric_interpretations"][key] = interpreted
+                    point["parsed"][key] = interpreted["value"]
                 except QCConfigurationError:
-                    point["reasons"].append(f"{key.lower()}_invalid")
+                    if key != "IST":
+                        point["feature_reasons"].setdefault("target" if key == "SOLL" else "manufacturer", []).append(f"{key.lower()}_invalid")
+                    else:
+                        point["reasons"].append(f"{key.lower()}_invalid")
             if "MIN" in point["parsed"] and "MAX" in point["parsed"]:
                 if parse_decimal(point["parsed"]["MIN"], "decimal_dot") > parse_decimal(point["parsed"]["MAX"], "decimal_dot"):
-                    point["reasons"].append("manufacturer_limits_reversed")
+                    point["feature_reasons"].setdefault("manufacturer", []).append("manufacturer_limits_reversed")
             if control["unit_field"] and (not isinstance(point["unit_raw"], str) or not point["unit_raw"].strip()):
                 point["reasons"].append("unit_missing")
             if point["reasons"]:
@@ -149,78 +158,44 @@ def get_lot_sources(store_spec: Mapping[str, Any], *, profile_version_id: int, k
         units = {str(point["unit_raw"]).strip() for point in points}
         conflicts = []
         for key, reason in (("SOLL", "target_conflict"), ("MIN", "manufacturer_min_conflict"), ("MAX", "manufacturer_max_conflict")):
-            if len({parse_decimal(point["parsed"][key], "decimal_dot") for point in points}) > 1:
+            if len({parse_decimal(point["parsed"][key], "decimal_dot") for point in points if key in point["parsed"]
+                    and (key == "SOLL" or not point["feature_reasons"].get("manufacturer"))}) > 1:
                 conflicts.append(reason)
-        if len(units) > 1 or (units and units != {control["unit"]}):
+        expected_unit = "1" if configuration.get("dimensionless") else control["unit"]
+        if len(units) > 1 or (units and expected_unit and units != {expected_unit}):
             conflicts.append("unit_conflict")
         if conflicts:
             for point in points:
-                included.remove(point)
-                point["reasons"].extend(conflicts)
-                excluded.append(point)
-    manifest = {"manifest_version": "qc-sources-v2", "store_path": str(resolve_store_path(store_spec)),
-                "device_id": configuration["device_id"], "assay_key": configuration["assay_key"], "kit_lot": kit_lot,
+                blocking = [reason for reason in conflicts if reason == "unit_conflict"]
+                if blocking:
+                    included.remove(point)
+                    point["reasons"].extend(blocking)
+                    excluded.append(point)
+                for reason in conflicts:
+                    if reason != "unit_conflict":
+                        point["feature_reasons"].setdefault("target" if reason == "target_conflict" else "manufacturer", []).append(reason)
+    manifest = {"manifest_version": "qc-sources-v3", "store_path": str(resolve_store_path(store_spec)),
+                "device_id": effective_device, "assay_key": configuration["assay_key"], "kit_lot": kit_lot,
                 "inventory_version_id": inventory["version_id"], "inventory_hash": content_hash(inventory["snapshot"]),
                 "profile_version_id": profile["version_id"], "profile_head_version_id": head,
                 "profile_hash": content_hash(configuration), "profile_snapshot": configuration,
                 "inventory_snapshot": inventory["snapshot"], "population": population,
-                "included": sorted(included, key=lambda point: (point["measured_at"], point["run_id"], point["control_id"])),
+                "included": sorted(included, key=lambda point: (point["measured_at"] or "~", point["run_id"], point["control_id"])),
                 "excluded": sorted(excluded, key=lambda point: (point["run_id"], point["control_id"])),
                 "included_count": len(included), "excluded_count": len(excluded), "population_count": len(population),
-                "start_date": min((point["measured_at"] for point in included), default=None)}
-    manifest["order_is_explicit"] = bool(any(part in configuration["measurement_date_format"] for part in ("%H", "%M", "%S")))
-    if separate_time:
-        manifest["order_is_explicit"] = True
+                "start_date": min((point["measured_at"] for point in included if point["measured_at"]), default=None)}
+    manifest["order_is_explicit"] = any(point["measurement"]["time"] is not None for point in included)
     manifest["equal_time_order_unavailable"] = len({(point["control_id"], point["measured_at"]) for point in included}) < len(included)
     manifest["source_token"] = content_hash(manifest)
     return manifest
 
 
 def _usage_interval(payload, configuration):
-    """A stated date/time denotes its whole precision interval, never an import order."""
-    date_raw = payload.get(configuration["measurement_date_field"])
-    clock_field = configuration.get("measurement_time_field")
-    clock_raw = payload.get(clock_field) if clock_field else None
-    result = {"date_raw": date_raw, "time_raw": clock_raw, "interval": None, "reasons": []}
-    try:
-        measured = datetime.fromisoformat(parse_measurement_date(date_raw, configuration["measurement_date_format"]))
-    except QCConfigurationError:
-        result["reasons"].append("measurement_date_invalid")
-        return result
-    date_format = configuration["measurement_date_format"]
-    def explicit_precision(format_string):
-        precision = "day"
-        for token, name in (("%H", "hours"), ("%M", "minutes"), ("%S", "seconds")):
-            if token not in format_string:
-                break
-            precision = name
-        return precision
-    precision = explicit_precision(date_format)
-    if clock_field:
-        try:
-            clock = datetime.fromisoformat(parse_measurement_date(clock_raw, configuration["measurement_time_format"])).time()
-            measured = datetime.combine(measured.date(), clock)
-            precision = explicit_precision(configuration["measurement_time_format"])
-        except QCConfigurationError:
-            measured = datetime.combine(measured.date(), datetime.min.time())
-            precision = "day"
-            result["reasons"].append("measurement_time_missing" if clock_raw is None or not str(clock_raw).strip() else "measurement_time_invalid")
-    # Missing higher clock components are unknown, even if strptime defaulted
-    # them or a lower component was explicitly present in an unusual format.
-    if precision == "day":
-        measured = measured.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif precision == "hours":
-        measured = measured.replace(minute=0, second=0, microsecond=0)
-    elif precision == "minutes":
-        measured = measured.replace(second=0, microsecond=0)
-    widths = {"day": 86_400_000_000, "hours": 3_600_000_000, "minutes": 60_000_000, "seconds": 1_000_000, "microseconds": 1}
-    lower = ((measured.toordinal() * 86400 + measured.hour * 3600 + measured.minute * 60 + measured.second) * 1_000_000 + measured.microsecond)
-    result["interval"] = {"lower": lower, "upper_exclusive": lower + widths[precision], "precision": precision,
-        "display": measured.date().isoformat() if precision == "day" else measured.isoformat(sep=" ", timespec=precision)}
-    return result
+    """Usage shares source parsing, precision and explicit legacy overrides."""
+    return interpret_measurement(payload, configuration)
 
 
-def get_lot_chronology(store_spec: Mapping[str, Any], *, profile_version_id: int) -> QCUsageSnapshot:
+def get_lot_chronology(store_spec: Mapping[str, Any], *, profile_version_id: int, device_id: str | None = None) -> QCUsageSnapshot:
     """Capture all usage, including excluded/QC-pending observations, read-only.
 
     Pairwise witnesses prove later usage, not a globally newest charge. Unknown
@@ -230,19 +205,23 @@ def get_lot_chronology(store_spec: Mapping[str, Any], *, profile_version_id: int
 
     profile = get_profile(store_spec, profile_version_id)
     configuration = profile["snapshot"]
+    effective_device = device_id or configuration["device_id"]
+    if not effective_device or (configuration["device_id"] and configuration["device_id"] != effective_device):
+        raise QCConfigurationError("Für diesen Nutzungsnachweis bitte genau ein passendes Gerät wählen.")
     inventory = get_inventory(store_spec)
     profiles = [row for row in list_profiles(store_spec) if
-        (row["snapshot"]["device_id"], row["snapshot"]["assay_key"]) == (configuration["device_id"], configuration["assay_key"])]
+        row["snapshot"]["device_id"] in ("", effective_device) and row["snapshot"]["assay_key"] == configuration["assay_key"]]
     bindings = [row for row in list_lots(store_spec) if
-        (row["device_id"], row["assay_key"]) == (configuration["device_id"], configuration["assay_key"])]
+        (row["device_id"], row["assay_key"]) == (effective_device, configuration["assay_key"])]
     temporal_profiles = {row["version_id"]: row["snapshot"] for row in profiles}
     temporal_profiles[profile_version_id] = configuration
     for binding in bindings:
         identifier = binding["snapshot"]["profile_version_id"]
         if identifier not in temporal_profiles:
             temporal_profiles[identifier] = get_profile(store_spec, identifier)["snapshot"]
-    rows = [row for row in list_result_runs(dict(store_spec), limit=None)["runs"] if
-        (row.get("device_id"), row.get("assay_key")) == (configuration["device_id"], configuration["assay_key"])]
+    all_rows = list_result_runs(dict(store_spec), limit=None)["runs"]
+    rows = [row for row in all_rows if
+        (row.get("effective_device_id", row.get("device_id")), row.get("assay_key")) == (effective_device, configuration["assay_key"])]
     records, validation_errors = _validations(store_spec, [int(row["id"]) for row in rows if row.get("id") is not None])
     runs, observations, unassigned = [], [], []
     temporal_keys = ("measurement_date_field", "measurement_date_format", "measurement_time_field", "measurement_time_format")
@@ -306,12 +285,45 @@ def get_lot_chronology(store_spec: Mapping[str, Any], *, profile_version_id: int
             reasons.append("no_proven_later_usage")
         lots.append({"kit_lot": lot, "run_ids": list(dict.fromkeys(row["run_id"] for row in own)), "last_usage": last,
             "last_usage_reliable": reliable, "close_available": bool(witnesses), "reasons": reasons, "witnesses": witnesses})
+    uncertainty = []
+    for row in all_rows:
+        if row.get("assay_key") != configuration["assay_key"] or row.get("effective_device_id", row.get("device_id")):
+            continue
+        possible_lots = [row.get("lot_id")]
+        pending = row.get("pending_revision")
+        if pending:
+            possible_lots.append((pending.get("result") or {}).get("lot_id"))
+        if row.get("revision_error"):
+            possible_lots.append(None)
+        for possible in dict.fromkeys(possible_lots):
+            known = isinstance(possible, str) and bool(possible.strip())
+            uncertainty.append({"kind": "run", "id": row["id"], "kit_lot": possible if known else None,
+                "reason": "report_device_unconfirmed", "source_hash": content_hash(row)})
+    candidate_devices = {}
+    for candidate in list_pending_report_candidates(dict(store_spec)):
+        if candidate["assay_key"] == configuration["assay_key"]:
+            report = candidate["report_id"]
+            if report not in candidate_devices:
+                context = get_report_device_context(dict(store_spec), report)
+                candidate_devices[report] = context.get("device_id", "") if context else ""
+            confirmed = candidate_devices[report]
+            if not confirmed or confirmed == effective_device:
+                uncertainty.append({"kind": "candidate", "id": candidate["candidate_id"], "kit_lot": candidate["meta"].get("lot_id"),
+                    "reason": "duplicate_source_unresolved", "source_hash": content_hash(candidate), "confirmed_device_id": confirmed})
+    for lot in lots:
+        relevant = [item for item in uncertainty if not item["kit_lot"] or item["kit_lot"] == lot["kit_lot"]]
+        if relevant:
+            lot["close_available"] = False
+            lot["last_usage_reliable"] = False
+            lot["witnesses"] = []
+            lot["reasons"].extend(sorted({item["reason"] for item in relevant}))
     snapshot = {"chronology_version": "qc-usage-v1", "store_path": str(resolve_store_path(store_spec)),
-        "device_id": configuration["device_id"], "assay_key": configuration["assay_key"], "profile_version_id": profile_version_id,
+        "device_id": effective_device, "assay_key": configuration["assay_key"], "profile_version_id": profile_version_id,
         "profile_hash": content_hash(configuration), "profile_snapshot": configuration,
         "profile_heads": [{"version_id": row["version_id"], "profile_hash": content_hash(row["snapshot"])} for row in profiles],
         "temporal_profiles": {str(key): value for key, value in temporal_profiles.items()},
         "inventory_version_id": inventory["version_id"], "inventory_hash": content_hash(inventory["snapshot"]),
         "lot_bindings": [{"lot_key": row["lot_key"], "version_id": row["version_id"], "snapshot_hash": content_hash(row["snapshot"])} for row in bindings],
-        "runs": runs, "unassigned_run_ids": sorted(set(unassigned), key=str), "lots": lots}
+        "runs": runs, "unassigned_run_ids": sorted(set(unassigned), key=str), "lots": lots,
+        **({"unresolved_device_sources": uncertainty} if uncertainty else {})}
     return QCUsageSnapshot.freeze(snapshot)

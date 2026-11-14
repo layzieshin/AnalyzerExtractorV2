@@ -177,17 +177,24 @@ def test_results_view_binding_is_from_displayed_occurrence_and_pending_blocks_va
 @pytest.mark.parametrize("correct", [False, True])
 def test_results_validation_and_correction_capture_the_displayed_binding(correct):
     app = _make_app_stub()
-    binding = [("displayed-token", "displayed.sqlite")]
-    app._views["results"] = SimpleNamespace(validation_result_binding=lambda: binding[0])
+    item = replace(_validation_item(), selection_token="displayed-token", store_path="displayed.sqlite", validation_current=correct,
+        device_assignment_id=7, device_context_token="displayed-report-context")
+    selection = [item]
+    app._views["validation"] = SimpleNamespace(selected_item=lambda: selection[0], validation_initials=lambda: "RR",
+        validation_comment=lambda: "note", validation_device=lambda: item.device_id, validation_device_confirmed=lambda: True,
+        clear_comment=lambda: None, render_cases=lambda _items: None)
     calls = []
     app._services.results.validate_report_run = lambda *args, **kwargs: calls.append(("validate", args, kwargs))
     app._services.results.correct_report_run = lambda *args, **kwargs: calls.append(("correct", args, kwargs))
-    test_app.AnalyzerDesktopApp._submit_validation(app, "report", 1, "RR", "note", correct=correct)
-    binding[0] = ("new-screen-token", "other-store.sqlite")
+    app._services.results.confirm_report_device = lambda *_args, **kwargs: {"assignment_id": 7, "runs": []}
+    app._services.results.list_open_validation_cases = lambda: []
+    test_app.AnalyzerDesktopApp._save_pending_validation(app)
+    selection[0] = replace(item, selection_token="new-screen-token", store_path="other-store.sqlite")
     app._task_runner.submissions[-1][1]()
     assert calls[0][0] == ("correct" if correct else "validate")
     assert calls[0][2]["expected_selection_token"] == "displayed-token"
     assert calls[0][2]["store_path"] == "displayed.sqlite"
+    assert calls[0][2]["expected_device_assignment_id"] == 7
 
 
 class _FakeVar:
@@ -336,6 +343,8 @@ def _fake_services() -> SimpleNamespace:
 def _make_app_stub(*, current_view: str = "results", services: object | None = None) -> test_app.AnalyzerDesktopApp:
     app = test_app.AnalyzerDesktopApp.__new__(test_app.AnalyzerDesktopApp)
     app._current_view = current_view
+    app._validation_report_scope = None
+    app._validation_store_scope = None
     app._bootstrapped = True
     app._services = services or _fake_services()
     app._settings = app._services.settings.load()
@@ -1116,13 +1125,14 @@ def test_validation_view_save_uses_task_runner_and_refreshes_badge() -> None:
     )
     calls: list[tuple[object, ...]] = []
     app._services.results.validate_report_run = lambda *args: calls.append(args)
-    app._services.results.list_open_validation_cases = lambda: []
+    app._validation_report_scope = "report-1"
+    app._services.results.list_open_validation_cases = lambda **kwargs: [replace(item, validation_current=True)] if kwargs.get("include_validated") else []
 
     test_app.AnalyzerDesktopApp._save_pending_validation(app)
     assert len(app._task_runner.submissions) == 1
     app._task_runner.invoke_success()
     assert calls == [("report-1", 7, "AB", "note")]
-    assert rendered == [()]
+    assert rendered == [(replace(item, validation_current=True),)]
     assert cleared == [True]
     assert badge == [("0", "good")]
 
@@ -1326,8 +1336,8 @@ def test_results_validation_panel_names_correction_and_shows_history() -> None:
         view.set_default_operator_initials("  AB ")
         view.render_report_detail(_validated_report_detail())
         assert "Validiert von CD" in view._lbl_validation_status.cget("text")
-        assert view._btn_save_validation.cget("text") == "Validierung speichern"
-        assert view._btn_correct_validation.cget("text") == "Validierung korrigieren"
+        assert view._btn_save_validation.cget("text") == "In Validierung prüfen"
+        assert view._btn_correct_validation.cget("text") == "Validierung / Berichtgerät korrigieren"
         assert str(view._btn_save_validation.cget("state")) == "disabled"
         assert str(view._btn_correct_validation.cget("state")) == "normal"
         assert len(view._validation_tree.get_children()) == 2
@@ -1339,73 +1349,42 @@ def test_results_validation_panel_names_correction_and_shows_history() -> None:
         root.destroy()
 
 
-def test_save_validation_refreshes_detail_and_list_without_confirmation() -> None:
+def test_results_validation_entry_captures_displayed_report_run_and_store_without_writing() -> None:
     app = _make_app_stub()
-    rendered: dict[str, object] = {}
-    detail = _report_detail("rep-1", "a.pdf")
-    calls: list[tuple[object, ...]] = []
-    app._settings = SimpleNamespace(operator_initials="AB")
-    app._views["results"] = SimpleNamespace(
-        current_detail_report_id=lambda: "rep-1",
-        validation_run_id=lambda: 5,
-        validation_initials=lambda: " AB ",
-        validation_comment=lambda: " note ",
-        render_report_list=lambda items: rendered.__setitem__("list", items),
-        render_report_detail=lambda item: rendered.__setitem__("detail", item),
-        show_detail=lambda: rendered.__setitem__("shown", True),
-        clear_validation_comment=lambda: rendered.__setitem__("cleared", True),
-        set_default_operator_initials=lambda value: rendered.__setitem__("initials", value),
-    )
-    app._services.results.validate_report_run = lambda *args, **kwargs: calls.append(("save", args, kwargs))
-    app._services.results.correct_report_run = lambda *args, **kwargs: calls.append(("correct", args, kwargs))
-    app._services.results.get_report_detail = lambda _report_id: detail
-    app._services.results.list_recent_reports = lambda limit=50: (_report_summary("rep-1", "a.pdf"),)
-    app._show_confirm_dialog = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("confirm"))
-
+    displayed = ["rep-1", 5, "displayed.sqlite"]
+    rendered, calls, navigation = [], [], []
+    app._views["results"] = SimpleNamespace(current_detail_report_id=lambda: displayed[0],
+        validation_run_id=lambda: displayed[1], validation_result_binding=lambda: ("displayed-result", displayed[2]))
+    app._views["validation"] = SimpleNamespace(render_cases=lambda items: rendered.append(tuple(items)),
+        select_run=lambda run: rendered.append(run))
+    app.show_view = lambda key, **kwargs: navigation.append((key, kwargs))
+    app._services.results.list_open_validation_cases = lambda **kwargs: calls.append(kwargs) or (_validation_item(),)
+    app._services.results.validate_report_run = lambda *_a, **_k: pytest.fail("Opening review must not validate")
+    app._show_confirm_dialog = lambda *_a, **_k: pytest.fail("The canonical form owns explicit confirmation")
     app._save_selected_validation()
-    assert len(app._task_runner.submissions) == 1
+    displayed[:] = ["other-report", 9, "changed.sqlite"]
     app._task_runner.invoke_success()
-    assert calls[0][0] == "save"
-    assert calls[0][1] == ("rep-1", 5, "AB", "note")
-    assert rendered["shown"] is True
-    assert rendered["cleared"] is True
-    assert rendered["detail"] is detail
-    assert rendered["list"]
+    assert calls == [{"report_id": "rep-1", "include_validated": True, "store_path": "displayed.sqlite"}]
+    assert navigation == [("validation", {"refresh": False})]
+    assert rendered[-1] == 5 and app._validation_report_scope == "rep-1"
 
 
-def test_correct_validation_requires_explicit_confirmation() -> None:
+def test_results_correction_uses_same_form_and_main_navigation_restores_global_queue() -> None:
     app = _make_app_stub()
-    dialogs: list[tuple[str, str]] = []
-    calls: list[str] = []
-    app._views["results"] = SimpleNamespace(
-        current_detail_report_id=lambda: "rep-1",
-        validation_run_id=lambda: 5,
-        validation_initials=lambda: "AB",
-        validation_comment=lambda: "",
-        render_report_list=lambda _items: None,
-        render_report_detail=lambda _detail: None,
-        show_detail=lambda: None,
-        clear_validation_comment=lambda: None,
-        set_default_operator_initials=lambda _value: None,
-    )
-    app._services.results.correct_report_run = lambda *_args, **_kwargs: calls.append("correct")
-    app._services.results.get_report_detail = lambda _report_id: _report_detail("rep-1", "a.pdf")
-    app._services.results.list_recent_reports = lambda limit=50: ()
-    app._show_confirm_dialog = lambda _parent, title, message: dialogs.append((title, message)) or False
-
+    navigation, selected, calls = [], [], []
+    app._views["results"] = SimpleNamespace(current_detail_report_id=lambda: "rep-1", validation_run_id=lambda: 5,
+        validation_result_binding=lambda: ("selected-result", "displayed.sqlite"))
+    app._views["validation"] = SimpleNamespace(render_cases=lambda _items: None, select_run=selected.append)
+    app.show_view = lambda key, **kwargs: navigation.append((key, kwargs))
+    app._services.results.list_open_validation_cases = lambda **kwargs: calls.append(kwargs) or ()
+    app._services.results.correct_report_run = lambda *_a, **_k: pytest.fail("Opening correction must not append a validation")
     app._correct_selected_validation()
-    assert dialogs
-    assert dialogs[0][0] == "Validierung korrigieren"
-    assert "nicht überschrieben" in dialogs[0][1]
-    assert "neuer Datensatz" in dialogs[0][1]
-    assert app._task_runner.submissions == []
-    assert calls == []
-
-    app._show_confirm_dialog = lambda *_args, **_kwargs: True
-    app._correct_selected_validation()
-    _key, work, _ok, _err = app._task_runner.submissions[0]
-    work()
-    assert calls == ["correct"]
+    app._task_runner.invoke_success()
+    assert selected == [5]
+    assert calls == [{"report_id": "rep-1", "include_validated": True, "store_path": "displayed.sqlite"}]
+    app._open_validation_queue()
+    assert app._validation_report_scope is None and app._validation_store_scope is None
+    assert navigation[-1] == ("validation", {})
 
 
 def test_render_report_list_drops_selection_when_selected_report_disappears() -> None:

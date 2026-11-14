@@ -12,6 +12,7 @@ from src.dbwriter.api import (
     list_duplicate_candidates,
     ResultRevisionError,
     select_result_revision,
+    confirm_report_device,
 )
 from src.ingestion.api import get_import_record, resolve_current_path
 from src.jobcontroller.api import get_job_evidence, reanalyze_run
@@ -30,6 +31,7 @@ from src.resultstore.api import (
     list_result_assays,
     list_result_charges,
     list_result_runs,
+    get_report_device_context, list_pending_report_candidates,
 )
 from src.resultvalidation.api import (
     OperatorInitialsRequiredError,
@@ -211,20 +213,23 @@ class ResultsController:
             profiles = list_profiles(spec)
             lots = {row["lot_key"]: row for row in list_lots(spec)}
             named = _named_rows(list_result_runs(spec, limit=None)["runs"], self._project_root)
+            named = [{**row, "device_id": row.get("effective_device_id", row.get("device_id"))} for row in named]
             identities = {(row.get("device_id"), row.get("assay_key"), row.get("lot_id"))
                           for row in named if row.get("lot_id") and row.get("device_id")}
             identities.update((row["device_id"], row["assay_key"], row["kit_lot"]) for row in lots.values())
             for row in named:
                 candidate = (row.get("pending_revision") or {}).get("result") or {}
-                if isinstance(candidate.get("lot_id"), str) and candidate["lot_id"].strip():
+                if row.get("device_id") and isinstance(candidate.get("lot_id"), str) and candidate["lot_id"].strip():
                     identities.add((row.get("device_id"), row.get("assay_key"), candidate["lot_id"]))
             cases, chronology = [], {}
             for device_id, assay, kit_lot in sorted(identities):
                 key = lot_identity(device_id, assay, kit_lot)
                 lot = lots.get(key)
-                options = [(row["version_id"], row["snapshot"]["name"]) for row in profiles
-                           if row["snapshot"]["device_id"] == device_id and row["snapshot"]["assay_key"] == assay]
-                selected = int(lot["snapshot"]["profile_version_id"]) if lot else (options[0][0] if len(options) == 1 else 0)
+                matching = [row for row in profiles if row["snapshot"]["device_id"] in ("", device_id) and row["snapshot"]["assay_key"] == assay]
+                specific = [row for row in matching if row["snapshot"]["device_id"] == device_id]
+                suggested = specific or matching
+                options = [(row["version_id"], row["snapshot"]["name"]) for row in specific + [row for row in matching if row not in specific]]
+                selected = int(lot["snapshot"]["profile_version_id"]) if lot else (suggested[0]["version_id"] if len(suggested) == 1 else 0)
                 if lot and selected not in {value[0] for value in options}:
                     options.insert(0, (selected, "Gespeichertes Prüfprofil"))
                 device = devices.get(device_id, {})
@@ -235,9 +240,10 @@ class ResultsController:
                     " / ".join(dict.fromkeys(row["_assay_name"] for row in named
                         if (row.get("device_id"), row.get("assay_key"), row.get("lot_id")) == (device_id, assay, kit_lot))) or "Assayname fehlt")
                 if selected:
-                    if selected not in chronology:
-                        chronology[selected] = get_lot_chronology(spec, profile_version_id=selected)
-                    case = self._qc_usage_case(case, chronology[selected])
+                    context_key = (selected, device_id)
+                    if context_key not in chronology:
+                        chronology[context_key] = get_lot_chronology(spec, profile_version_id=selected, device_id=device_id)
+                    case = self._qc_usage_case(case, chronology[context_key])
                 else:
                     case = replace(case, close_reason="Bitte ein passendes Prüfprofil ausdrücklich auswählen.")
                 cases.append(case)
@@ -257,13 +263,13 @@ class ResultsController:
         if selected not in {value[0] for value in case.profile_options}:
             raise QualityControlApplicationError("Bitte ein passendes Prüfprofil wählen.")
         try:
-            manifest = get_lot_sources(spec, profile_version_id=selected, kit_lot=case.kit_lot)
+            manifest = get_lot_sources(spec, profile_version_id=selected, kit_lot=case.kit_lot, device_id=case.device_id)
             if (manifest["device_id"], manifest["assay_key"]) != (case.device_id, case.assay_key):
                 raise QualityControlApplicationError("Das Profil gehört zu einem anderen Gerät oder Assay.")
             lot = get_lot(spec, case.lot_key) if case.version_id else None
             if lot and lot["version_id"] != case.version_id:
                 raise QualityControlApplicationError("Die Charge wurde geändert. Bitte neu laden.")
-            usage = get_lot_chronology(spec, profile_version_id=selected)
+            usage = get_lot_chronology(spec, profile_version_id=selected, device_id=case.device_id)
             current_case = self._qc_usage_case(replace(case, profile_version_id=selected, start_date=manifest["start_date"] or ""), usage)
             changed = bool(lot and lot["state"] == "closed" and lot["snapshot"]["source_manifest"]["source_token"] != manifest["source_token"])
             return QCLotDetail(current_case, manifest, lot["snapshot"]["sd_references"] if lot else {},
@@ -279,7 +285,7 @@ class ResultsController:
             context = MutationContext(operator_initials, request_id)
             if case.state == "unconfigured":
                 return open_lot(spec, profile_version_id=case.profile_version_id, kit_lot=case.kit_lot,
-                    expected_source_token=detail.source_manifest["source_token"], sd_references=sd_references, context=context)
+                    expected_source_token=detail.source_manifest["source_token"], sd_references=sd_references, context=context, device_id=case.device_id)
             if case.state != "open":
                 raise QualityControlApplicationError("Die Charge ist abgeschlossen. Bitte zuerst ausdrücklich wieder öffnen.")
             return configure_lot(spec, case.lot_key, expected_version_id=case.version_id,
@@ -339,7 +345,7 @@ class ResultsController:
                     raise QualityControlApplicationError("Diese gespeicherte Analysefassung kann nicht als Diagramm angezeigt werden; der originale PDF-Nachweis bleibt exportierbar.")
                 return QCAnalysisView(case, analysis.model_json, analysis.model_sha256, archived_id, evidence["pdf_sha256"])
             current = self._qc_current_lot(case, spec)
-            manifest = get_lot_sources(spec, profile_version_id=case.profile_version_id, kit_lot=case.kit_lot)
+            manifest = get_lot_sources(spec, profile_version_id=case.profile_version_id, kit_lot=case.kit_lot, device_id=case.device_id)
             references = current["snapshot"]["sd_references"] if current else {}
             if manifest["source_token"] != detail.source_manifest["source_token"] or references != detail.sd_references:
                 raise QualityControlApplicationError("Messwerte, Validierungen oder Referenzen wurden geändert. Bitte neu laden.")
@@ -365,9 +371,9 @@ class ResultsController:
         spec = self._qc_case_store(detail.case)
         try:
             self._qc_current_lot(detail.case, spec)
-            usage = get_lot_chronology(spec, profile_version_id=detail.case.profile_version_id)
+            usage = get_lot_chronology(spec, profile_version_id=detail.case.profile_version_id, device_id=detail.case.device_id)
             own = next((row for row in usage.to_dict()["lots"] if row["kit_lot"] == detail.case.kit_lot), None)
-            identities = {row["kit_lot"] for row in own["witnesses"]} if own else set()
+            identities = {row["kit_lot"] for row in own["witnesses"]} if own and own["close_available"] and own["last_usage_reliable"] else set()
             return tuple(self.get_qc_lot_detail(case, profile_version_id=detail.case.profile_version_id)
                 for case in self.list_qc_lots() if case.kit_lot in identities and
                 (case.device_id, case.assay_key) == (detail.case.device_id, detail.case.assay_key))
@@ -389,10 +395,10 @@ class ResultsController:
                 raise QualityControlApplicationError("Die Quellen wurden geändert. Bitte neu laden.")
             usage = json.loads(captured.chronology_json)
             own = next((row for row in usage["lots"] if row["kit_lot"] == case.kit_lot), None)
-            if not own or not own["witnesses"]:
+            if not own or not own["close_available"] or not own["last_usage_reliable"] or not own["witnesses"]:
                 raise QualityControlApplicationError(captured.case.close_reason)
             witness = own["witnesses"][0]
-            witness_source = get_lot_sources(spec, profile_version_id=case.profile_version_id, kit_lot=witness["kit_lot"])
+            witness_source = get_lot_sources(spec, profile_version_id=case.profile_version_id, kit_lot=witness["kit_lot"], device_id=case.device_id)
             analysis_view = self.get_qc_analysis(captured)
             analysis = QCAnalysis(analysis_view.model_json, analysis_view.model_sha256)
             report = render_analysis_pdf(analysis)
@@ -402,7 +408,7 @@ class ResultsController:
                 raise QualityControlApplicationError("Die vorbereitete PDF gehört nicht zum eingefrorenen Modell oder ihre Prüfsumme ist ungültig.")
             self._qc_case_store(case)
             self._qc_current_lot(case, spec)
-            if get_lot_chronology(spec, profile_version_id=case.profile_version_id).snapshot_sha256 != captured.chronology_sha256:
+            if get_lot_chronology(spec, profile_version_id=case.profile_version_id, device_id=case.device_id).snapshot_sha256 != captured.chronology_sha256:
                 raise QualityControlApplicationError("Der Nutzungs- oder Konfigurationsstand wurde während der Vorbereitung geändert. Bitte neu prüfen.")
             latest = self.get_qc_analysis(captured)
             if latest.model_sha256 != analysis_view.model_sha256:
@@ -495,10 +501,12 @@ class ResultsController:
 
     def list_recent_reports(self, *, limit: int = 50) -> list[ReportSummaryItem]:
         spec = self._capture_store()
+        device_names = self._report_device_names(spec)
         raw = list_report_summaries(spec, limit=limit)
         prepared: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
         all_run_ids: list[int] = []
         for row in raw.get("reports") or []:
+            row["_device_names"] = tuple(device_names.get(key, "Gerät ungeklärt") for key in row.get("device_ids", ()))
             report_id = str(row.get("report_id") or "")
             detail_raw = get_report_runs(spec, report_id) if report_id else None
             runs = _named_rows(list(detail_raw.get("runs") or []), self._project_root) if detail_raw else []
@@ -524,10 +532,14 @@ class ResultsController:
         if raw is None:
             return None
         runs = _named_rows(list(raw.get("runs") or []), self._project_root)
+        device_names = self._report_device_names(spec)
+        raw["_device_names"] = tuple(device_names.get(key, "Gerät ungeklärt") for key in raw.get("device_ids", ()))
         raw["runs"] = runs
         raw["store_path"] = spec["path"]
         for row in runs:
             row["store_path"] = spec["path"]
+            effective = row.get("effective_device_id", row.get("device_id"))
+            row["_device_name"] = device_names.get(effective, "Gerät ungeklärt")
         index = self._load_validation_index(_run_ids(runs), store_spec=spec)
         return _to_report_detail(
             raw,
@@ -535,16 +547,28 @@ class ResultsController:
             validation_index=index,
         )
 
-    def list_open_validation_cases(self, *, limit: int | None = None) -> list[ValidationQueueItem]:
+    def _report_device_names(self, spec):
+        devices = qc_get_inventory(spec)["snapshot"]["devices"]
+        counts = {}
+        for device in devices:
+            name = str(device.get("display_name") or "Gerät ungeklärt")
+            counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
+        return {device["device_id"]: str(device.get("display_name") or "Gerät ungeklärt") +
+            ((" · " + str(device.get("serial_number") or device["device_id"][-6:])) if counts[str(device.get("display_name") or "Gerät ungeklärt").casefold()] > 1 else "")
+            for device in devices}
+
+    def list_open_validation_cases(self, *, limit: int | None = None, report_id: str | None = None,
+                                   include_validated: bool = False, store_path: str | None = None) -> list[ValidationQueueItem]:
         """Return successful assay runs without an unambiguous effective validation."""
         requested_limit = None if limit is None else max(0, int(limit))
         if requested_limit == 0:
             return []
-        spec = self._capture_store()
+        spec = self._capture_store(store_path)
         path_contexts: dict[tuple[str, str], tuple[str, str, str, bool, str, str]] = {}
         queue_status_by_job = {str(job.job_id): str(job.status) for job in list_jobs(str(self._project_root))}
         terminal_by_job: dict[str, bool] = {}
         open_items: list[ValidationQueueItem] = []
+        device_contexts = {}
         page_size = 500
         offset = 0
         while True:
@@ -552,16 +576,21 @@ class ResultsController:
             runs = _named_rows(list(raw.get("runs") or []), self._project_root)
             index = self._load_validation_index(_run_ids(runs), store_spec=spec) if runs else _empty_validation_index()
             for row in runs:
+                if report_id and str(row.get("report_id") or row.get("job_id") or "") != report_id:
+                    continue
                 run_id = row.get("id")
                 if run_id is None or row.get("payload_parse_error"):
                     continue
                 run_key = int(run_id)
                 ambiguous = run_key in index.ambiguous_run_ids
                 record = index.latest_by_run_id.get(run_key)
+                revalidation = False
                 if record is not None:
-                    if _validation_matches_row(record, row) and not ambiguous:
+                    if _validation_matches_row(record, row) and not ambiguous and not include_validated:
                         continue
-                    ambiguous = True
+                    revalidation = (record.revision_id == int(row.get("revision_id") or 0) and record.selection_id == row.get("selection_id")
+                        and record.device_assignment_id != int(row.get("device_assignment_id") or 0))
+                    ambiguous = ambiguous or (not revalidation and not _validation_matches_row(record, row))
                 job_id = str(row.get("job_id") or "")
                 if job_id:
                     queue_status = queue_status_by_job.get(job_id)
@@ -596,21 +625,24 @@ class ResultsController:
                     ReportFieldValue(field_key=str(key), value=_stringify_value(value))
                     for key, value in sorted(payload.items(), key=lambda item: str(item[0]).casefold())
                 )
-                report_id = str(row.get("report_id") or "") or compute_report_id(
+                row_report_id = str(row.get("report_id") or "") or compute_report_id(
                     job_id,
                     pdf_path=pdf_path,
                     created_at=str(row.get("created_at") or ""),
                     run_id=run_key,
                 )
+                if row_report_id not in device_contexts:
+                    device_contexts[row_report_id] = self.get_report_device_context(row_report_id, store_path=spec["path"])
+                device_context = device_contexts[row_report_id] or {}
                 open_items.append(
                     ValidationQueueItem(
-                        report_id=report_id,
+                        report_id=row_report_id,
                         run_id=run_key,
                         file_name=Path(pdf_path).name if pdf_path else "",
                         current_pdf_path=current_pdf_path or pdf_path,
                         assay_key=str(row.get("assay_key") or ""),
                         lot_id=str(row.get("lot_id") or ""),
-                        device_id=str(row.get("device_id") or ""),
+                        device_id=str(row.get("effective_device_id", row.get("device_id")) or ""),
                         created_at=str(row.get("created_at") or ""),
                         fields=fields,
                         validation_ambiguous=ambiguous,
@@ -622,11 +654,38 @@ class ResultsController:
                         missing_fields=tuple(row.get("missing_fields") or ()),
                         revision_error=str(row.get("revision_error") or ""),
                         assay_name=str(row.get("_assay_name") or "Assayname fehlt"),
+                        device_assignment_id=int(row.get("device_assignment_id") or 0),
+                        device_context_token=device_context.get("context_token", ""),
+                        device_options=tuple((item["device_id"], item["display_name"]) for item in device_context.get("devices", [])),
+                        suggested_device_id=device_context.get("suggested_device_id", ""), revalidation_required=revalidation,
+                        validation_current=bool(record and not ambiguous and _validation_matches_row(record, row)),
+                        device_impact=tuple(device_context.get("impact", ())),
                     )
                 )
             offset += len(runs)
             if not raw.get("truncated") or not runs:
                 break
+        for candidate in list_pending_report_candidates(spec):
+            candidate_report = candidate["report_id"]
+            if not candidate_report or (report_id and candidate_report != report_id):
+                continue
+            evidence = get_job_evidence(self._project_root, candidate_report)
+            if (queue_status_by_job.get(candidate_report, "DONE") != "DONE" or
+                    (evidence and evidence.state_available and evidence.status != "DONE")):
+                continue
+            if candidate_report not in device_contexts:
+                device_contexts[candidate_report] = self.get_report_device_context(candidate_report, store_path=spec["path"])
+            context = device_contexts[candidate_report] or {}
+            path = str(candidate["meta"].get("pdf_path") or "")
+            current_path = _report_path_context(self._project_root, job_id=candidate_report, pdf_path=path)[0]
+            frozen = candidate["meta"].get("source_provenance") or {}
+            open_items.append(ValidationQueueItem(candidate_report, -int(candidate["candidate_id"]), Path(path).name, current_path or path,
+                candidate["assay_key"], str(candidate["meta"].get("lot_id") or ""), context.get("device_id", ""), candidate["detected_at"],
+                tuple(ReportFieldValue(str(key), _stringify_value(value)) for key, value in sorted(candidate["payload"].items())),
+                store_path=spec["path"], assay_name=str(frozen.get("ruleset", {}).get("assay_name") or Path(str(candidate["meta"].get("ruleset_file") or "Assayname fehlt")).stem),
+                candidate_id=int(candidate["candidate_id"]), device_assignment_id=context.get("assignment_id", 0),
+                device_context_token=context.get("context_token", ""), device_options=tuple((row["device_id"], row["display_name"]) for row in context.get("devices", [])),
+                suggested_device_id=context.get("suggested_device_id", ""), device_impact=tuple(context.get("impact", ()))))
         return open_items if requested_limit is None else open_items[:requested_limit]
 
     def validate_report_run(
@@ -639,12 +698,14 @@ class ResultsController:
         expected_selection_token: str | None = None,
         store_path: str | None = None,
         request_id: str | None = None,
+        expected_device_assignment_id: int | None = None,
     ) -> RunValidationItem:
         spec = self._capture_store(store_path)
         self._require_run_in_report(report_id, run_id, store_spec=spec)
         try:
             record = validate_run(spec, int(run_id), operator_initials, comment,
-                expected_selection_token=expected_selection_token, request_id=request_id, project_root=str(self._project_root))
+                expected_selection_token=expected_selection_token, request_id=request_id, project_root=str(self._project_root),
+                expected_device_assignment_id=expected_device_assignment_id)
         except ResultValidationError as exc:
             raise _map_validation_error(exc) from exc
         return _to_validation_item(record)
@@ -659,15 +720,40 @@ class ResultsController:
         expected_selection_token: str | None = None,
         store_path: str | None = None,
         request_id: str | None = None,
+        expected_device_assignment_id: int | None = None,
     ) -> RunValidationItem:
         spec = self._capture_store(store_path)
         self._require_run_in_report(report_id, run_id, store_spec=spec)
         try:
             record = correct_validation(spec, int(run_id), operator_initials, comment,
-                expected_selection_token=expected_selection_token, request_id=request_id, project_root=str(self._project_root))
+                expected_selection_token=expected_selection_token, request_id=request_id, project_root=str(self._project_root),
+                expected_device_assignment_id=expected_device_assignment_id)
         except ResultValidationError as exc:
             raise _map_validation_error(exc) from exc
         return _to_validation_item(record)
+
+    def get_report_device_context(self, report_id: str, *, store_path: str | None = None) -> dict[str, Any] | None:
+        spec = self._capture_store(store_path)
+        context = get_report_device_context(spec, report_id)
+        if context is None:
+            return None
+        assays = {row["assay_key"] for row in [*context["runs"], *context["candidates"]]}
+        affected = [lot for lot in list_lots(spec) if lot["device_id"] == context["device_id"] and lot["assay_key"] in assays]
+        context["impact"] = (
+            f"Gesamter Quellbericht: {len(context['runs'])} Messungen, {len(assays)} Assays; {len(context['candidates'])} offene Quellkandidaten.",
+            "Bei Gerätewechsel müssen alle Messungen dieses Berichts erneut einzeln freigegeben werden. Gespeicherte Berichte bleiben unverändert.",
+            "Bisherige Chargen dieses Geräts/Assays: " + ("; ".join(f"{lot['assay_key']} · {lot['kit_lot']} ({'abgeschlossen' if lot['state'] == 'closed' else 'offen'})" for lot in affected) or "keine"),
+        )
+        return context
+
+    def confirm_report_device(self, report_id: str, device_id: str, *, expected_context_token: str,
+                              operator_initials: str, request_id: str, reason: str = "", store_path: str | None = None) -> dict[str, Any]:
+        spec = self._capture_store(store_path)
+        try:
+            return confirm_report_device(spec["path"], report_id, device_id, expected_context_token=expected_context_token,
+                actor=operator_initials, request_id=request_id, reason=reason, project_root=str(self._project_root))
+        except ResultRevisionError as exc:
+            raise ValidationConflictError(str(exc)) from exc
 
     def reanalyze_selected_cases(self, cases: Sequence[ValidationQueueItem], operator_initials: str,
                                  *, request_id: str) -> ReanalysisBatchResult:
@@ -898,7 +984,8 @@ def _validation_view(
 
 
 def _validation_matches_row(record: RunValidation, row: dict[str, Any]) -> bool:
-    return record.revision_id == int(row.get("revision_id") or 0) and record.selection_id == row.get("selection_id")
+    return (record.revision_id == int(row.get("revision_id") or 0) and record.selection_id == row.get("selection_id")
+        and record.device_assignment_id == int(row.get("device_assignment_id") or 0))
 
 
 def _comparison(row: dict[str, Any]) -> ReanalysisComparison | None:
@@ -1002,6 +1089,7 @@ def _to_validation_item(record: RunValidation) -> RunValidationItem:
         revision_id=record.revision_id,
         selection_id=record.selection_id,
         selection_token=record.selection_token,
+        device_assignment_id=record.device_assignment_id,
     )
 
 
@@ -1092,6 +1180,7 @@ def _to_report_summary(
         validation_status=validation_status,
         report_status=report_status,
         assay_names=tuple(dict.fromkeys(str(item.get("_assay_name") or "Assayname fehlt") for item in report_runs)),
+        device_names=tuple(row.get("_device_names") or ()),
     )
 
 
@@ -1129,6 +1218,7 @@ def _to_report_detail(
         validation_status=summary.validation_status,
         report_status=summary.report_status,
         store_path=str(raw.get("store_path") or ""),
+        device_names=summary.device_names,
     )
 
 
@@ -1157,8 +1247,11 @@ def _group_report_assays(
             run_key = int(run_id) if run_id is not None else None
             ambiguous = run_key is not None and run_key in index.ambiguous_run_ids
             current_record = None if ambiguous or run_key is None else index.latest_by_run_id.get(run_key)
+            revalidation = False
             if current_record is not None and not _validation_matches_row(current_record, row):
-                ambiguous = True
+                revalidation = (current_record.device_assignment_id != int(row.get("device_assignment_id") or 0)
+                    and current_record.revision_id == int(row.get("revision_id") or 0) and current_record.selection_id == row.get("selection_id"))
+                ambiguous = not revalidation
                 current_record = None
             history_records = () if ambiguous or run_key is None else index.history_by_run_id.get(run_key, ())
             occurrences.append(
@@ -1166,7 +1259,7 @@ def _group_report_assays(
                     run_id=run_key,
                     lot_id=str(row.get("lot_id") or ""),
                     charge=str(row.get("charge") or row.get("lot_id") or ""),
-                    device_id=str(row.get("device_id") or ""),
+                    device_id=str(row.get("effective_device_id", row.get("device_id")) or ""),
                     dedupe_key=str(row.get("dedupe_key") or ""),
                     created_at=str(row.get("created_at") or ""),
                     fields=fields,
@@ -1180,6 +1273,7 @@ def _group_report_assays(
                     reanalysis_pending=row.get("pending_revision") is not None,
                     missing_fields=tuple(row.get("missing_fields") or ()),
                     assay_name=str(row.get("_assay_name") or "Assayname fehlt"),
+                    device_name=str(row.get("_device_name") or ""), revalidation_required=revalidation,
                 )
             )
         groups.append(

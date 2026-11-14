@@ -213,7 +213,7 @@ class StatisticsView(ttk.Frame):
         message = f"Beginn: {start} · {manifest['population_count']} gespeicherte Messungen · {manifest['included_count']} geeignete Kontrollwerte · {manifest['excluded_count']} ausgeschlossen."
         if detail.case.state == "closed":
             message += " Abgeschlossene Nachweise bleiben eingefroren; spätere Werte brauchen eine Wiederöffnung."
-        elif not detail.sd_references:
+        elif not detail.sd_references and manifest["profile_snapshot"].get("enabled_rules"):
             message += " Keine SD-Referenz: SD-Auswertung nicht verfügbar."
         message += " " + detail.case.close_reason
         self._qc_summary.configure(text=message)
@@ -232,12 +232,18 @@ class StatisticsView(ttk.Frame):
         labels.update(manufacturer_min_conflict="Unterschiedliche Hersteller-MIN-Werte: Profil klären",
                       manufacturer_max_conflict="Unterschiedliche Hersteller-MAX-Werte: Profil klären",
                       manufacturer_limits_reversed="Hersteller-MIN ist größer als MAX")
+        labels.update(unit_unconfirmed="Einheit im QK-Profil ergänzen oder ausdrücklich dimensionslos wählen",
+            measurement_date_missing="Messdatum nicht erfasst", measurement_date_conflict="Datumsquellen widersprechen sich",
+            measurement_time_conflict="Zeitquellen widersprechen sich")
         profile = manifest["profile_snapshot"]
         for point in (*manifest["included"], *manifest["excluded"]):
             reasons = []
             for reason in point["reasons"]:
                 reasons.append(labels.get(reason, f"{reason[:-8].upper()}-Wert klären" if reason.endswith("_invalid") else "Nachweis klären"))
-            measured = self._qc_measured_label(point["measured_at"], profile=profile) if point["measured_at"] else None
+            for reason in point.get("feature_reasons", {}).get("time", []):
+                reasons.append(labels.get(reason, "Zeitangabe klären") + " (Kennzahlen unabhängig davon)")
+            interpreted = point.get("measurement")
+            measured = ((interpreted["date"] or "Datum ungeklärt") + (" " + interpreted["time"] if interpreted["time"] else "")) if interpreted else self._qc_measured_label(point["measured_at"], profile=profile) if point["measured_at"] else None
             self._qc_source_tree.insert("", "end", values=(measured or "Unlesbar", point["control_name"],
                 str(point["raw"].get("IST") or ""), str(point["raw"].get("SOLL") or ""),
                 str(point["raw"].get("MIN") or ""), str(point["raw"].get("MAX") or ""), "; ".join(reasons) or "Eindeutig validiert"))
@@ -285,7 +291,8 @@ class StatisticsView(ttk.Frame):
             "baseline_insufficient": "Zu wenig eingefrorene Referenzwerte", "positive_target_required": "Positiver SOLL erforderlich",
             "classic_2sd_trigger_absent": "Aktuelles klassisches 2-SD-Prüfsignal fehlt", "eligible_values_missing": "Keine geeigneten Werte",
             "sd_or_group_incomplete": "SD oder Kontrollgruppe unvollständig", "within_run_controls_or_sd_unavailable": "Gemeinsamer Lauf oder SD nicht belegt",
-            "target_or_unit_conflict": "Zielwerte oder Einheiten klären"}.get(value, "Nachweis klären" if value else "")
+            "target_or_unit_conflict": "Zielwerte oder Einheiten klären", "target_unavailable": "SOLL für diese Bewertung ergänzen",
+            "unit_unconfirmed": "Einheit im QK-Profil ergänzen"}.get(value, "Nachweis klären" if value else "")
 
     def _qc_series(self):
         identifier = self._qc_control_ids.get(self._qc_control.get())
@@ -306,20 +313,25 @@ class StatisticsView(ttk.Frame):
             f"QMMA-Grenze (relativ): {str(qmma_limit) + ' %' if qmma_limit is not None else 'nicht konfiguriert'} · QMMA-Bewertung: {limit_status}\n"
             f"{sd_text}. Menschliche Validierung bleibt getrennt.")
         descriptive = series.get("descriptive")
+        profile = self._qc_model["source_manifest"]["profile_snapshot"]
+        modern = self._qc_model.get("analysis_model_version", 1) >= 4
+        control = next(row for row in profile["controls"] if row["control_id"] == series["control_id"])
+        if modern and not control["fields"].get("SOLL"):
+            self._qc_statistics.configure(text=f"Einheit: {series['unit']} · n = {descriptive['n']} bestätigte geeignete Einzelwerte.")
         if descriptive is not None:
             def shown(metric):
                 return format(Decimal(metric["value"]), ".6g") if metric["available"] else "nicht verfügbar"
             cv = shown(descriptive["cv_percent"]) + (" %" if descriptive["cv_percent"]["available"] else "")
             self._qc_statistics.configure(text=self._qc_statistics.cget("text") +
-                f"\nMessreihe: Mittelwert {shown(descriptive['mean'])} · empirische SD (n-1) {shown(descriptive['sample_sd'])} · VK {cv}. Diese SD ist keine Westgard-Referenz.")
+                f"\nMessreihe: Mittelwert {shown(descriptive['mean'])} · empirische SD (n-1) {shown(descriptive['sample_sd'])} · VK {cv}." + (" Diese SD ist keine Westgard-Referenz." if profile["enabled_rules"] else ""))
         lines = series["chart"].get("reference_lines")
         if lines is not None:
             values = "; ".join(f"{line['label']}: {line['value']} {series['unit']}" for line in lines if line["kind"] != "sd")
             unavailable = "; ".join(f"{label}: {self._qc_limit_reason(limit['reason'])}" for kind, label in
                 (("manufacturer", "Herstellergrenzen"), ("single_value", "Einzelwert-Prozentgrenzen"))
-                if not (limit := series["limits"][kind])["available"])
+                if (not modern or (kind == "manufacturer" and control["fields"].get("MIN") and control["fields"].get("MAX")) or (kind == "single_value" and profile.get("single_value_limits_enabled"))) and not (limit := series["limits"][kind])["available"])
             self._qc_legend.configure(text="; ".join(value for value in (values, unavailable,
-                "Grün: SOLL · Grau punktiert: Mittelwert · Violett gestrichelt: Hersteller · Orange: Einzelwert-Prozentgrenzen · Graublau: SD. Orange Ringe: Grenzüberschreitung; Punktfarbe: Westgard.") if value))
+                "Grau punktiert: Mittelwert." if modern and not control["fields"].get("SOLL") and not profile.get("single_value_limits_enabled") and not control["fields"].get("MIN") else "Grün: SOLL · Grau punktiert: Mittelwert · Violett gestrichelt: Hersteller · Orange: Einzelwert-Prozentgrenzen · Graublau: SD. Orange Ringe: Grenzüberschreitung;" + (" Punktfarbe: Westgard." if profile["enabled_rules"] else "")) if value))
         else:
             self._qc_legend.configure(text="Gespeichertes Altmodell: SOLL und vorhandene SD-Linien. Einzelwertgrenzen wurden damals nicht berechnet.")
         self._qc_chart_range = tuple(map(float, (*series["chart"]["x_range"], *series["chart"]["y_range"])))
@@ -426,6 +438,8 @@ class StatisticsView(ttk.Frame):
         self._qc_findings.delete(*self._qc_findings.get_children())
         statuses = {"reject": "Ablehnungsbefund", "warning": "Warnung", "unavailable": "Nicht verfügbar", "pass": "Kein Befund", "disabled": "Nicht ausgewählt", "not_triggered": "Prüfsignal fehlt"}
         for finding in point["findings"]:
+            if self._qc_model.get("analysis_model_version", 1) >= 4 and finding["rule"] not in self._qc_model["source_manifest"]["profile_snapshot"]["enabled_rules"]:
+                continue
             self._qc_findings.insert("", "end", values=(finding["rule"], statuses[finding["status"]], self._qc_reason(finding["reason"])))
 
     @staticmethod

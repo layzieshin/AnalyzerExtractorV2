@@ -329,5 +329,17 @@ def test_invalid_selected_history_and_unknown_component_fail_closed_without_writ
     with pytest.raises(ValidationStateConflictError, match="unlesbar"):
         validate_run(_spec(path), run, "RR", expected_selection_token="original:1")
     with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE dbwriter_schema_migrations SET version=2")
+        conn.execute("UPDATE dbwriter_schema_migrations SET version=99 WHERE version=2")
     assert "schema_unknown" in get_result_run(_spec(path), run)["revision_error"]
+    # A marked v2 store must retain its complete history contract. Neither a
+    # read nor a rejected write may recreate an emptied device-history table.
+    partial = tmp_path / "partial-v2.sqlite"
+    partial_run = _write(partial)
+    with sqlite3.connect(partial) as conn:
+        conn.execute("DROP TABLE candidate_materializations")
+    before = partial.read_bytes(), partial.stat().st_mtime_ns
+    state = get_result_run(_spec(partial), partial_run)
+    assert state["revision_error"] and state["device_binding_status"] == "unreadable"
+    with pytest.raises(ResultRevisionError, match="Bericht-Geräteschema"):
+        _candidate(partial, partial_run)
+    assert (partial.read_bytes(), partial.stat().st_mtime_ns) == before

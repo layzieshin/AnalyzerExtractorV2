@@ -16,11 +16,18 @@ from urllib.parse import quote
 
 from src.resultstore.api import list_result_runs
 
-from .model import MutationContext, QCConfigurationError, QCConflictError, QCStoreError, canonical_json, content_hash, utc_now
+from .model import ConfigurationContext, MutationContext, QCConfigurationError, QCConflictError, QCStoreError, canonical_json, content_hash, utc_now
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_DEVICE_ID = "DEFAULT_DEVICE"
-_TABLES = frozenset({"qc_schema_migrations", "qc_inventory_versions", "qc_profile_versions", "qc_lot_versions", "qc_report_evidence"})
+_BASE_TABLES = frozenset({"qc_schema_migrations", "qc_inventory_versions", "qc_profile_versions", "qc_lot_versions", "qc_report_evidence"})
+_TABLES = _BASE_TABLES | {"qc_profile_draft_versions"}
+_DRAFT_DDL = """CREATE TABLE qc_profile_draft_versions (
+    version_id INTEGER PRIMARY KEY, draft_id TEXT NOT NULL, predecessor_id INTEGER NOT NULL,
+    profile_id TEXT NOT NULL, base_version_id INTEGER NOT NULL, snapshot_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('retained','discarded')), created_at_utc TEXT NOT NULL,
+    request_id TEXT NOT NULL UNIQUE, intent_hash TEXT NOT NULL,
+    UNIQUE(draft_id, predecessor_id))"""
 _DDL = (
     """CREATE TABLE qc_schema_migrations (
         version INTEGER PRIMARY KEY, source_sha256 TEXT NOT NULL,
@@ -45,6 +52,7 @@ _DDL = (
         model_json TEXT NOT NULL, model_sha256 TEXT NOT NULL, pdf_bytes BLOB NOT NULL,
         pdf_sha256 TEXT NOT NULL, algorithm_id TEXT NOT NULL, renderer_id TEXT NOT NULL,
         created_at_utc TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE)""",
+    _DRAFT_DDL,
 )
 
 
@@ -70,11 +78,13 @@ def _schema_state(conn: sqlite3.Connection) -> str:
     present = tables.intersection(_TABLES)
     if not present:
         return "uninitialized"
-    if present != _TABLES:
+    if not _BASE_TABLES.issubset(present):
         raise QCStoreError("Die QC-Tabellen sind unvollständig. Bitte Datenbestand klären.")
     versions = [int(row[0]) for row in conn.execute("SELECT version FROM qc_schema_migrations ORDER BY version")]
-    if versions != [SCHEMA_VERSION]:
+    if versions not in ([1], [2], [1, 2]):
         raise QCStoreError("Die QC-Schemaversion wird nicht unterstützt.")
+    if (versions == [1]) != ("qc_profile_draft_versions" not in tables):
+        raise QCStoreError("Die QC-Entwurfstabellen sind unvollständig. Bitte Datenbestand klären.")
     return "ready"
 
 
@@ -124,6 +134,11 @@ def write_connection(store_spec: Mapping[str, Any], *, initialize: bool = False,
             conn.execute("INSERT INTO qc_schema_migrations VALUES (?, ?, ?, ?, ?)", (
                 SCHEMA_VERSION, str(data.get("source_sha256") or ""), str(data.get("source_path") or ""),
                 utc_now(), canonical_json(data)))
+        elif not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='qc_profile_draft_versions'").fetchone():
+            # Additive migration only during an explicit user write. Existing
+            # profile/lot revisions and archived report bytes remain untouched.
+            conn.execute(_DRAFT_DDL)
+            conn.execute("INSERT INTO qc_schema_migrations VALUES (?, '', '', ?, '{}')", (SCHEMA_VERSION, utc_now()))
         yield conn
         conn.execute("COMMIT")
     except sqlite3.Error as exc:
@@ -206,7 +221,7 @@ def _normalize_inventory(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         ids.add(device_id)
         device = {key: str(raw.get(key) or "").strip() for key in ("display_name", "serial_number", "lnr", "eva")}
         device.update(device_id=device_id, active=bool(raw.get("active", True)), legacy=bool(raw.get("legacy", False)))
-        device["incomplete"] = not bool(device["display_name"] and any(device[key] for key in ("serial_number", "lnr", "eva")))
+        device["incomplete"] = not bool(device["display_name"])
         devices.append(device)
     default = str(snapshot.get("default_device_id") or "").strip()
     if not devices or default not in ids:
@@ -244,9 +259,20 @@ def _append_inventory(conn: sqlite3.Connection, snapshot: dict[str, Any], expect
         raise QCConfigurationError("Historische Geräte bleiben erhalten. Bitte deaktivieren statt entfernen.")
     old_legacy = {row["device_id"] for row in previous["snapshot"]["devices"] if row.get("legacy")} if previous else set()
     allowed_legacy = old_legacy | set(historical_ids or ()) | {DEFAULT_DEVICE_ID}
+    old_devices = {row["device_id"]: row for row in previous["snapshot"]["devices"]} if previous else {}
+    named = {}
     for device in snapshot["devices"]:
         if device["incomplete"] and not (imported or (device["legacy"] and device["device_id"] in allowed_legacy)):
-            raise QCConfigurationError("Neue Geräte brauchen einen Namen und mindestens SN, LNR oder EVA.")
+            raise QCConfigurationError("Neue Geräte brauchen einen Namen.")
+        label = device["display_name"].casefold()
+        if device["active"] and label:
+            for other in named.get(label, []):
+                # Preserve genuinely existing same-name identities; do not
+                # create another indistinguishable active device or merge IDs.
+                old_pair = [old_devices.get(row["device_id"]) for row in (other, device)]
+                if not all(row and row["active"] and row["display_name"].casefold() == label for row in old_pair):
+                    raise QCConfigurationError("Ein aktives Gerät mit diesem Namen ist schon vorhanden. Bitte dieses Gerät auswählen oder einen unterscheidbaren Namen vergeben.")
+            named.setdefault(label, []).append(device)
     cursor = conn.execute("""INSERT INTO qc_inventory_versions
         (predecessor_id, snapshot_json, actor, created_at_utc, reason, request_id, intent_hash)
         VALUES (?, ?, ?, ?, ?, ?, ?)""", (expected, canonical_json(snapshot), context.operator_initials,
@@ -355,16 +381,16 @@ def get_report_evidence(store_spec: Mapping[str, Any], *, lot_version_id: int) -
         return result
 
 
-def _capture(store_spec: Mapping[str, Any], profile_version_id: int, kit_lot: str) -> dict[str, Any]:
+def _capture(store_spec: Mapping[str, Any], profile_version_id: int, kit_lot: str, device_id: str | None = None) -> dict[str, Any]:
     from .sources import get_lot_sources
 
-    return get_lot_sources(store_spec, profile_version_id=profile_version_id, kit_lot=kit_lot)
+    return get_lot_sources(store_spec, profile_version_id=profile_version_id, kit_lot=kit_lot, **({"device_id": device_id} if device_id else {}))
 
 
 def _require_sources(store_spec: Mapping[str, Any], captured: dict[str, Any], expected: str) -> None:
     if not expected or captured["source_token"] != expected:
         raise QCConflictError("Messwerte, Validierungen oder Konfiguration wurden geändert. Bitte neu laden.")
-    current = _capture(store_spec, captured["profile_version_id"], captured["kit_lot"])
+    current = _capture(store_spec, captured["profile_version_id"], captured["kit_lot"], captured["device_id"])
     if current["source_token"] != captured["source_token"]:
         raise QCConflictError("Die Quellen wurden während der Bearbeitung geändert. Bitte neu laden.")
     if not captured["included"]:
@@ -397,6 +423,8 @@ def _freeze_sd(raw: Mapping[str, Any] | None, sources: dict[str, Any], previous:
                               profile_version_id=sources["profile_version_id"], calculation="sample-sd-and-mean-deferred-to-p5")
         elif normalized["kind"] == "manual":
             normalized["profile_version_id"] = sources["profile_version_id"]
+        if not sources["profile_snapshot"].get("device_id"):
+            normalized["device_id"] = sources["device_id"]
         normalized["reference_id"] = content_hash({"control_id": identifier, "reference": normalized})
         result[identifier] = normalized
     return result
@@ -404,6 +432,8 @@ def _freeze_sd(raw: Mapping[str, Any] | None, sources: dict[str, Any], previous:
 
 def _append_lot(conn: sqlite3.Connection, snapshot: dict[str, Any], expected: int, context: MutationContext,
                 intent: str) -> dict[str, Any]:
+    if not isinstance(context, MutationContext):
+        raise QCConfigurationError("Eine fachliche Chargenentscheidung braucht Operator-Initialen.")
     key = lot_identity(snapshot["device_id"], snapshot["assay_key"], snapshot["kit_lot"])
     previous = version_record(conn.execute("SELECT * FROM qc_lot_versions WHERE lot_key=? ORDER BY version_id DESC LIMIT 1", (key,)).fetchone())
     if (previous["version_id"] if previous else 0) != expected:
@@ -423,8 +453,9 @@ def _lot_snapshot(sources: dict[str, Any], sd_references: dict[str, Any], state:
 
 
 def open_lot(store_spec: Mapping[str, Any], *, profile_version_id: int, kit_lot: str,
-             expected_source_token: str, context: MutationContext, sd_references: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    captured = _capture(store_spec, profile_version_id, kit_lot)
+             expected_source_token: str, context: MutationContext, sd_references: Mapping[str, Any] | None = None,
+             device_id: str | None = None) -> dict[str, Any]:
+    captured = _capture(store_spec, profile_version_id, kit_lot, device_id)
     intent = intent_hash("open_lot", {"profile": profile_version_id, "kit_lot": kit_lot,
                                      "source": expected_source_token, "sd": sd_references}, context)
     with write_connection(store_spec) as conn:
@@ -439,7 +470,7 @@ def configure_lot(store_spec: Mapping[str, Any], lot_key: str, *, expected_versi
                   profile_version_id: int, expected_source_token: str, sd_references: Mapping[str, Any] | None,
                   context: MutationContext) -> dict[str, Any]:
     previous = get_lot(store_spec, lot_key)
-    captured = _capture(store_spec, profile_version_id, previous["kit_lot"])
+    captured = _capture(store_spec, profile_version_id, previous["kit_lot"], previous["device_id"])
     intent = intent_hash("configure_lot", {"lot": lot_key, "expected": expected_version_id, "profile": profile_version_id,
                                           "source": expected_source_token, "sd": sd_references}, context)
     with write_connection(store_spec) as conn:
@@ -459,7 +490,7 @@ def reopen_lot(store_spec: Mapping[str, Any], lot_key: str, *, expected_version_
     if not context.reason:
         raise QCConfigurationError("Bitte den Grund für die Wiederöffnung angeben.")
     previous = get_lot(store_spec, lot_key)
-    captured = _capture(store_spec, previous["snapshot"]["profile_version_id"], previous["kit_lot"])
+    captured = _capture(store_spec, previous["snapshot"]["profile_version_id"], previous["kit_lot"], previous["device_id"])
     intent = intent_hash("reopen_lot", {"lot": lot_key, "expected": expected_version_id, "source": expected_source_token}, context)
     with write_connection(store_spec) as conn:
         repeated = repeated_request(conn, "qc_lot_versions", context, intent)
@@ -502,7 +533,7 @@ def close_lot(store_spec: Mapping[str, Any], lot_key: str, *, expected_version_i
         "profile": selected_profile, "model": model, "pdf": pdf_sha256}, context)
     baseline_usage = expected_chronology_token
     if baseline_usage is None:
-        baseline_usage = get_lot_chronology(store_spec, profile_version_id=selected_profile).snapshot_sha256
+        baseline_usage = get_lot_chronology(store_spec, profile_version_id=selected_profile, device_id=supplied_source.get("device_id")).snapshot_sha256
     with write_connection(store_spec) as conn:
         repeated = repeated_request(conn, "qc_lot_versions", context, intent)
         if repeated:
@@ -515,21 +546,23 @@ def close_lot(store_spec: Mapping[str, Any], lot_key: str, *, expected_version_i
         if previous and previous["snapshot"]["profile_version_id"] != selected_profile:
             raise QCConflictError("Das ausgewählte Prüfprofil ist noch nicht an die Charge gebunden. Bitte zuerst die Konfiguration speichern.")
         kit_lot = previous["kit_lot"] if previous else supplied_source.get("kit_lot")
-        captured = _capture(store_spec, selected_profile, kit_lot)
+        captured = _capture(store_spec, selected_profile, kit_lot, supplied_source.get("device_id"))
         if lot_identity(captured["device_id"], captured["assay_key"], captured["kit_lot"]) != lot_key:
             raise QCConflictError("Die Profil-/Chargenidentität stimmt nicht überein.")
         references = previous["snapshot"]["sd_references"] if previous else {}
         if supplied_source != captured or model.get("sd_references") != references:
             raise QCConflictError("Der Analyse-Nachweis gehört zu einem anderen Quellen- oder SD-Stand.")
         _require_sources(store_spec, captured, expected_source_token)
-        usage = get_lot_chronology(store_spec, profile_version_id=selected_profile)
+        usage = get_lot_chronology(store_spec, profile_version_id=selected_profile, device_id=captured["device_id"])
         if not baseline_usage or usage.snapshot_sha256 != baseline_usage:
             raise QCConflictError("Der vollständige Nutzungs- oder Konfigurationsstand wurde geändert. Bitte den Abschluss neu prüfen.")
         own = next((row for row in usage.to_dict()["lots"] if row["kit_lot"] == kit_lot), None)
-        witnesses = [row for row in own["witnesses"] if row["kit_lot"] == witness_kit_lot] if own else []
-        if not witnesses:
+        if not own or not own["last_usage_reliable"]:
+            raise QCConfigurationError("Der Nutzungsverlauf dieser Charge ist nicht eindeutig; bitte Geräte- oder Quellzuordnung klären.")
+        witnesses = [row for row in own["witnesses"] if row["kit_lot"] == witness_kit_lot]
+        if not own["close_available"] or not witnesses:
             raise QCConfigurationError("Eine sicher spätere Nutzung einer anderen Kit-Charge ist nicht belegt.")
-        witness = _capture(store_spec, selected_profile, witness_kit_lot)
+        witness = _capture(store_spec, selected_profile, witness_kit_lot, captured["device_id"])
         if witness["source_token"] != expected_witness_source_token:
             raise QCConflictError("Die Quellen der belegenden Charge wurden geändert. Bitte neu prüfen.")
         snapshot = _lot_snapshot(captured, references, "closed")

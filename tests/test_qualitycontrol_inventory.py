@@ -70,8 +70,8 @@ def test_migration_keeps_source_bytes_ids_default_and_history(tmp_path: Path) ->
     assert (Path(source["path"]).read_bytes(), Path(source["path"]).stat().st_mtime_ns) == before_source
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT device_id FROM runs").fetchall() == [("historic-only",)]
-        assert len(conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'qc_%' AND type='table'").fetchall()) == 5
-        assert conn.execute("SELECT version, source_sha256 FROM qc_schema_migrations").fetchone() == (1, source["sha256"])
+        assert len(conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'qc_%' AND type='table'").fetchall()) == 6
+        assert conn.execute("SELECT version, source_sha256 FROM qc_schema_migrations").fetchone() == (2, source["sha256"])
 
 
 def test_migration_idempotency_and_single_authority(tmp_path: Path) -> None:
@@ -147,12 +147,12 @@ def test_partial_or_unknown_schema_fails_closed(tmp_path: Path) -> None:
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
 
 
-def test_new_incomplete_device_cannot_claim_legacy_and_reason_is_optional(tmp_path: Path) -> None:
+def test_new_device_needs_name_but_not_serial_and_reason_is_optional(tmp_path: Path) -> None:
     spec = _spec(tmp_path / "new.sqlite3")
-    value = {"default_device_id": "new", "devices": [{"device_id": "new", "display_name": "Neu", "legacy": True}]}
+    value = {"default_device_id": "new", "devices": [{"device_id": "new", "display_name": "", "legacy": True}]}
     with pytest.raises(QCConfigurationError, match="Neue Geräte"):
         save_inventory(spec, value, expected_version_id=0, context=MutationContext("RR", "new"))
-    value["devices"][0]["lnr"] = "L1"
+    value["devices"][0]["display_name"] = "Neu"
     assert save_inventory(spec, value, expected_version_id=0, context=MutationContext("RR", "complete"))["reason"]
 
 

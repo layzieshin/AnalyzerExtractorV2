@@ -59,7 +59,9 @@ def test_devices_load_valid_config_and_resolve_selection(tmp_path: Path) -> None
     _migrate(tmp_path)
     devices = list_devices(tmp_path, store_spec=_spec(tmp_path))
     assert [row["device_id"] for row in devices] == ["analyzer_i_1"]
-    assert devices[0]["incomplete"] is True
+    assert devices[0]["incomplete"] is False
+    assert devices[0]["display_name"] == "Analyzer I"
+    assert all(not devices[0][key] for key in ("serial_number", "lnr", "eva"))
     assert get_default_device_id(tmp_path, store_spec=_spec(tmp_path)) == "analyzer_i_1"
     assert resolve_device_id(tmp_path, "analyzer_i_1", store_spec=_spec(tmp_path)) == "analyzer_i_1"
     assert resolve_device_id(tmp_path, "manual_device", store_spec=_spec(tmp_path)) == "manual_device"

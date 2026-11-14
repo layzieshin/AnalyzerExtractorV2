@@ -24,8 +24,16 @@ def ensure_revision_schema(conn: sqlite3.Connection) -> None:
     """Additive component migration; caller owns its encompassing transaction."""
     conn.execute("CREATE TABLE IF NOT EXISTS dbwriter_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     versions = [int(row[0]) for row in conn.execute("SELECT version FROM dbwriter_schema_migrations")]
-    if versions and versions != [1]:
+    if versions and versions not in ([1], [1, 2]):
         raise ResultRevisionError("Unbekannte DbWriter-Version; bitte Datenbestand klaeren.")
+    expected = {
+        "run_source_provenance": {"run_id", "snapshot_json"},
+        "run_result_revisions": {"revision_id", "run_id", "request_id", "expected_selection_token", "supersedes_revision_id", "snapshot_json", "created_by", "created_at"},
+        "run_result_selections": {"selection_id", "run_id", "revision_id", "resolves_revision_id", "previous_selection_token", "action", "request_id", "decided_by", "note", "created_at"},
+        "run_identity_aliases": {"alias_id", "assay_key", "dedupe_key", "run_id", "revision_id", "created_at"},
+    }
+    if 2 in versions and any({str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")} != columns for table, columns in expected.items()):
+        raise ResultRevisionError("Unvollständiges Ergebnisschema; bitte Datenbestand klären.")
     conn.execute("""CREATE TABLE IF NOT EXISTS run_source_provenance (
         run_id INTEGER PRIMARY KEY, snapshot_json TEXT NOT NULL)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS run_result_revisions (
@@ -46,12 +54,6 @@ def ensure_revision_schema(conn: sqlite3.Connection) -> None:
         run_id INTEGER NOT NULL, revision_id INTEGER NOT NULL, created_at TEXT NOT NULL,
         UNIQUE(assay_key, dedupe_key))""")
     conn.execute("INSERT OR IGNORE INTO dbwriter_schema_migrations VALUES (1, ?)", (_stamp(),))
-    expected = {
-        "run_source_provenance": {"run_id", "snapshot_json"},
-        "run_result_revisions": {"revision_id", "run_id", "request_id", "expected_selection_token", "supersedes_revision_id", "snapshot_json", "created_by", "created_at"},
-        "run_result_selections": {"selection_id", "run_id", "revision_id", "resolves_revision_id", "previous_selection_token", "action", "request_id", "decided_by", "note", "created_at"},
-        "run_identity_aliases": {"alias_id", "assay_key", "dedupe_key", "run_id", "revision_id", "created_at"},
-    }
     for table, columns in expected.items():
         if {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")} != columns:
             raise ResultRevisionError("Unbekanntes Ergebnisschema; bitte Datenbestand klaeren.")
@@ -60,6 +62,8 @@ def ensure_revision_schema(conn: sqlite3.Connection) -> None:
         for verb in ("UPDATE", "DELETE"):
             conn.execute(f"""CREATE TRIGGER IF NOT EXISTS immutable_{table}_{verb.lower()}
                 BEFORE {verb} ON {table} BEGIN SELECT RAISE(ABORT, 'immutable_result_evidence'); END""")
+    from .report_devices import ensure_report_device_schema
+    ensure_report_device_schema(conn)
 
 
 def identity_owners(conn: sqlite3.Connection, assay_key: str, dedupe_key: str) -> set[int]:
@@ -169,11 +173,21 @@ def select_result_revision(sqlite_path: str, run_id: int, revision_id: int, *,
             selected_id = revision_id if action == "accept_new" else int(state["revision_id"])
             if action == "accept_new":
                 owners = identity_owners(conn, str(candidate["assay_key"]), str(candidate["dedupe_key"]))
-                if owners - {run_id}:
+                device_id = state.get("effective_device_id")
+                if device_id:
+                    from .report_devices import _claim, assert_device_identity_available
+                    assert_device_identity_available(conn, sqlite_path, candidate, device_id, run_id)
+                    for other_id in owners - {run_id}:
+                        other = get_result_run({"driver": "sqlite", "path": sqlite_path}, other_id) or {}
+                        if not other.get("effective_device_id") or other["effective_device_id"] == device_id:
+                            raise ResultRevisionConflictError("Die korrigierte Identität ist auf demselben oder einem ungeklärten Gerät schon belegt.")
+                    _claim(conn, candidate, device_id, run_id, int(state.get("device_assignment_id") or 0), revision_id)
+                elif owners - {run_id}:
                     raise ResultRevisionConflictError("Die korrigierte Identitaet gehoert bereits zu einer anderen Messung. Bitte Duplikat klaeren.")
-                conn.execute("""INSERT OR IGNORE INTO run_identity_aliases
-                    (assay_key, dedupe_key, run_id, revision_id, created_at) VALUES (?, ?, ?, ?, ?)""",
-                    (candidate["assay_key"], candidate["dedupe_key"], run_id, revision_id, _stamp()))
+                if not owners - {run_id}:
+                    conn.execute("""INSERT OR IGNORE INTO run_identity_aliases
+                        (assay_key, dedupe_key, run_id, revision_id, created_at) VALUES (?, ?, ?, ?, ?)""",
+                        (candidate["assay_key"], candidate["dedupe_key"], run_id, revision_id, _stamp()))
             cursor = conn.execute("""INSERT INTO run_result_selections
                 (run_id, revision_id, resolves_revision_id, previous_selection_token, action, request_id, decided_by, note, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (run_id, selected_id, revision_id,

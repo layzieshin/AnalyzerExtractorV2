@@ -47,7 +47,10 @@ CREATE TABLE IF NOT EXISTS run_validations (
     revision_id INTEGER NOT NULL DEFAULT 0,
     selection_id INTEGER,
     selection_token TEXT NOT NULL DEFAULT '',
-    request_id TEXT
+    request_id TEXT,
+    device_assignment_id INTEGER NOT NULL DEFAULT 0,
+    device_binding_token TEXT NOT NULL DEFAULT '',
+    validation_kind TEXT NOT NULL DEFAULT 'initial'
 )
 """
 
@@ -59,7 +62,8 @@ ON run_validations(run_id)
 _SELECT_COLUMNS = """
 validation_id, run_id, operator_initials, validated_at_utc,
 comment, supersedes_validation_id, created_at_utc,
-revision_id, selection_id, selection_token, request_id
+revision_id, selection_id, selection_token, request_id,
+device_assignment_id, device_binding_token, validation_kind
 """
 
 
@@ -116,7 +120,8 @@ def list_run_validations_readonly(
             if not columns:
                 return RunValidationList(records=(), latest_by_run_id={})
             selected = [name.strip() for name in _SELECT_COLUMNS.replace("\n", "").split(",")]
-            defaults = {"revision_id": "0", "selection_id": "NULL", "selection_token": "''", "request_id": "NULL"}
+            defaults = {"revision_id": "0", "selection_id": "NULL", "selection_token": "''", "request_id": "NULL",
+                        "device_assignment_id": "0", "device_binding_token": "''", "validation_kind": "'initial'"}
             selection = ", ".join(name if name in columns else f"{defaults[name]} AS {name}" for name in selected)
             records: list[RunValidation] = []
             for chunk in _chunks(ids, 400):
@@ -154,6 +159,7 @@ def validate_run(
     expected_selection_token: str | None = None,
     request_id: str | None = None,
     project_root: str | None = None,
+    expected_device_assignment_id: int | None = None,
 ) -> RunValidation:
     """Append the first validation. An existing validation is left unchanged."""
     initials = _require_initials(operator_initials)
@@ -165,14 +171,14 @@ def validate_run(
     stamp = _utc_iso()
     with _immediate_connection(path) as conn:
         _ensure_schema(conn)
-        repeated = _repeated_request(conn, checked_run_id, request_id, initials, note, expected_selection_token, False)
+        state = _require_selected_state(store_spec, checked_run_id, expected_selection_token, project_root, expected_device_assignment_id)
+        repeated = _repeated_request(conn, checked_run_id, request_id, initials, note, expected_selection_token, False, state)
         if repeated is not None:
             return repeated
-        state = _require_selected_state(store_spec, checked_run_id, expected_selection_token, project_root)
         heads = _effective_records(conn, checked_run_id)
         if len(heads) > 1:
             raise ValidationAmbiguousError(checked_run_id)
-        if heads:
+        if heads and heads[0].device_assignment_id == int(state.get("device_assignment_id") or 0):
             raise ValidationAlreadyExistsError(checked_run_id)
         stored = _insert_validation(
             conn,
@@ -180,10 +186,11 @@ def validate_run(
             operator_initials=initials,
             validated_at_utc=stamp,
             comment=note,
-            supersedes_validation_id=None,
+            supersedes_validation_id=heads[0].validation_id if heads else None,
             created_at_utc=stamp,
             state=state,
             request_id=request_id,
+            validation_kind="revalidation" if heads else "initial",
         )
     return stored
 
@@ -197,6 +204,7 @@ def correct_validation(
     expected_selection_token: str | None = None,
     request_id: str | None = None,
     project_root: str | None = None,
+    expected_device_assignment_id: int | None = None,
 ) -> RunValidation:
     """Append a correction that points at the previous effective validation."""
     initials = _require_initials(operator_initials)
@@ -208,10 +216,10 @@ def correct_validation(
     stamp = _utc_iso()
     with _immediate_connection(path) as conn:
         _ensure_schema(conn)
-        repeated = _repeated_request(conn, checked_run_id, request_id, initials, note, expected_selection_token, True)
+        state = _require_selected_state(store_spec, checked_run_id, expected_selection_token, project_root, expected_device_assignment_id)
+        repeated = _repeated_request(conn, checked_run_id, request_id, initials, note, expected_selection_token, True, state)
         if repeated is not None:
             return repeated
-        state = _require_selected_state(store_spec, checked_run_id, expected_selection_token, project_root)
         heads = _effective_records(conn, checked_run_id)
         if not heads:
             raise ValidationMissingError(checked_run_id)
@@ -229,6 +237,7 @@ def correct_validation(
             created_at_utc=stamp,
             state=state,
             request_id=request_id,
+            validation_kind="correction",
         )
     return stored
 
@@ -328,17 +337,20 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_RUN_INDEX)
     conn.execute("CREATE TABLE IF NOT EXISTS resultvalidation_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     versions = [int(row[0]) for row in conn.execute("SELECT version FROM resultvalidation_schema_migrations")]
-    if versions and versions != [1]:
+    if versions and versions not in ([1], [1, 2]):
         raise ValidationStoreUnreadableError("Unbekannte Validationsversion; bitte Datenbestand klaeren.")
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(run_validations)")}
-    for name, sql_type in {"revision_id": "INTEGER NOT NULL DEFAULT 0", "selection_id": "INTEGER", "selection_token": "TEXT NOT NULL DEFAULT ''", "request_id": "TEXT"}.items():
+    for name, sql_type in {"revision_id": "INTEGER NOT NULL DEFAULT 0", "selection_id": "INTEGER", "selection_token": "TEXT NOT NULL DEFAULT ''", "request_id": "TEXT",
+                           "device_assignment_id": "INTEGER NOT NULL DEFAULT 0", "device_binding_token": "TEXT NOT NULL DEFAULT ''", "validation_kind": "TEXT NOT NULL DEFAULT 'initial'"}.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE run_validations ADD COLUMN {name} {sql_type}")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_run_validation_request ON run_validations(run_id, request_id) WHERE request_id IS NOT NULL")
     conn.execute("INSERT OR IGNORE INTO resultvalidation_schema_migrations VALUES (1, ?)", (_utc_iso(),))
+    conn.execute("INSERT OR IGNORE INTO resultvalidation_schema_migrations VALUES (2, ?)", (_utc_iso(),))
 
 
-def _require_selected_state(store_spec: Mapping[str, Any], run_id: int, expected: str | None, project_root: str | None = None) -> dict[str, Any]:
+def _require_selected_state(store_spec: Mapping[str, Any], run_id: int, expected: str | None, project_root: str | None = None,
+                            expected_device_assignment_id: int | None = None) -> dict[str, Any]:
     # Caller already holds BEGIN IMMEDIATE. Other writers cannot change selection
     # between this public read-only projection and our append.
     state = get_result_run(dict(store_spec), run_id)
@@ -361,11 +373,20 @@ def _require_selected_state(store_spec: Mapping[str, Any], run_id: int, expected
             raise ValidationStateConflictError("Dieser Ergebnisstand braucht eine aktuelle Auswahlkennung. Bitte aktualisieren.")
     elif expected != state["selection_token"]:
         raise ValidationStateConflictError("Die Messung hat sich geaendert. Bitte aktualisieren und erneut pruefen.")
+    if source_root or expected_device_assignment_id is not None:
+        if not state.get("device_assignment_id") or state.get("device_binding_status") != "confirmed":
+            raise ValidationStateConflictError("Bitte das konkrete Gerät dieses Quellberichts vor der Validierung bestätigen.")
+        if expected_device_assignment_id is not None and int(state["device_assignment_id"]) != expected_device_assignment_id:
+            raise ValidationStateConflictError("Die Gerätezuordnung des Berichts wurde geändert. Bitte erneut prüfen.")
+        from src.qualitycontrol.api import get_inventory
+        inventory = get_inventory(store_spec)
+        if not any(row["device_id"] == state["effective_device_id"] and row["active"] and row.get("display_name") for row in inventory["snapshot"]["devices"]):
+            raise ValidationStateConflictError("Das bestätigte Gerät ist nicht mehr aktiv und benannt. Bitte Gerätezuordnung prüfen.")
     return state
 
 
 def _repeated_request(conn: sqlite3.Connection, run_id: int, request_id: str | None, initials: str,
-                      comment: str, token: str | None, correction: bool) -> RunValidation | None:
+                      comment: str, token: str | None, correction: bool, state: dict[str, Any]) -> RunValidation | None:
     if request_id is None:
         return None
     if not isinstance(request_id, str) or not request_id.strip():
@@ -374,7 +395,7 @@ def _repeated_request(conn: sqlite3.Connection, run_id: int, request_id: str | N
     if row is None:
         return None
     record = _row_to_record(row)
-    if (record.operator_initials, record.comment, record.supersedes_validation_id is not None) != (initials, comment, correction) or (token is not None and token != record.selection_token):
+    if (record.operator_initials, record.comment, record.validation_kind == "correction") != (initials, comment, correction) or (token is not None and token != record.selection_token) or record.device_assignment_id != int(state.get("device_assignment_id") or 0):
         raise ValidationStateConflictError("Die Anfragekennung wurde bereits fuer andere Validationsdaten verwendet.")
     return record
 
@@ -449,14 +470,15 @@ def _insert_validation(
     created_at_utc: str | None,
     state: dict[str, Any],
     request_id: str | None,
+    validation_kind: str = "initial",
 ) -> RunValidation:
     cursor = conn.execute(
         """
         INSERT INTO run_validations (
             run_id, operator_initials, validated_at_utc, comment,
             supersedes_validation_id, created_at_utc, revision_id, selection_id,
-            selection_token, request_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            selection_token, request_id, device_assignment_id, device_binding_token, validation_kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(run_id),
@@ -466,6 +488,7 @@ def _insert_validation(
             supersedes_validation_id,
             created_at_utc,
             state["revision_id"], state["selection_id"], state["selection_token"], request_id,
+            int(state.get("device_assignment_id") or 0), str(state.get("device_binding_token") or ""), validation_kind,
         ),
     )
     if cursor.lastrowid is None:
@@ -505,6 +528,9 @@ def _row_to_record(row: sqlite3.Row) -> RunValidation:
         selection_id=None if row["selection_id"] is None else int(row["selection_id"]),
         selection_token=str(row["selection_token"] or ""),
         request_id=str(row["request_id"] or ""),
+        device_assignment_id=int(row["device_assignment_id"] or 0),
+        device_binding_token=str(row["device_binding_token"] or ""),
+        validation_kind=("correction" if row["validation_kind"] == "initial" and supersedes is not None and not row["device_assignment_id"] else str(row["validation_kind"] or "initial")),
     )
 
 

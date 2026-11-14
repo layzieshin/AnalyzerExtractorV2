@@ -270,6 +270,8 @@ class ReportRunOccurrence:
     reanalysis_pending: bool = False
     missing_fields: tuple[str, ...] = ()
     assay_name: str = ""
+    device_name: str = ""
+    revalidation_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -302,6 +304,7 @@ class ReportSummaryItem:
     validation_status: str = ""
     report_status: str = ""
     assay_names: tuple[str, ...] = ()
+    device_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -318,6 +321,7 @@ class RunValidationItem:
     revision_id: int = 0
     selection_id: int | None = None
     selection_token: str = ""
+    device_assignment_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -355,6 +359,14 @@ class ValidationQueueItem:
     missing_fields: tuple[str, ...] = ()
     revision_error: str = ""
     assay_name: str = ""
+    candidate_id: int | None = None
+    device_assignment_id: int = 0
+    device_context_token: str = ""
+    device_options: tuple[tuple[str, str], ...] = ()
+    suggested_device_id: str = ""
+    revalidation_required: bool = False
+    validation_current: bool = False
+    device_impact: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -419,6 +431,7 @@ class ReportDetail:
     validation_status: str = ""
     report_status: str = ""
     store_path: str = ""
+    device_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -544,6 +557,7 @@ class QCAssayConfigurationItem:
     level_count: int = 0
     status: str = "QK noch nicht eingerichtet"
     issues: tuple[str, ...] = ()
+    draft_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -557,6 +571,7 @@ class QCConfigurationState:
     field_choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
     assay_rows: tuple[QCAssayConfigurationItem, ...] = ()
     catalog_error: str = ""
+    retained_drafts: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

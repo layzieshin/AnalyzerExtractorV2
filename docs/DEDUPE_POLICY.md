@@ -154,3 +154,9 @@ Excel recovery is not an available or planned action under the Package-3a contra
 
 AP-12A established the visible dedupe basis and legacy skip behavior for duplicates
 in Excel/SQLite.
+
+## 2.2 confirmed physical-device scope
+
+Original `runs` uniqueness and raw identity aliases remain intact. The separate DbWriter report-device ledger records immutable whole-source assignments and qualified semantic claims. v2 semantic identity retains the original plate/date/time/test fields; an explicit legacy key retains all its original frozen basis fields except import device. A confirmed physical device provides the additional scope; it does not rewrite the extraction rule or original key.
+
+Only a different proven PDF source, complete frozen source/rule/output-plan evidence and a confirmed different comparison device permit candidate materialization. The resulting run keeps its original import device/basis and records the candidate/source and qualified storage identity separately. Same-device, unknown-device and already-owned target identities stay clarification cases; an independent assay in the same source remains usable. Identical PDF retries never add a measurement. Reanalysis may reserve a qualified corrected identity without transferring another device's raw alias. Unconfirmed historical strings are not evidence of a distinct physical device.

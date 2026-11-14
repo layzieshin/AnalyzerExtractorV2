@@ -6,6 +6,7 @@ from src.ruleresolver.api import RuleSet
 from .dbwriter import DbWriter
 from .model import DbWriteResult, ResultRevisionConflictError, ResultRevisionError
 from .revisions import append_result_revision, select_result_revision
+from .report_devices import confirm_report_device
 
 __all__ = [
     "DbWriteResult",
@@ -17,6 +18,7 @@ __all__ = [
     "get_duplicate_candidate",
     "list_duplicate_candidates",
     "write_record_sqlite",
+    "confirm_report_device",
 ]
 
 

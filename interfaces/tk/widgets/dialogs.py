@@ -72,7 +72,7 @@ def _qc_form(parent: tk.Misc, title: str, *, width=820, height=650):
 def _qc_field(parent, label, value="", *, choices=None):
     row = ttk.Frame(parent)
     row.pack(fill="x", pady=3)
-    ttk.Label(row, text=label, width=26).pack(side="left", anchor="n")
+    ttk.Label(row, text=label, width=26, wraplength=190).pack(side="left", anchor="n")
     variable = tk.StringVar(value=str(value or ""))
     widget = (ttk.Combobox(row, textvariable=variable, values=tuple(choices), width=35) if choices is not None
               else ttk.Entry(row, textvariable=variable, width=35))
@@ -86,8 +86,8 @@ def _qc_actions(dialog, footer, submit):
     def cancel():
         if not dialog._qc_busy:
             callback = getattr(dialog, "on_cancel", None)
-            if callback:
-                callback()
+            if callback and callback() is False:
+                return
             dialog.destroy()
     dialog.cancel_button = ttk.Button(footer, text="Abbrechen", command=cancel)
     dialog.cancel_button.pack(side="right")
@@ -102,24 +102,38 @@ def _qc_actions(dialog, footer, submit):
     dialog.bind("<Escape>", lambda _event: cancel())
 
 
-def show_qc_inventory_dialog(parent, state: QCConfigurationState, *, initials: str, on_submit):
+def _qc_device_options(devices):
+    counts = {}
+    for row in devices:
+        name = str(row.get("display_name") or "Gerät ohne Namen")
+        counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
+    result = {}
+    for row in devices:
+        name = str(row.get("display_name") or "Gerät ohne Namen")
+        if counts[name.casefold()] > 1:
+            details = [str(row.get("serial_number") or ""), str(row["device_id"])[-6:]]
+            name += " · " + " · ".join(value for value in details if value)
+        result[name] = row["device_id"]
+    return result
+
+
+def show_qc_inventory_dialog(parent, state: QCConfigurationState, *, initials: str, on_submit, new_device: bool = False):
     dialog, body, footer = _qc_form(parent, "Geräte verwalten")
     snapshot = copy.deepcopy(state.inventory["snapshot"])
     devices = snapshot["devices"]
-    ttk.Label(body, text="Geräte benennen und mindestens SN, LNR oder EVA erfassen. Altgeräte bleiben mit ihrer Kennung erhalten.", wraplength=700).pack(anchor="w", pady=(0, 8))
+    ttk.Label(body, text="Ein unterscheidbarer Gerätename genügt. SN, LNR und EVA sind optional. Bestehende Geräte behalten ihre Kennung.", wraplength=700).pack(anchor="w", pady=(0, 8))
     tree = ttk.Treeview(body, columns=("name", "state"), show="headings", height=5, selectmode="browse")
     tree.heading("name", text="Gerät")
     tree.heading("state", text="Erfassung")
     tree.pack(fill="x", pady=4)
     name, _ = _qc_field(body, "Gerätename")
-    serial, _ = _qc_field(body, "Seriennummer (SN)")
-    lnr, _ = _qc_field(body, "LNR")
-    eva, _ = _qc_field(body, "EVA")
+    serial, _ = _qc_field(body, "Seriennummer (optional)")
+    lnr, _ = _qc_field(body, "LNR (optional)")
+    eva, _ = _qc_field(body, "EVA (optional)")
     active = tk.BooleanVar(value=True)
     default = tk.BooleanVar(value=False)
     ttk.Checkbutton(body, text="Gerät aktiv", variable=active).pack(anchor="w")
     ttk.Checkbutton(body, text="Als Standardgerät verwenden", variable=default).pack(anchor="w")
-    operator, _ = _qc_field(body, "Operator-Initialen", initials)
     selected = [None]
     loading = [False]
 
@@ -145,7 +159,7 @@ def show_qc_inventory_dialog(parent, state: QCConfigurationState, *, initials: s
     def refresh():
         tree.delete(*tree.get_children())
         for index, device in enumerate(devices):
-            incomplete = not (device.get("display_name") and any(device.get(key) for key in ("serial_number", "lnr", "eva")))
+            incomplete = not bool(device.get("display_name"))
             label = device.get("display_name") or f"{device['device_id']} (Altgerät unvollständig)"
             tree.insert("", "end", iid=str(index), values=(label, "Unvollständig" if incomplete else "Erfasst"))
 
@@ -157,6 +171,8 @@ def show_qc_inventory_dialog(parent, state: QCConfigurationState, *, initials: s
     def add():
         stash()
         devices.append({"device_id": f"device-{uuid4().hex}", "display_name": "", "serial_number": "", "lnr": "", "eva": "", "active": True, "legacy": False})
+        if not any(row.get("display_name") and row.get("active", True) for row in devices[:-1]):
+            snapshot["default_device_id"] = devices[-1]["device_id"]
         refresh()
         tree.selection_set(str(len(devices) - 1))
         render(len(devices) - 1)
@@ -166,33 +182,46 @@ def show_qc_inventory_dialog(parent, state: QCConfigurationState, *, initials: s
 
     def submit():
         stash()
-        on_submit(snapshot, operator.get(), dialog)
+        on_submit(snapshot, "", dialog)
 
     _qc_actions(dialog, footer, submit)
     refresh()
     tree.selection_set("0")
     render(0)
+    if new_device:
+        add()
+        dialog.title("Gerät hier anlegen")
     return dialog
 
 
 def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str, assays, field_choices, on_submit,
-                           selected_assay_key="", selected_profile_id=""):
+                           selected_assay_key="", selected_profile_id="", editor=None, on_draft_change=None,
+                           on_retain=None, on_discard=None, on_add_device=None):
     dialog, body, footer = _qc_form(parent, "Assays & QK – Profil einrichten", width=940, height=790)
     devices = {row["device_id"]: row for row in state.inventory["snapshot"]["devices"]}
     assay_options = list(assays.items()) if isinstance(assays, dict) else list(assays)
     assay_names = {key: label for label, key in assay_options}
-    profiles = {f"{row['snapshot']['name']} · {devices.get(row['snapshot']['device_id'], {}).get('display_name') or row['snapshot']['device_id']}"
-                f" [{row['snapshot']['device_id']}] · {assay_names.get(row['snapshot']['assay_key'], 'Assay nicht aktiv')}"
-                f" [{row['snapshot']['assay_key']}] · {row['profile_id']} · Fassung {row['version_id']}": row
+    device_labels = {key: label for label, key in _qc_device_options(list(devices.values())).items()}
+    profiles = {f"{row['snapshot']['name']} · {device_labels.get(row['snapshot']['device_id'], 'Alle Geräte des Assays')}"
+                f" · {assay_names.get(row['snapshot']['assay_key'], 'Assay nicht aktiv')}"
+                f" [{row['snapshot']['assay_key']}] · Fassung {row['version_id']}": row
                 for row in state.profiles}
     choice, chooser = _qc_field(body, "Prüfprofil", "Neues Prüfprofil", choices=("Neues Prüfprofil", *profiles))
     chooser.configure(state="readonly")
     ttk.Label(body, text="Jedes Speichern legt eine neue Fassung an. Frühere Level, Zuordnungen und Nachweise bleiben erhalten.", wraplength=800).pack(anchor="w", pady=6)
     name, _ = _qc_field(body, "Profilname")
-    available = {f"{row['display_name'] or row['device_id']} · Kennung {row['device_id']}": row["device_id"]
-                 for row in devices.values() if row["active"] and not row["incomplete"]}
+    available = _qc_device_options([row for row in devices.values() if row["active"] and row.get("display_name")])
     device, device_widget = _qc_field(body, "Gerät", choices=available)
     device_widget.configure(state="readonly")
+    device_scope = tk.BooleanVar(value=False)
+    scope_row = ttk.Frame(body)
+    scope_row.pack(fill="x", pady=4)
+    scope_widget = ttk.Checkbutton(scope_row, text="Nur für ein Gerät", variable=device_scope)
+    scope_widget.pack(side="left")
+    inline_button = ttk.Button(scope_row, text="Gerät hier anlegen", command=lambda: inline_device())
+    inline_button.pack(side="left", padx=8)
+    ttk.Label(body, text="Standard: Dieses Profil gilt für den Assay auf jedem Gerät. Die Messwerte werden immer je Gerät getrennt ausgewertet.", wraplength=800).pack(anchor="w", pady=4)
+    ttk.Label(body, text="Die Gerätebindung bestehender Profile bleibt erhalten. Für eine andere Bindung: unter Assays & QK 'Weiteres Profil' als Kopie verwenden.", wraplength=800).pack(anchor="w", pady=2)
     # Stable assay keys are visible even when names are identical.
     assay, assay_widget = _qc_field(body, "Assay", choices=[f"{label} [{key}]" for label, key in assay_options])
     assay_widget.configure(state="readonly")
@@ -208,7 +237,7 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
     controls_tree.pack(fill="x", pady=(0, 6))
     control_name, _ = _qc_field(basic, "Levelname")
     field_vars, field_widgets = {}, []
-    for key, label in (("MIN", "Untergrenze (MIN)"), ("MAX", "Obergrenze (MAX)"), ("SOLL", "Zielwert (SOLL)"), ("IST", "Gemessener Wert (IST)")):
+    for key, label in (("IST", "Gemessener Wert (IST)"), ("SOLL", "Zielwert (SOLL)"), ("MIN", "Untergrenze (MIN)"), ("MAX", "Obergrenze (MAX)")):
         field_vars[key], widget = _qc_field(basic, label, choices=())
         widget.configure(state="readonly")
         field_widgets.append(widget)
@@ -220,15 +249,19 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
     ttk.Label(basic, text="Gemeinsam für alle Level dieses Geräte-/Assayprofils. Punkt oder Komma, ohne Tausendertrennzeichen. Neue Auswertungen zeigen SOLL × (1 ± Prozent / 100) als Einzelwertgrenzen in Kurve und PDF. Die QMMA-Grenze bleibt getrennt.", wraplength=800).pack(anchor="w", pady=4)
     feedback = ttk.Label(basic, text="", wraplength=800)
     feedback.pack(anchor="w", pady=6)
+    ttk.Label(basic, text="Für den Anfang genügt das IST-Feld. SOLL und Herstellergrenzen können später ergänzt werden.", wraplength=800).pack(anchor="w", pady=4)
+    unit, _ = _qc_field(basic, "Einheit für gemeinsame Auswertung")
+    ttk.Label(basic, text="Kann zur Einrichtung leer bleiben. Für Mittelwert, SD und Vergleiche eine gemeinsame Einheit bestätigen oder unter Erweitert ausdrücklich dimensionslos wählen.", wraplength=800).pack(anchor="w", pady=4)
 
     date_field, date_widget = _qc_field(advanced, "Messdatumsfeld", choices=())
-    date_format, _ = _qc_field(advanced, "Datumsformat (z. B. %d.%m.%Y)", "%d.%m.%Y")
+    date_format, _ = _qc_field(advanced, "Datumsformat (optional)")
     time_field, time_widget = _qc_field(advanced, "Messzeitfeld (optional)", choices=())
     time_format, _ = _qc_field(advanced, "Zeitformat (optional, z. B. %H:%M:%S)")
-    ttk.Label(advanced, text="Bei getrennt extrahierter Uhrzeit beide Zeitfelder ausfüllen, z. B. %H:%M. Das Datumsformat enthält dann keine Uhrzeit.", wraplength=800).pack(anchor="w", pady=4)
-    grammar, grammar_widget = _qc_field(advanced, "Zahlenschreibweise", "Dezimalkomma (42,5)", choices=("Dezimalkomma (42,5)", "Dezimalpunkt (42.5)"))
+    ttk.Label(advanced, text="Leer bedeutet automatisch aus Datum/Uhrzeit im Bericht. Ein abweichendes bekanntes Format kann gezielt vorgegeben werden; fehlende Uhrzeit wird nicht erfunden.", wraplength=800).pack(anchor="w", pady=4)
+    grammar, grammar_widget = _qc_field(advanced, "Zahlenschreibweise", "Automatisch", choices=("Automatisch", "Dezimalkomma (42,5)", "Dezimalpunkt (42.5)"))
     grammar_widget.configure(state="readonly")
-    unit, _ = _qc_field(advanced, "Profil-Einheit")
+    dimensionless = tk.BooleanVar(value=False)
+    ttk.Checkbutton(advanced, text="Ausdrücklich dimensionslose Größe", variable=dimensionless).pack(anchor="w")
     grouping, grouping_widget = _qc_field(advanced, "Analysenlauf-Feld (optional)", choices=())
     ttk.Label(advanced, text="Leer: Kontrollen einer gespeicherten Assay-Messung bilden einen Lauf. Ein Kalendertag ist keine Laufkennung.", wraplength=800).pack(anchor="w", pady=4)
     legacy = ttk.LabelFrame(advanced, text="QMMA-Bestandskonfiguration", padding=6)
@@ -243,10 +276,10 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
     rule_frame.pack(fill="x", pady=8)
     rule_vars = {}
     for index, rule in enumerate(("1_2s", "1_3s", "2_2s", "R_4s", "4_1s", "10x")):
-        variable = tk.BooleanVar(value=True)
+        variable = tk.BooleanVar(value=False)
         rule_vars[rule] = variable
         ttk.Checkbutton(rule_frame, text=rule, variable=variable).grid(row=0, column=index, padx=4)
-    ttk.Label(advanced, text="Das klassische 2-SD-Prüfsignal bleibt aktiv. Die Auswahl 1₂s steuert dessen Warnanzeige.", wraplength=800).pack(anchor="w")
+    ttk.Label(advanced, text="Westgard ist anfangs ausgeschaltet. Nur bewusst ausgewählte Regeln mit passender Referenz und belegter Messreihenfolge werden bewertet.", wraplength=800).pack(anchor="w")
     level_advanced = ttk.LabelFrame(advanced, text="Ausgewähltes QK-Level", padding=6)
     level_advanced.pack(fill="x", pady=8)
     control_unit, _ = _qc_field(level_advanced, "Level-Einheit")
@@ -256,9 +289,11 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
     sd_value, _ = _qc_field(level_advanced, "Manuelle SD (optional, Punkt)")
     sd_reference, _ = _qc_field(level_advanced, "SD-Referenztext")
     ttk.Label(level_advanced, text="MIN/MAX und Prozentgrenzen ergeben keine SD. Ohne SD bleibt QMMA nutzbar. Bestehende Referenzen werden unverändert beibehalten.", wraplength=800).pack(anchor="w")
-    operator, _ = _qc_field(body, "Operator-Initialen", initials)
     current, selected_control, loading, prior_assay = [None], [None], [False], [""]
     controls, draft = [], [{}]
+    editor_record = [copy.deepcopy(editor)]
+    local_forms, baseline_form = {}, [None]
+    dialog.qc_state = state
 
     def selected_key():
         index = assay_widget.current()
@@ -272,9 +307,11 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
         fields = set(field_choices.get(selected_key(), ()))
         for control in controls:
             mapping = control.get("fields", {})
-            invalid = [f"{key}: {mapping.get(key) or 'fehlt'}" for key in ("MIN", "MAX", "SOLL", "IST") if not mapping.get(key) or mapping.get(key) not in fields]
-            if len(set(mapping.values())) != 4:
-                invalid.append("vier verschiedene Felder erforderlich")
+            invalid = [f"{key}: {mapping.get(key) or 'fehlt'}" for key in ("MIN", "MAX", "SOLL", "IST")
+                       if (not mapping.get(key) and key == "IST") or (mapping.get(key) and mapping.get(key) not in fields)]
+            assigned = [value for value in mapping.values() if value]
+            if len(set(assigned)) != len(assigned):
+                invalid.append("zugeordnete Felder müssen verschieden sein")
             if invalid:
                 problems.append(f"{control.get('name') or 'Unbenanntes Level'}: {', '.join(invalid)}")
         return problems
@@ -282,23 +319,23 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
     def update_field_choices():
         fields = tuple(field_choices.get(selected_key(), ()))
         for widget in field_widgets:
-            widget.configure(values=fields)
+            widget.configure(values=("", *fields))
         for widget in (date_widget, time_widget, grouping_widget, unit_field_widget):
             widget.configure(values=("", *fields))
-        feedback.configure(text="Feldzuordnung prüfen: " + "; ".join(mapping_feedback()) if mapping_feedback() else "Vier gültige Felder je Level zugeordnet.")
+        feedback.configure(text="Feldzuordnung prüfen: " + "; ".join(mapping_feedback()) if mapping_feedback() else "IST zugeordnet; zusätzliche Bewertungen verwenden nur die dafür verfügbaren Angaben.")
 
     def stash_control():
         index = selected_control[0]
         if index is None or not 0 <= index < len(controls):
             return
         control = controls[index]
-        control.update(name=control_name.get().strip(), fields={key: variable.get().strip() for key, variable in field_vars.items()},
-                       unit=control_unit.get().strip(), unit_field=unit_field.get().strip())
+        control.update(name=control_name.get(), fields={key: variable.get() for key, variable in field_vars.items()},
+                       unit=control_unit.get(), unit_field=unit_field.get())
         if sd_mode.get() == "Keine SD":
             control["sd_reference"] = None
         elif sd_mode.get() == "Manuelle SD":
             sd = copy.deepcopy(control.get("sd_reference") or {})
-            sd.update(kind="manual", value=sd_value.get().strip(), reference=sd_reference.get().strip())
+            sd.update(kind="manual", value=sd_value.get(), reference=sd_reference.get())
             control["sd_reference"] = sd
         if controls_tree.exists(str(index)):
             controls_tree.item(str(index), values=row_values(control))
@@ -338,58 +375,78 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
         if not loading[0]:
             stash_control()
             update_field_choices()
+            remember()
 
     def add_control():
         stash_control()
-        controls.append({"control_id": f"control-{uuid4().hex}", "name": "", "fields": {}, "unit": unit.get()})
+        controls.append({"control_id": f"control-{uuid4().hex}", "name": f"Level {len(controls) + 1}", "fields": {}, "unit": unit.get()})
         refresh_controls(len(controls) - 1)
+        remember()
 
     def remove_control():
         if len(controls) > 1:
             index = selected_control[0]
             controls.pop(index)
             refresh_controls(min(index, len(controls) - 1))
+            remember()
 
     def change_assay(_event):
         key = selected_key()
         if current[0] or key == prior_assay[0]:
             return
-        loading[0] = True
-        for control in controls:
-            control.update(fields={}, unit_field="", sd_reference=None)
-        for variable in (date_field, time_field, time_format, grouping):
-            variable.set("")
-        prior_assay[0] = key
-        loading[0] = False
-        refresh_controls(selected_control[0] or 0)
-        feedback.configure(text="Assay gewechselt: Feldzuordnungen und SD bitte für diesen Assay neu wählen.")
+        if prior_assay[0]:
+            saved = capture_editor()
+            saved["snapshot"]["assay_key"] = prior_assay[0]
+            saved["editor_key"] = "new:" + prior_assay[0]
+            local_forms[saved["editor_key"]] = saved
+            if on_draft_change:
+                on_draft_change(saved)
+        load_profile(assay_override=key, stash=False)
 
-    def load_profile(_event=None):
+    def load_profile(_event=None, *, assay_override="", stash=True):
+        if stash and editor_record[0] and controls and not loading[0]:
+            remember()
         loading[0] = True
         record = profiles.get(choice.get())
         current[0] = record
-        value = copy.deepcopy(record["snapshot"]) if record else {"profile_id": f"profile-{uuid4().hex}"}
+        key = record["snapshot"]["assay_key"] if record else (assay_override or selected_assay_key or (assay_options[0][1] if len(assay_options) == 1 else ""))
+        editor_key = record["profile_id"] if record else "new:" + key
+        stored = local_forms.get(editor_key)
+        if stored is None and editor and editor.get("snapshot", {}).get("assay_key") == key and (
+                record and editor.get("profile_id") == record["profile_id"] or not record and not editor.get("base_version_id")):
+            stored = copy.deepcopy(editor)
+        value = copy.deepcopy(stored["snapshot"] if stored else record["snapshot"] if record else {
+            "profile_schema_version": 2, "profile_id": f"profile-{uuid4().hex}", "assay_key": key,
+            "name": f"{assay_names.get(key) or 'Assay'} – QK", "numeric_grammar": "auto", "enabled_rules": []})
+        editor_record[0] = {"editor_key": stored.get("editor_key", editor_key) if stored else editor_key, "draft_id": stored["draft_id"] if stored else "draft-" + uuid4().hex,
+            "profile_id": value["profile_id"], "base_version_id": stored["base_version_id"] if stored else record["version_id"] if record else 0,
+            "draft_version_id": stored.get("draft_version_id", 0) if stored else 0}
         draft[0] = value
         name.set(value.get("name", ""))
         identifier = value.get("device_id", "")
         if identifier and identifier not in available.values():
-            available[f"{devices.get(identifier, {}).get('display_name') or identifier} · Kennung {identifier} (Gerät prüfen)"] = identifier
+            available[f"{devices.get(identifier, {}).get('display_name') or 'Bisheriges Gerät'} (Gerät prüfen)"] = identifier
             device_widget.configure(values=tuple(available))
         device.set(next((label for label, key in available.items() if key == identifier), ""))
-        key = value.get("assay_key", selected_assay_key)
+        key = value.get("assay_key", key)
         if key and key not in {identifier for _, identifier in assay_options}:
             assay_options.append(("Assay nicht aktiv", key))
             assay_widget.configure(values=[f"{label} [{identifier}]" for label, identifier in assay_options])
         index = next((index for index, (_, identifier) in enumerate(assay_options) if identifier == key), -1)
         assay_widget.current(index) if index >= 0 else assay.set("")
         prior_assay[0] = key
-        device_widget.configure(state="disabled" if record else "readonly")
+        device_scope.set(bool(identifier))
+        scope_widget.configure(state="disabled" if record else "normal")
+        device_widget.configure(state="disabled" if record or not identifier else "readonly")
+        inline_button.configure(state="disabled" if record else "normal")
         assay_widget.configure(state="disabled" if record else "readonly")
         date_field.set(value.get("measurement_date_field", ""))
-        date_format.set(value.get("measurement_date_format", "%d.%m.%Y"))
+        modern = value.get("profile_schema_version") == 2
+        dimensionless.set(value.get("dimensionless", False))
+        date_format.set(value.get("measurement_date_format", "" if modern else "%d.%m.%Y"))
         time_field.set(value.get("measurement_time_field", ""))
         time_format.set(value.get("measurement_time_format", ""))
-        grammar.set("Dezimalpunkt (42.5)" if value.get("numeric_grammar") == "decimal_dot" else "Dezimalkomma (42,5)")
+        grammar.set("Automatisch" if value.get("numeric_grammar") == "auto" else "Dezimalpunkt (42.5)" if value.get("numeric_grammar") == "decimal_dot" else "Dezimalkomma (42,5)")
         unit.set(value.get("unit", ""))
         grouping.set(value.get("run_grouping_field", ""))
         rili.set(value.get("rili_applicable", False))
@@ -399,16 +456,61 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
         single_enabled.set(value.get("single_value_limits_enabled", False))
         single_percent.set(value.get("single_value_limit_percent") if value.get("single_value_limit_percent") is not None else "")
         for rule, variable in rule_vars.items():
-            variable.set(rule in value.get("enabled_rules", rule_vars))
-        controls[:] = copy.deepcopy(value.get("controls") or [{"control_id": f"control-{uuid4().hex}", "name": "", "fields": {}}])
+            variable.set(rule in value.get("enabled_rules", ()))
+        controls[:] = copy.deepcopy(value.get("controls") or [{"control_id": f"control-{uuid4().hex}", "name": "Level 1", "fields": {}}])
         selected_control[0] = None
         loading[0] = False
-        refresh_controls()
+        refresh_controls(min(int(value.get("_ui_selected_control", 0)), len(controls) - 1))
+        notebook.select(min(int(value.get("_ui_tab", 0)), 1))
+        baseline_form[0] = {} if stored and not stored.get("draft_version_id") else capture_editor()["snapshot"]
+        if record and editor_record[0]["base_version_id"] != record["version_id"]:
+            feedback.configure(text="Die gespeicherte Profilfassung wurde inzwischen geändert. Ihr Entwurf bleibt erhalten; vor dem Veröffentlichen den Konflikt klären.")
         if not record:
-            feedback.configure(text="QK-Level einrichten; Datum, Zahlenschreibweise und Einheit unter Erweitert prüfen.")
+            feedback.configure(text="Level benennen und IST wählen. Gerät, Datum, Grenzen und Westgard sind optionale Ergänzungen.")
+
+    def capture_editor():
+        stash_control()
+        value = copy.deepcopy(draft[0])
+        value.update(name=name.get(), device_id=available.get(device.get(), "") if device_scope.get() else "", assay_key=selected_key(),
+            measurement_date_field=date_field.get(), measurement_date_format=date_format.get(),
+            numeric_grammar="auto" if grammar.get() == "Automatisch" else "decimal_dot" if grammar.get().startswith("Dezimalpunkt") else "decimal_comma", unit=unit.get(),
+            rili_applicable=rili.get(), relative_enabled=relative.get(), relative_limit_percent=relative_limit.get(),
+            single_value_limits_enabled=single_enabled.get(), single_value_limit_percent=single_percent.get() if single_enabled.get() else None,
+            guideline_reference=reference.get(), qc_profile="classic-six-v1", enabled_rules=[rule for rule, variable in rule_vars.items() if variable.get()],
+            run_grouping_field=grouping.get(), controls=copy.deepcopy(controls), _ui_selected_control=selected_control[0] or 0,
+            _ui_tab=notebook.index(notebook.select()))
+        value.update(profile_schema_version=2, dimensionless=dimensionless.get())
+        for key in ("measurement_time_field", "measurement_time_format"):
+            value.pop(key, None)
+        if time_field.get() or time_format.get():
+            value.update(measurement_time_field=time_field.get(), measurement_time_format=time_format.get())
+        return {**copy.deepcopy(editor_record[0]), "snapshot": value}
+
+    def remember(*_args):
+        if loading[0] or editor_record[0] is None:
+            return
+        value = capture_editor()
+        local_forms[value["editor_key"]] = value
+        if on_draft_change:
+            on_draft_change(value)
+
+    def inline_device():
+        remember()
+        if on_add_device:
+            on_add_device(dialog, device_added)
+
+    def device_added(updated_state, identifier):
+        dialog.qc_state = updated_state
+        available.clear()
+        available.update(_qc_device_options([row for row in updated_state.inventory["snapshot"]["devices"] if row["active"] and row.get("display_name")]))
+        device_widget.configure(values=tuple(available))
+        device_scope.set(True)
+        device.set(next((label for label, key in available.items() if key == identifier), ""))
+        dialog.grab_set()
+        remember()
 
     def submit():
-        stash_control()
+        remember()
         problems = mapping_feedback()
         if problems:
             notebook.select(basic)
@@ -418,20 +520,36 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
             notebook.select(basic)
             feedback.configure(text="Bitte die erlaubte Abweichung in % für die Einzelwertgrenzen angeben.")
             return
-        record = current[0]
-        value = copy.deepcopy(draft[0])
-        value.update(name=name.get().strip(), device_id=available.get(device.get(), ""), assay_key=selected_key(),
-            measurement_date_field=date_field.get().strip(), measurement_date_format=date_format.get().strip(),
-            numeric_grammar="decimal_dot" if grammar.get().startswith("Dezimalpunkt") else "decimal_comma", unit=unit.get().strip(),
-            rili_applicable=rili.get(), relative_enabled=relative.get(), relative_limit_percent=relative_limit.get().strip(),
-            single_value_limits_enabled=single_enabled.get(), single_value_limit_percent=single_percent.get().strip() if single_enabled.get() else None,
-            guideline_reference=reference.get().strip(), qc_profile="classic-six-v1", enabled_rules=[rule for rule, variable in rule_vars.items() if variable.get()],
-            run_grouping_field=grouping.get().strip(), controls=copy.deepcopy(controls))
-        for key in ("measurement_time_field", "measurement_time_format"):
-            value.pop(key, None)
-        if time_field.get().strip() or time_format.get().strip():
-            value.update(measurement_time_field=time_field.get().strip(), measurement_time_format=time_format.get().strip())
-        on_submit(value, record["version_id"] if record else 0, operator.get(), dialog)
+        captured = capture_editor()
+        value = captured["snapshot"]
+        value["_draft_id"] = captured["draft_id"]
+        on_submit(value, captured["base_version_id"], "", dialog)
+
+    def cancel_editor():
+        remember()
+        captured = capture_editor()
+        comparable = lambda value: {key: item for key, item in value.items() if not key.startswith("_ui_")}
+        if not on_retain or comparable(captured["snapshot"]) == comparable(baseline_form[0] or {}):
+            return True
+        decision = tk.Toplevel(dialog)
+        decision.title("Profilentwurf schließen")
+        decision.transient(dialog)
+        decision.grab_set()
+        ttk.Label(decision, text="Ihre Eingaben sind noch nicht als Profil gespeichert.", padding=12).pack()
+        actions = ttk.Frame(decision, padding=12)
+        actions.pack(fill="x")
+        def choose(action):
+            decision.destroy()
+            dialog.grab_set()
+            action(captured, dialog)
+        ttk.Button(actions, text="Entwurf behalten", command=lambda: choose(on_retain)).pack(side="left", padx=4)
+        ttk.Button(actions, text="Verwerfen", command=lambda: choose(on_discard)).pack(side="left", padx=4)
+        def back():
+            decision.destroy()
+            dialog.grab_set()
+        ttk.Button(actions, text="Weiter bearbeiten", command=back).pack(side="left", padx=4)
+        decision.protocol("WM_DELETE_WINDOW", back)
+        return False
 
     def toggle_percent(*_args):
         single_widget.configure(state="normal" if single_enabled.get() else "disabled")
@@ -445,7 +563,15 @@ def show_qc_profile_dialog(parent, state: QCConfigurationState, *, initials: str
     for variable in (control_name, control_unit, unit_field, sd_mode, sd_value, sd_reference, *field_vars.values()):
         variable.trace_add("write", edit_control)
     single_enabled.trace_add("write", toggle_percent)
+    def scope_changed(*_args):
+        device_widget.configure(state="disabled" if current[0] or not device_scope.get() else "readonly")
+        remember()
+    device_scope.trace_add("write", scope_changed)
+    for variable in (name, device, date_field, date_format, time_field, time_format, grammar, unit, grouping,
+                     rili, relative, relative_limit, reference, single_enabled, single_percent, dimensionless, *rule_vars.values()):
+        variable.trace_add("write", remember)
     _qc_actions(dialog, footer, submit)
+    dialog.on_cancel = cancel_editor
     if selected_profile_id:
         choice.set(next((label for label, record in profiles.items() if record["profile_id"] == selected_profile_id), "Neues Prüfprofil"))
     load_profile()

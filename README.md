@@ -1,6 +1,6 @@
 # PDF Ergebnis-Extractor (Projekt)
 
-- Projektversion: **2.1.0**; Änderungen unter `docs/RELEASE_NOTES_2_1_0.md`, Prüf-/Freigabestand unter `docs/A1_FINAL_VERIFICATION_2026-11-13.md`
+- Projektversion: **2.2.0**; Änderungen unter `docs/RELEASE_NOTES_2_2_0.md`, Prüfstand unter `docs/TESTBASELINE.md`
 - Windows 11 Zielumgebung
 - `src/` ist Project Root (in PyCharm markieren)
 - Public APIs existieren ausschließlich in `src/<module>/api.py`
@@ -19,23 +19,25 @@ python test_app_main.py
 
 Startet die **Analyzer Result Extractor** Desktop-Oberfläche (Sidebar mit Auswertung, Ergebnisse, Statistik, Validierung, Regelwerke, Einstellungen, Diagnose). Primärer Workflow: PDFs verarbeiten, Auto-Import konfigurieren, Ergebnisse und Klärfälle prüfen, Regelwerke validieren.
 
-In **Ergebnisse** werden alle Assays eines Berichts gemeinsam angezeigt. Einzelne Runs können
-mit lokal gespeicherten Operator-Initialen und einem optionalen Kommentar validiert werden.
-Eine bestehende Validation wird nie still überschrieben: Die separate Aktion
-**Validierung korrigieren** legt nach Bestätigung einen neuen, verknüpften Historieneintrag an.
-SQLite ist die verbindliche Ablage für neue Ergebnisse und append-only Validierungen. In **Validierung** stehen das Original-PDF und die Arbeitsliste nebeneinander. Neue Verarbeitung, Erstvalidierung und Korrektur erzeugen oder ändern keine Excel-Dateien. Vorhandene Arbeitsmappen und historische Ausgabepläne bleiben unverändert und lesbar. Historische Excel-Fehler haben in **Diagnose** keine Wiederholungsaktion.
+In **Ergebnisse** werden alle Assays eines Berichts gemeinsam angezeigt. **In Validierung prüfen** bzw. **Validierung / Berichtgerät korrigieren** öffnen denselben Arbeitsbereich mit Original-PDF und Messwerten. Dort das konkrete Gerät einmal für den ganzen Quellbericht bestätigen und anschließend jeden Assay mit Initialen und optionalem Kommentar einzeln freigeben. Ein fehlendes Gerät kann direkt hier mit einem unterscheidbaren Namen angelegt werden. Eine Importvoreinstellung ist noch keine Gerätebestätigung.
+
+Ein Gerätewechsel zeigt den bisherigen und neuen Stand sowie den Umfang des gesamten Berichts. Ein Grund ist erforderlich; danach braucht jeder betroffene Assay eine erneute Freigabe. Bereits gespeicherte Validierungen, Ergebnisfassungen und QK-Berichte bleiben erhalten. SQLite ist die verbindliche Ablage. Neue Verarbeitung und Validierung erzeugen keine Excel-Dateien; vorhandene Arbeitsmappen und historische Ausgabepläne bleiben lesbar.
 
 Assay-Tabellen zeigen den vollständigen gespeicherten Namen. Die ausgewählte Ergebnisfassung bestimmt den Namen; eine noch offene Neuanalyse ersetzt ihn nicht. Fehlt ein belegter Name, steht dort **Assayname fehlt**. Auch gleichnamige Assays bleiben getrennt auswählbar. Bei unbekannten Kandidaten ist ein aus der Datei abgeleiteter **Namenshinweis** ausdrücklich als solcher gekennzeichnet.
 
 ### Qualitätskontrolle und PDF-Nachweise
 
-Unter **Einstellungen → Assays & QK** erscheinen auch noch unkonfigurierte Assays. Profile und QK-Level können frei benannt werden. IST/SOLL/MIN/MAX werden aus den aktuellen Feldern des ausgewählten Assays zugeordnet; eine bestehende Profilbindung bleibt fest. Änderungen erzeugen neue vollständige Fassungen und erhalten frühere Level, Einheiten und Referenzen. Geräte werden im selben ausdrücklich gewählten SQLite-Speicher gepflegt. Ein verwendbares Gerät braucht einen Namen und mindestens SN, LNR oder EVA; **Geräte übernehmen** überführt Altgeräte ausdrücklich, ohne ihre Originaldateien umzuschreiben.
+Unter **Einstellungen → Assays & QK** auch vor dem ersten Import den Assay wählen und ein Profil mit einem benannten Level und dessen **IST-Feld** speichern. Gerät, SOLL, MIN/MAX, Datum-/Zeitformat und Westgard sind optionale Ergänzungen. Konfigurationsänderungen brauchen keine Operatorinitialen. Für eine gemeinsame statistische Skala eine Einheit bestätigen oder die Größe unter **Erweitert** ausdrücklich als dimensionslos kennzeichnen. Eine fehlende Einheit kann beim Bearbeiten desselben Profils ergänzt werden.
 
-Ist die Uhrzeit getrennt extrahiert, lassen sich im Profil **Messzeitfeld (optional)** und **Zeitformat** zuordnen, etwa `ZEIT` mit `%H:%M` oder `%H:%M:%S`. Ohne diese Zuordnung gilt der Datumsweg. Fehlende oder formatwidrige zugeordnete Zeiten werden mit Grund ausgeschlossen. Reine Datumswerte erhalten keine erfundene Uhrzeit, Minuten keine ergänzten Sekunden; gleiche tatsächliche Zeitpunkte erhalten keine künstliche Reihenfolge.
+Ein Profil gilt standardmäßig für den Assay auf allen Geräten. Die Messwerte bleiben trotzdem je physischem Gerät getrennt. Bei Bedarf kann ein neues Profil gerätespezifisch sein; die Bindung eines bestehenden Profils bleibt fest. **Weiteres Profil** übernimmt vorhandene Zuordnungen als bearbeitbare Kopie. Gerätename genügt; SN, LNR und EVA sind optional. Alte Kennungen werden nicht zusammengelegt.
+
+Der Entwurf bleibt während der Sitzung beim Wechsel zwischen Profilen, beim Inline-Anlegen eines Geräts und nach Eingabefehlern erhalten. Beim Schließen kann er ausdrücklich **behalten** oder verworfen werden. Behaltene Entwürfe erscheinen mit Namen in derselben Assayübersicht und werden über **Entwurf fortsetzen** wieder geöffnet. Speichern veröffentlicht eine neue vollständige Profilfassung; frühere Fassungen bleiben unverändert.
+
+Bekannte Datums-/Zeitangaben wie `14.11.2026`, `2026-11-14`, `8:05` und `08:05:00` werden ohne Formatcode erkannt. Leere optionale Formatfelder bedeuten Automatik; vorhandene bewusste Overrides bleiben erhalten. Ein Tag erhält keine erfundene Uhrzeit und Minuten keine ergänzten Sekunden. Unbekannte oder widersprüchliche Zeiten beeinflussen die zeitabhängigen Funktionen; ein gültiger IST-Wert kann weiterhin in Mittelwert und empirische SD eingehen. Unklare Zahlenschreibweisen aus unbekannter Herkunft brauchen eine bewusste Komma-/Punkteinstellung; belegte unveränderte Originalexportfelder haben einen eingefrorenen Dezimalnachweis.
 
 Herstellergrenzen aus MIN/MAX und aktivierbare Einzelwert-Prozentgrenzen sind getrennte Grenzarten. Die Prozentgrenzen verwenden je Level dessen SOLL: `SOLL × (1 ± p / 100)`. Sie sind unabhängig von der bisherigen relativen QMMA-Schwelle, SD und Westgard. Eine Grenzüberschreitung allein entfernt den Messwert nicht aus der Statistik. Bestehende QMMA-Grenzen werden nicht automatisch in die neue Prozentkonfiguration übernommen; die Konfiguration bestätigt keine vollständige Rili-BÄK-Konformität.
 
-Unter **Statistik** zeigen die Kontrollserien Anzahl, Mittelwert, empirische Stichproben-SD (n−1), VK, QMMA und die voneinander unabhängigen Befunde. QMMA und empirische Kennzahlen brauchen keine freigegebene SD-Referenz. Für Westgard muss eine manuelle SD oder bestätigte Referenzserie mit passender Messwertdefinition, Zahlenschreibweise und Einheit belegt sein. Eine unpassende oder nicht belegbare Referenz bleibt mit Grund gesperrt. Die empirische SD erzeugt keine neue Westgard-Referenz. Das Diagramm verwendet die eingefrorenen Werte und Grenzen; Messpunkte können angeklickt, vergrößert und verschoben werden.
+Unter **Statistik** zeigen die Kontrollserien je Gerät Anzahl, Mittelwert, empirische Stichproben-SD (n−1), VK und die jeweils verfügbaren unabhängigen Bewertungen. SOLL wird erst für QMMA, MIN/MAX erst für Herstellergrenzen benötigt. Westgard ist bei neuen Profilen ausgeschaltet; inaktive Regelblöcke erscheinen im Standardbericht und Diagramm nicht. QMMA und empirische Kennzahlen brauchen keine freigegebene SD-Referenz. Für Westgard muss eine manuelle SD oder bestätigte Referenzserie mit passender Messwertdefinition, Zahlenschreibweise und Einheit belegt sein. Eine unpassende oder nicht belegbare Referenz bleibt mit Grund gesperrt. Die empirische SD erzeugt keine neue Westgard-Referenz. Das Diagramm verwendet die eingefrorenen Werte und Grenzen; Messpunkte können angeklickt, vergrößert und verschoben werden.
 
 **Abschluss prüfen** bereitet aus dem vollständigen Nutzungsverlauf eine unverbindliche Modell-/PDF-Vorschau vor. Ein zeitlich sicher späterer Nutzungszeuge einer anderen Kit-Charge kann auch unvalidiert oder statistisch ungeeignet sein; eine globale Chargenreihenfolge wird daraus nicht abgeleitet. Vorschau und **Später** schreiben nichts. Erst die abschließende Bestätigung speichert exakt das vorbereitete Modell und PDF gemeinsam. Geänderte Quellen, Profilfassungen oder Auswahlkontexte blockieren eine veraltete Vorschau.
 
@@ -266,7 +268,7 @@ Inaktive Regelwerke werden nicht direkt bearbeitet; stattdessen Kopie nach `rule
 
 ## Build (Feldversuch-Paket)
 
-Für den Quellstand 2.1.0 wurde in dieser Abschlussprüfung kein Windows-EXE gebaut oder qualifiziert. Der kanonische portable Build für Windows ohne Python auf dem Ziel-PC bleibt:
+Das Windows-Release enthält das geprüfte portable ZIP samt Prüfsummen und Buildnachweis. Für einen eigenen Windows-Build ohne Python auf dem Ziel-PC gilt:
 
 ```powershell
 python packaging/build_onedir.py
@@ -283,7 +285,9 @@ Entry der gebündelten EXE: `test_app_main.py` (Produkt-Shell, nicht mehr `gui_m
 
 Der Builder prüft zuerst die vollständige Testsuite und beendet sich bei Fehlern vor Bereinigung oder Build. Die Produktversion stammt aus `pyproject.toml`; `build-info.json` neben der EXE dokumentiert Version, tatsächlichen Ausgangscommit/Arbeitsbaumzustand, Eingabe-Fingerabdruck und Abhängigkeiten. Der Fenstertitel zeigt die geladene Version. `ARE_HOME` beeinflusst den Datenordner, nicht die Produktversion. Ein alter Build ist kein Beleg für den aktuellen Prüfstand.
 
-Auf dem Ziel-PC: ZIP entpacken, `AnalyzerResultExtractorV2.exe` starten.
+Auf dem Ziel-PC: ZIP vollständig entpacken, `AnalyzerResultExtractorV2.exe` starten. `_internal` und `rules` gehören zum Paket.
+
+**Bestehende portable Installation aktualisieren:** Anwendung schließen und den bisherigen Ordner sichern. EXE, `_internal` und `build-info.json` durch die neue Fassung ersetzen. Vorhandene `rules`, `storage`, `jobs`, `input` und `output` einschließlich SQLite und eingefrorener Jobbelege behalten; diese enthalten Konfiguration, eigene Regeln und Quellnachweise. Ein neues leeres Projekt ist kein Ersatz für diese Daten.
 Optional `$env:ARE_HOME` auf den entpackten Ordner setzen.
 
 Anleitung: `docs/AP17A_FIELD_TRIAL_PACKAGE.md`

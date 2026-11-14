@@ -101,6 +101,9 @@ class RunValidation:
     selection_id: int | None = None
     selection_token: str = ""
     request_id: str = ""
+    device_assignment_id: int = 0
+    device_binding_token: str = ""
+    validation_kind: str = "initial"
 
 
 @dataclass(frozen=True)

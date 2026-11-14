@@ -8,15 +8,16 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-CURRENT_ANALYSIS_ID = "arev2-qc-analysis-v4"
+CURRENT_ANALYSIS_ID = "arev2-qc-analysis-v5"
 SUPPORTED_MODEL_VERSIONS = frozenset({
     (1, algorithm, renderer)
     for algorithm in ("arev2-qc-analysis-v1", "arev2-qc-analysis-v2")
     for renderer in ("arev2-qc-pdf-v1", "arev2-qc-pdf-v2")
-} | {(2, "arev2-qc-analysis-v3", "arev2-qc-pdf-v3"), (3, CURRENT_ANALYSIS_ID, "arev2-qc-pdf-v4")})
+} | {(2, "arev2-qc-analysis-v3", "arev2-qc-pdf-v3"),
+     (3, "arev2-qc-analysis-v4", "arev2-qc-pdf-v4"), (4, CURRENT_ANALYSIS_ID, "arev2-qc-pdf-v5")})
 
 
-def sd_parameter_definition(profile: object, control_id: str) -> dict[str, str] | None:
+def sd_parameter_definition(profile: object, control_id: str, *, device_id: str | None = None) -> dict[str, str] | None:
     """Only the identity, value interpretation and unit of the SD's variable.
 
     Names, dates, grouping, SOLL and manufacturer limits do not define SD.
@@ -32,10 +33,14 @@ def sd_parameter_definition(profile: object, control_id: str) -> dict[str, str] 
     if not isinstance(fields, Mapping):
         return None
     result = {key: profile.get(key) for key in ("profile_id", "device_id", "assay_key", "numeric_grammar")}
+    if not result["device_id"] and profile.get("profile_schema_version") == 2:
+        result["device_id"] = device_id
     result.update(control_id=control_id, ist_field=fields.get("IST"), unit=control.get("unit") or profile.get("unit"),
                   unit_field=control.get("unit_field", ""))
+    if profile.get("dimensionless") is True:
+        result.update(unit="1", unit_field="")
     if (any(not isinstance(value, str) or not value.strip() for key, value in result.items() if key != "unit_field")
-            or not isinstance(result["unit_field"], str) or result["numeric_grammar"] not in {"decimal_dot", "decimal_comma"}):
+            or not isinstance(result["unit_field"], str) or result["numeric_grammar"] not in {"auto", "decimal_dot", "decimal_comma"}):
         return None
     return result
 
@@ -124,6 +129,28 @@ class QCPdfReport:
     model_sha256: str
     renderer_id: str
     page_count: int
+
+
+@dataclass(frozen=True)
+class ConfigurationContext:
+    """Configuration edits have technical provenance without requiring a person.
+
+    This context is deliberately separate from the mandatory actor carried by
+    result validation and clinical lot decisions. Empty means not provided.
+    """
+
+    request_id: str
+    operator_initials: str = ""
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request_id, str) or not self.request_id.strip():
+            raise QCConfigurationError("Anfragekennung fehlt.")
+        for key in ("request_id", "operator_initials", "reason"):
+            value = getattr(self, key)
+            if not isinstance(value, str):
+                raise QCConfigurationError("Konfigurationskontext muss Text enthalten.")
+            object.__setattr__(self, key, value.strip())
 
 
 @dataclass(frozen=True)

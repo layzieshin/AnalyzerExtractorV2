@@ -128,7 +128,8 @@ class ResultsView(ttk.Frame):
         )
         history_frame.pack(fill="x", pady=(6, 6))
         form = ttk.Frame(panel)
-        form.pack(fill="x")
+        # Results shows immutable history; all new actions use the canonical
+        # validation form with its visible report-device evidence.
         ttk.Label(form, text="Initialen").grid(row=0, column=0, sticky="w")
         self._var_initials = tk.StringVar()
         self._var_initials.trace_add("write", self._on_initials_edited)
@@ -141,13 +142,13 @@ class ResultsView(ttk.Frame):
         actions.pack(fill="x", pady=(8, 0))
         self._btn_save_validation = ttk.Button(
             actions,
-            text="Validierung speichern",
+            text="In Validierung prüfen",
             command=self._on_save_validation,
         )
         self._btn_save_validation.pack(side="left")
         self._btn_correct_validation = ttk.Button(
             actions,
-            text="Validierung korrigieren",
+            text="Validierung / Berichtgerät korrigieren",
             command=self._on_correct_validation,
         )
         self._btn_correct_validation.pack(side="left", padx=(8, 0))

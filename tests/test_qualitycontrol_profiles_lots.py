@@ -179,6 +179,77 @@ def sources(spec, profile, lot="L1"):
     return get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot=lot)
 
 
+def test_assaywide_actual_only_profile_keeps_independent_statistics_and_honest_source_time(tmp_path):
+    """A first-use profile remains useful as optional context is added later."""
+    from src.qualitycontrol.api import ConfigurationContext, get_lot_chronology
+    from src.qualitycontrol.profiles import interpret_measurement, interpret_numeric, parse_decimal
+    spec, old = fixture(tmp_path, count=0)
+    value = {"profile_schema_version": 2, "profile_id": "neutral", "name": "Gemeinsames Assayprofil", "assay_key": "A",
+        "unit": "U", "controls": [{"control_id": "c1", "name": "Level 1", "fields": {"IST": "I1"}}]}
+    profile = save_profile(spec, value, expected_version_id=0, expected_inventory_version_id=1, context=ConfigurationContext("actual-only"))
+    for run_id, raw in enumerate((
+        {"DATUM": "14.11.2026", "ZEIT": "8:05", "I1": "42,5"},
+        {"date": "2026-11-14", "time": "08:05:00", "I1": "43.5"},
+        {"DATE": "2026-11-15", "TIME": "24:00", "I1": "44.5"},
+        {"DATE": "03/04/2026", "I1": "45.5"}), 1):
+        add_run(spec, run_id, data=raw)
+    captured = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="L1", device_id="dev")
+    assert len(captured["included"]) == 4 and not captured["excluded"]
+    result = analyze_lot(captured, {}).to_dict()
+    series = result["computed_series"][0]
+    assert series["descriptive"]["n"] == 4 and series["descriptive"]["mean"]["value"] == "44"
+    assert series["descriptive"]["sample_sd"]["available"] and not series["qmma"]["available"]
+    assert not series["limits"]["manufacturer"]["available"] and series["findings_summary"]["westgard_status"] == "disabled"
+    assert series["function_counts"]["descriptive"] == 4 and series["function_counts"]["qmma"] == 0
+    by_id = {point["run_id"]: point for point in result["points"]}
+    assert by_id[1]["measurement"]["time"] == "08:05" and by_id[1]["measurement"]["precision"] == "minutes"
+    assert by_id[2]["measurement"]["time"] == "08:05:00" and by_id[2]["measurement"]["precision"] == "seconds"
+    assert by_id[1]["order_ambiguous"] and by_id[2]["order_ambiguous"]
+    assert by_id[3]["measurement"]["date"] == "2026-11-15" and by_id[3]["measurement"]["time"] is None
+    assert by_id[3]["measurement"]["precision"] == "day" and by_id[4]["measurement"]["date"] is None
+    usage = get_lot_chronology(spec, profile_version_id=profile["version_id"], device_id="dev").to_dict()
+    assert usage["device_id"] == "dev" and not usage["lots"][0]["last_usage_reliable"]
+    midnight = interpret_measurement({"DATE": "2026-11-14", "TIME": "00:00"}, profile["snapshot"])
+    assert midnight["time"] == "00:00" and midnight["precision"] == "minutes"
+    conflict = interpret_measurement({"DATE": "2026-11-14", "DATUM": "15.11.2026"}, profile["snapshot"])
+    assert conflict["interval"] is None and "measurement_date_conflict" in conflict["reasons"]
+    with pytest.raises(QCConfigurationError, match="mehrdeutig"):
+        parse_decimal("1,234", "auto")
+    original_text = (Path(__file__).parents[1] / "rules" / "Anti-MPO IgG.json").read_text(encoding="utf-8")
+    original_rule = {"rule_source_text": original_text, "rule_sha256": hashlib.sha256(original_text.encode()).hexdigest(), "ruleset": json.loads(original_text)}
+    actual = interpret_numeric("1,234", "auto", field_key="S1_IST", source=original_rule)
+    assert actual["value"] == "1.234" and actual["method"] == "verified-original-decimal-export-v1"
+    changed_rule = {**original_rule, "rule_source_text": original_text + " "}
+    with pytest.raises(QCConfigurationError, match="mehrdeutig"):
+        interpret_numeric("1,234", "auto", field_key="S1_IST", source=changed_rule)
+    with pytest.raises(QCConfigurationError, match="genau ein"):
+        get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="L1")
+    dimensionless = save_profile(spec, {**value, "profile_id": "dimensionless", "unit": "", "dimensionless": True},
+        expected_version_id=0, expected_inventory_version_id=1, context=ConfigurationContext("dimensionless"))
+    own = get_lot_sources(spec, profile_version_id=dimensionless["version_id"], kit_lot="L1", device_id="dev")
+    lot = open_lot(spec, profile_version_id=dimensionless["version_id"], kit_lot="L1", device_id="dev",
+        expected_source_token=own["source_token"], sd_references={"c1": {"kind": "confirmed_baseline", "confirmed": True}}, context=context("dimensionless-baseline"))
+    sd_context = get_sd_reference_context(spec, lot_key=lot["lot_key"], expected_version_id=lot["version_id"])
+    evaluated = analyze_lot(own, lot["snapshot"]["sd_references"], sd_reference_context=sd_context).to_dict()
+    assert evaluated["computed_series"][0]["unit"] == "1" and evaluated["computed_series"][0]["sd"]["available"]
+    # An undated single value can be normalized and checked against its
+    # explicitly bound SD; sequence rules still need actual chronology.
+    undated_profile = save_profile(spec, {**value, "profile_id": "undated-sd", "enabled_rules": ["1_2s", "1_3s", "2_2s", "4_1s", "10x"],
+        "controls": [{"control_id": "c1", "name": "Level 1", "fields": {"IST": "I1", "SOLL": "S1"}}]},
+        expected_version_id=0, expected_inventory_version_id=1, context=ConfigurationContext("undated-sd-profile"))
+    add_run(spec, 5, lot="UNDATED", data={"DATE": "unlesbar", "I1": "104", "S1": "100"})
+    undated = get_lot_sources(spec, profile_version_id=undated_profile["version_id"], kit_lot="UNDATED", device_id="dev")
+    opened = open_lot(spec, profile_version_id=undated_profile["version_id"], kit_lot="UNDATED", device_id="dev",
+        expected_source_token=undated["source_token"], sd_references={"c1": {"kind": "manual", "value": "1"}}, context=context("undated-sd"))
+    origin = get_sd_reference_context(spec, lot_key=opened["lot_key"], expected_version_id=opened["version_id"])
+    checked = analyze_lot(undated, opened["snapshot"]["sd_references"], sd_reference_context=origin).to_dict()
+    assert checked["points"][0]["z"] == "4" and checked["points"][0]["measured_at"] is None
+    assert checked["points"][0]["measurement"]["date"] is checked["points"][0]["measurement"]["time"] is None
+    findings = {finding["rule"]: finding for finding in checked["analytical_runs"][0]["findings"]}
+    assert findings["1_2s"]["status"] == "warning" and findings["1_3s"]["status"] == "reject"
+    assert all(findings[rule]["status"] == "unavailable" for rule in ("2_2s", "4_1s", "10x"))
+
+
 @pytest.mark.parametrize("optional", [{}, {"measurement_time_field": "", "measurement_time_format": ""},
     {"measurement_time_field": None, "measurement_time_format": None},
     {"measurement_time_field": "  ", "measurement_time_format": "  "}])
@@ -230,7 +301,7 @@ def test_optional_time_proves_same_day_order_independent_of_run_ids(tmp_path: Pa
     captured, result = time_analysis(spec, profile)
     assert captured["order_is_explicit"] and not captured["excluded"]
     assert [point["run_id"] for point in captured["included"]] == [2, 1]
-    assert captured["included"][0]["measured_at"] == "2026-01-01T08:00:00"
+    assert captured["included"][0]["measured_at"] == ("2026-01-01T08:00:00" if "%S" in fmt else "2026-01-01T08:00")
     assert captured["population"][0]["measurement_time_raw"] == late
     latest = next(run for run in result["analytical_runs"] if run["analytical_run_id"] == "stored-run:1")
     assert next(item for item in latest["findings"] if item["rule"] == "2_2s")["status"] == "reject"
@@ -245,9 +316,11 @@ def test_optional_time_missing_or_invalid_has_no_midnight_fallback(tmp_path: Pat
     profile = time_profile(spec, old)
     add_run(spec, 1, data=payload(TIME=raw))
     captured = sources(spec, profile)
-    assert not captured["included"] and captured["excluded"][0]["measured_at"] is None
-    assert captured["excluded"][0]["reasons"] == [reason]
-    assert captured["population"][0]["measurement_time_raw"] == raw and captured["start_date"] is None
+    assert captured["included_count"] == 1 and not captured["excluded"]
+    point = captured["included"][0]
+    assert point["measured_at"] == "2026-01-01" and point["measurement"]["time"] is None
+    assert point["feature_reasons"]["time"] == [reason]
+    assert captured["population"][0]["measurement_time_raw"] == raw and captured["start_date"] == "2026-01-01"
 
 
 def test_optional_time_four_point_rule_and_invalid_time_history_barrier(tmp_path: Path):
@@ -263,10 +336,11 @@ def test_optional_time_four_point_rule_and_invalid_time_history_barrier(tmp_path
     lot = get_lot(spec, list_lots(spec)[0]["lot_key"])
     origin = get_sd_reference_context(spec, lot_key=lot["lot_key"], expected_version_id=lot["version_id"])
     result = analyze_lot(current, lot["snapshot"]["sd_references"], sd_reference_context=origin).to_dict()
-    assert current["excluded"][0]["measured_at"] is None and result["computed_series"][0]["qmma"]["available"]
+    assert not current["excluded"] and result["computed_series"][0]["qmma"]["available"]
+    assert next(point for point in current["included"] if point["run_id"] == 5)["measurement"]["time"] is None
     latest = next(run for run in result["analytical_runs"] if run["analytical_run_id"] == "stored-run:1")
     finding = next(item for item in latest["findings"] if item["rule"] == "4_1s")
-    assert finding["status"] == "unavailable" and finding["reason"] == "measurement_order_unavailable"
+    assert finding["status"] == "unavailable" and finding["reason"] == "measurement_order_ambiguous"
 
 
 def test_optional_time_old_no_map_and_equal_times_remain_barriers(tmp_path: Path):
@@ -400,7 +474,8 @@ def test_measurement_dates_have_no_import_fallback_and_preserve_explicit_time(tm
     captured = sources(spec, revised)
     assert captured["included"][0]["measured_at"] == "2026-01-01T13:24:17"
     assert captured["order_is_explicit"]
-    assert "measurement_date_invalid" in captured["excluded"][0]["reasons"]
+    unknown = next(point for point in captured["included"] if point["run_id"] == 1)
+    assert unknown["measured_at"] is None and "measurement_date_invalid" in unknown["feature_reasons"]["time"]
 
 
 def test_target_and_unit_conflicts_need_clarification(tmp_path: Path):
@@ -409,7 +484,7 @@ def test_target_and_unit_conflicts_need_clarification(tmp_path: Path):
     add_run(spec, 2, data=payload(S1="41", UNIT="other"))
     captured = sources(spec, profile)
     assert captured["included"] == []
-    assert all({"target_conflict", "unit_conflict"}.issubset(point["reasons"]) for point in captured["excluded"])
+    assert all("unit_conflict" in point["reasons"] and "target_conflict" in point["feature_reasons"]["target"] for point in captured["excluded"])
 
 
 def test_all_rows_over_500_and_validation_changes_affect_manifest(tmp_path: Path):
@@ -556,17 +631,13 @@ def test_p2_source_manifest_checks_decimal_manufacturer_limits_without_losing_ra
     add_run(spec, 1, data=payload("2026-01-01"))
     add_run(spec, 2, data=payload("2026-01-02", N1=minimum, X1=maximum))
     source = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="L1")
-    assert source["manifest_version"] == "qc-sources-v2"
+    assert source["manifest_version"] == "qc-sources-v3"
     assert source["population_count"] == 2
     assert {point["run_id"]: point["raw"]["MIN"] for point in source["included"] + source["excluded"]} == {1: "30", 2: minimum}
-    actual = {reason for point in source["excluded"] for reason in point["reasons"]}
+    actual = {reason for point in source["included"] for reason in point["feature_reasons"].get("manufacturer", [])}
     assert actual == reasons
-    if "manufacturer_min_conflict" in reasons:
-        assert source["excluded_count"] == 2 and not source["included"]
-    elif "manufacturer_limits_reversed" in reasons:
-        assert source["included_count"] == source["excluded_count"] == 1
-    else:
-        assert source["included_count"] == 2 and not source["excluded"]
+    assert source["included_count"] == 2 and not source["excluded"]
+    assert analyze_lot(source, {}).to_dict()["computed_series"][0]["descriptive"]["n"] == 2
 
 
 def test_p2_conflict_is_local_to_its_level_and_keeps_existing_exclusion_reasons(tmp_path):
@@ -579,11 +650,13 @@ def test_p2_conflict_is_local_to_its_level_and_keeps_existing_exclusion_reasons(
     for index, minimum in ((1, "30"), (2, "31"), (3, "32")):
         add_run(spec, index, validated=index != 3, data=payload(f"2026-01-{index:02d}", N1=minimum, I2="200", S2="200", N2="160", X2="240"))
     source = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="L1")
-    assert {point["control_id"] for point in source["included"]} == {"c2"}
-    assert source["included_count"] == 2
+    assert {point["control_id"] for point in source["included"]} == {"c1", "c2"}
+    assert source["included_count"] == 4
     assert all("validation_missing" in point["reasons"] for point in source["excluded"] if point["run_id"] == 3)
     result = analyze_lot(source, {}).to_dict()
-    assert [row["included_count"] for row in result["computed_series"]] == [0, 2]
+    assert [row["included_count"] for row in result["computed_series"]] == [2, 2]
+    assert not result["computed_series"][0]["limits"]["manufacturer"]["available"]
+    assert result["computed_series"][1]["limits"]["manufacturer"]["available"]
     assert result["computed_series"][1]["qmma"]["value"] == "0"
 
 
@@ -644,17 +717,26 @@ def test_usage_partial_order_three_lots_old_import_and_reuse_change_only_read_on
     assert list_lots(spec) == []
 
 
-def test_usage_missing_separate_clock_is_day_precision_but_remains_statistically_excluded(tmp_path):
+def test_existing_profile_live_capture_keeps_statistics_with_missing_clock_target_and_limits(tmp_path):
     spec, old = fixture(tmp_path, count=0)
     profile = time_profile(spec, old)
     add_run(spec, 1, lot="A", data=payload("2026-01-03", TIME="13:00"))
-    add_run(spec, 2, lot="B", data=payload("2026-01-04", TIME="24:00"))
+    add_run(spec, 2, lot="B", data=payload("2026-01-04", TIME="24:00", S1=None, N1=None, X1=None))
+    add_run(spec, 3, lot="B", data=payload("2026-01-04", TIME="14:05", I1="44", S1=None))
     usage = usage_lots(spec, profile)
     assert usage["A"]["close_available"] and usage["B"]["last_usage"]["precision"] == "day"
     assert usage["B"]["last_usage"]["display"] == "2026-01-04"
     assert "measurement_time_invalid" in usage["B"]["reasons"]
     source = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="B")
-    assert not source["included"] and source["excluded"][0]["reasons"] == ["measurement_time_invalid"]
+    assert source["manifest_version"] == "qc-sources-v3" and source["included_count"] == 2 and not source["excluded"]
+    point = next(point for point in source["included"] if point["run_id"] == 2)
+    assert point["measurement"]["time"] is None and point["feature_reasons"]["time"] == ["measurement_time_invalid"]
+    series = analyze_lot(source, {}).to_dict()["computed_series"][0]
+    assert series["descriptive"]["n"] == 2 and series["descriptive"]["mean"]["value"] == "43"
+    assert not series["qmma"]["available"] and series["function_counts"]["qmma"] == 0
+    assert series["limits"]["manufacturer"]["available"] and series["function_counts"]["manufacturer"] == 1
+    assert source["profile_snapshot"]["measurement_time_format"] == "%H:%M"
+    assert get_profile(spec, profile["version_id"]) == profile
 
 
 @pytest.mark.parametrize("change", ["qc_only", "lot", "time"])
@@ -682,6 +764,10 @@ def test_usage_pending_revisions_preserve_possible_identities_without_selecting_
 
 def test_usage_all_more_than_500_rows_exact_lot_and_stable_device_assay_scope(tmp_path):
     spec, profile = fixture(tmp_path, count=0)
+    inventory = get_inventory(spec)
+    registered = copy.deepcopy(inventory["snapshot"])
+    registered["devices"].append({"device_id": "other-device", "display_name": "Anderer bestätigter Bestandsplatz"})
+    save_inventory(spec, registered, expected_version_id=inventory["version_id"], context=context("register-other-scope"))
     with sqlite3.connect(spec["path"]) as conn:
         conn.executemany("INSERT INTO runs VALUES (?, '', ?, ?, ?, ?, ?, '2026-01-01')", [
             (index, f"synthetic-{index}.pdf", "OTHER" if index == 504 else "A", " A " if index == 503 else ("B" if index == 502 else "A"),

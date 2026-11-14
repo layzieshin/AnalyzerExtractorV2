@@ -125,7 +125,7 @@ def report_list_status(item: ReportSummaryItem) -> str:
 
 def report_summary_row_values(item: ReportSummaryItem) -> tuple[str, str, str, str, str]:
     assay_text = ", ".join(item.assay_names) if item.assay_names else "Assayname fehlt"
-    device_text = ", ".join(item.device_ids) if item.device_ids else "-"
+    device_text = ", ".join(item.device_names or item.device_ids) if item.device_ids else "-"
     return (
         item.file_name or "-",
         report_list_status(item),
@@ -172,7 +172,7 @@ def build_dashboard_recent_rows(
             elif report.assay_count:
                 summary_parts.append("0 Ergebnis(se)")
             if report.device_ids:
-                summary_parts.append(f"Gerät {', '.join(report.device_ids)}")
+                summary_parts.append(f"Gerät {', '.join(report.device_names or report.device_ids)}")
             summary = " | ".join(summary_parts) if summary_parts else (item.friendly_message or "-")
             report_id = report.report_id
         else:
@@ -413,7 +413,7 @@ def occurrence_list_rows(detail: ReportDetail) -> list[tuple[str, str, str, str,
                 occ_id,
                 occurrence.assay_name or group.assay_display_label or "Assayname fehlt",
                 occurrence.charge or occurrence.lot_id or "-",
-                occurrence.device_id or "-",
+                occurrence.device_name or occurrence.device_id or "-",
                 format_timestamp(occurrence.created_at),
             )
         )
@@ -429,7 +429,7 @@ def occurrence_field_rows(detail: ReportDetail, occurrence_id_value: str) -> tup
 
 
 def report_detail_header_lines(detail: ReportDetail) -> tuple[str, str, str, str]:
-    device_text = ", ".join(detail.device_ids) if detail.device_ids else "-"
+    device_text = ", ".join(detail.device_names or detail.device_ids) if detail.device_ids else "-"
     return (
         detail.file_name or "-",
         format_timestamp(detail.latest_created_at),

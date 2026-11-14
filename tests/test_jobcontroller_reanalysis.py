@@ -183,10 +183,18 @@ def test_idempotent_request_uses_frozen_rule_and_rejects_reused_token(tmp_path, 
 
 
 def test_validation_during_expensive_extraction_prevents_candidate_publication(tmp_path, monkeypatch):
-    root, _, path, _, runs = _prepare(tmp_path)
+    from src.dbwriter.api import confirm_report_device
+    from src.resultstore.api import get_report_device_context
+    from src.qualitycontrol.api import ConfigurationContext, save_inventory
+    root, _, path, job, runs = _prepare(tmp_path)
+    save_inventory(_spec(path), {"default_device_id": "original-device", "devices": [
+        {"device_id": "original-device", "display_name": "QA Gerät"}]}, expected_version_id=0, context=ConfigurationContext("inventory"))
+    context = get_report_device_context(_spec(path), job)
+    assigned = confirm_report_device(str(path), job, "original-device", expected_context_token=context["context_token"],
+        request_id="assignment", actor="VV", project_root=str(root))
     def raced(pdf, source, ruleset, device):
         result = reanalysis._extract_snapshot(source["current_pdf_path"], source, ruleset, device)
-        validate_run(_spec(path), runs[0], "VV", expected_selection_token="original:1")
+        validate_run(_spec(path), runs[0], "VV", expected_selection_token="original:1", expected_device_assignment_id=assigned["assignment_id"])
         return result
     monkeypatch.setattr(reanalysis, "_run_isolated", raced)
     with pytest.raises(ResultRevisionConflictError, match="validiert"):
@@ -340,3 +348,200 @@ def test_genuine_second_assay_sink_failure_leaves_first_ineligible(tmp_path, mon
         _reanalyze(root, target, 1)
     with pytest.raises(ValidationStateConflictError, match="abgeschlossen"):
         validate_run(_spec(target), 1, "RR")
+
+
+def test_original_reports_keep_device_identity_through_materialization_reanalysis_and_revalidation(tmp_path):
+    """Two unchanged original rules; every value and PDF is synthetic QA data."""
+    import shutil
+    import fitz
+    from src.dbwriter.api import confirm_report_device, write_record_sqlite
+    from src.extractor.api import AssayRecord
+    from src.qualitycontrol.api import (ConfigurationContext, save_inventory, save_profile,
+        get_lot_sources, get_lot_chronology, analyze_lot, MutationContext, QCConfigurationError, open_lot, close_lot)
+    from src.application.api import DesktopSettings, ResultsController, QualityControlApplicationError
+    from src.resultstore.api import (get_report_device_context, get_report_runs,
+        list_pending_report_candidates, list_result_runs)
+
+    root = tmp_path / 'original-reports'
+    root.mkdir()
+    shutil.copytree(Path(__file__).parents[1] / 'rules', root / 'rules')
+    path = root / 'results.sqlite'
+    spec = _spec(path)
+    inventory = save_inventory(spec, {'default_device_id': 'A', 'devices': [
+        {'device_id': value, 'display_name': 'QA Gerät ' + value} for value in ('A', 'B', 'C')]},
+        expected_version_id=0, context=ConfigurationContext('inventory'))
+    profile = save_profile(spec, {'profile_schema_version': 2, 'profile_id': 'ana', 'name': 'ANA QA',
+        'assay_key': '(1c9e)', 'unit': 'QA-Skala',
+        'controls': [{'control_id': 'positive', 'name': 'Positiv', 'fields': {'IST': 'PCS1_IST'}}]},
+        expected_version_id=0, expected_inventory_version_id=inventory['version_id'], context=ConfigurationContext('profile'))
+
+    def report(label, *, day='14.11.2026', lot='EQA77', value='101', dfs_plate='QA77'):
+        pdf = root / (label + '.pdf')
+        with fitz.open() as document:
+            for name, key in (('ANA Screen IgG', '(1c9e)'), ('Anti-DFS70 IgG', '(0437)')):
+                lines = [name, f'Test: C:\\QA\\{name}.asy {key}', 'Anwender: ' + label,
+                    'Datum: ' + day, 'Plattenname: QA77 Zeit: 08:05:00', f'Kit {lot} 271130',
+                    'C1 1,5 O.D. 0,5 O.D.', 'PCS1 100 Ziel 90 - 110', 'NCS1 20 Ziel 15 - 25',
+                    'Validationskriterien erfüllt'] + ['QA FUELLZEILE'] * 33
+                lines[36], lines[39], lines[42] = 'C1 1,51', 'PCS1 ' + value, 'NCS1 19'
+                lines[35] = 'QA lot correction: EQA77'
+                if key == '(0437)':
+                    lines[4] = f'Plattenname: {dfs_plate} Zeit: 08:05:00'
+                page = document.new_page()
+                for index, line in enumerate(lines):
+                    page.insert_text((36, 44 + 15 * index), line, fontsize=10)
+            document.save(pdf)
+        result = submit(str(pdf), str(root), sqlite_path=str(path), device_id='DEFAULT_DEVICE')
+        assert result.status == 'DONE', result.details
+        return result
+
+    def confirm(result, device, request, *, reason=''):
+        context = get_report_device_context(spec, result.job_id)
+        return confirm_report_device(str(path), result.job_id, device,
+            expected_context_token=context['context_token'], request_id=request, actor='QA', reason=reason, project_root=str(root))
+
+    a, b = report('QAA'), report('QAB', value='103')
+    assert len(list_result_runs(spec, limit=None)['runs']) == 2
+    assert len(list_pending_report_candidates(spec)) == 2
+    pending_report = get_report_runs(spec, b.job_id)
+    assert pending_report['runs'] == [] and pending_report['pending_candidate_count'] == 2
+    # Both whole reports have source proof, but an unconfirmed comparison is
+    # never assumed to be a physically different device.
+    stale_b = get_report_device_context(spec, b.job_id)
+    assert all(not comparison['device_id'] for comparison in stale_b['comparisons'])
+    first = confirm(a, 'A', 'a')
+    with pytest.raises(ResultRevisionConflictError, match='geändert'):
+        confirm_report_device(str(path), b.job_id, 'B', expected_context_token=stale_b['context_token'],
+            request_id='stale', actor='QA', project_root=str(root))
+    second = confirm(b, 'B', 'b')
+    assert len(first['runs']) == len(second['runs']) == 2 and not second['candidates']
+    # D still compares raw owner A; B already owns its confirmed identity.
+    # Preserve D as a same-device duplicate and permit an independent assay
+    # in a mixed third source report without adding another ANA measurement.
+    duplicate = report('QAB_DUP', value='119')
+    duplicate_context = confirm(duplicate, 'B', 'b-duplicate')
+    assert duplicate_context['assignment_id'] and len(duplicate_context['candidates']) == 2 and not duplicate_context['runs']
+    mixed = report('QAB_MIXED', value='119', dfs_plate='QA88')
+    mixed_context = confirm(mixed, 'B', 'b-mixed')
+    assert len(mixed_context['runs']) == 1 and len(mixed_context['candidates']) == 1
+    assert mixed_context['runs'][0]['assay_key'] == '(0437)'
+    assert len(list_result_runs(spec, limit=None)['runs']) == 5
+    original_jobs = {file.name: file.read_bytes() for file in (root / 'jobs').iterdir() if file.is_file()}
+    ana_b = next(row for row in second['runs'] if row['assay_key'] == '(1c9e)')
+    ana_a = next(row for row in first['runs'] if row['assay_key'] == '(1c9e)')
+    original_key = ana_a['dedupe_key']
+    # A current-rule reanalysis of B may keep A's raw import key. A remains its
+    # raw owner, while B keeps its separate confirmed semantic/device claim.
+    rule_path = root / 'rules' / 'ANA Screen IgG.json'
+    current_rule = json.loads(rule_path.read_text(encoding='utf-8'))
+    rule_path.write_text(json.dumps(current_rule, ensure_ascii=False, indent=4), encoding='utf-8')
+    revision = _reanalyze(root, path, ana_b['id'], request='b-reanalysis')
+    state = get_result_run(spec, ana_b['id'])
+    assert not state['pending_revision']['result']['error']
+    assert state['pending_revision']['result']['dedupe_key'] == original_key
+    _choose = lambda revision, request: select_result_revision(str(path), ana_b['id'], revision,
+        expected_selection_token=get_result_run(spec, ana_b['id'])['selection_token'], action='accept_new', request_id=request, decided_by='QA')
+    _choose(revision['revision_id'], 'b-choose')
+    for field in current_rule['extract_rules']['fields']:
+        if field['key'] == 'PLATTE':
+            field['regex'] = field['regex'].replace('(.+?)', 'QA(.+?)')
+    rule_path.write_text(json.dumps(current_rule, ensure_ascii=False), encoding='utf-8')
+    revised = _reanalyze(root, path, ana_b['id'], request='b-new-identity')
+    _choose(revised['revision_id'], 'b-new-choice')
+    assert get_result_run(spec, ana_b['id'])['payload']['PLATTE'] == '77'
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('SELECT id FROM runs WHERE dedupe_key=?', (original_key,)).fetchone()[0] == ana_a['id']
+        assert not conn.execute('SELECT run_id FROM run_identity_aliases WHERE dedupe_key=?', (original_key,)).fetchall()
+    for row in list_result_runs(spec, limit=None)['runs']:
+        validate_run(spec, row['id'], 'QA', expected_selection_token=row['selection_token'],
+            expected_device_assignment_id=row['device_assignment_id'], project_root=str(root), request_id='v' + str(row['id']))
+    for device, expected in (('A', '101'), ('B', '103')):
+        source = get_lot_sources(spec, profile_version_id=profile['version_id'], kit_lot='EQA77', device_id=device)
+        descriptive = analyze_lot(source, {}).to_dict()['computed_series'][0]['descriptive']
+        assert descriptive['n'] == 1 and descriptive['mean']['value'] == expected
+    # Correction appends whole-report membership and invalidates both existing
+    # human bindings. A stale preview cannot silently validate the new device.
+    old_row = get_result_run(spec, ana_b['id'])
+    corrected = confirm(b, 'C', 'b-correction', reason='Synthetische Geräteberichtigung')
+    assert corrected['assignment_id'] != second['assignment_id']
+    with pytest.raises(ValidationStateConflictError, match='Gerät'):
+        validate_run(spec, ana_b['id'], 'QA', expected_selection_token=old_row['selection_token'],
+            expected_device_assignment_id=old_row['device_assignment_id'], project_root=str(root), request_id='stale-validation')
+    assert get_lot_sources(spec, profile_version_id=profile['version_id'], kit_lot='EQA77', device_id='C')['included_count'] == 0
+    for row in corrected['runs']:
+        new = validate_run(spec, row['id'], 'QA', expected_selection_token=row['selection_token'],
+            expected_device_assignment_id=corrected['assignment_id'], project_root=str(root), request_id='new-v' + str(row['id']))
+        assert new.validation_kind == 'revalidation' and new.supersedes_validation_id
+    assert get_lot_sources(spec, profile_version_id=profile['version_id'], kit_lot='EQA77', device_id='C')['included_count'] == 1
+    assert original_jobs == {file.name: file.read_bytes() for file in (root / 'jobs').iterdir() if file.is_file()}
+    # Restore only this temporary catalog, then prove chronology: an assigned
+    # but unvalidated later report is a usage witness, not a QC measurement.
+    shutil.copyfile(Path(__file__).parents[1] / 'rules' / rule_path.name, rule_path)
+    later = report('QALATER', day='15.11.2026', lot='EQA78')
+    confirm(later, 'A', 'later')
+    def chronology():
+        return get_lot_chronology(spec, profile_version_id=profile['version_id'], device_id='A').to_dict()
+    assert next(lot for lot in chronology()['lots'] if lot['kit_lot'] == 'EQA77')['close_available']
+    controller = ResultsController(root, settings_provider=lambda: DesktopSettings('sqlite', str(path)))
+    a_source = get_lot_sources(spec, profile_version_id=profile['version_id'], kit_lot='EQA77', device_id='A')
+    opened_a = open_lot(spec, profile_version_id=profile['version_id'], kit_lot='EQA77', device_id='A',
+        expected_source_token=a_source['source_token'], context=MutationContext('QA', 'open-a'))
+    a_case = next(case for case in controller.list_qc_lots() if case.device_id == 'A' and case.kit_lot == 'EQA77' and case.assay_key == '(1c9e)')
+    prepared_a = controller.prepare_qc_lot_close(controller.get_qc_lot_detail(a_case))
+    # An unknown-device run may have another selected and pending lot. It
+    # creates no empty-device UI case, while both possible lots stay relevant.
+    unknown_lot = report('QAPENDING_LOT', day='16.11.2026', lot='EQA79')
+    unknown_run = next(row for row in get_report_runs(spec, unknown_lot.job_id)['runs'] if row['assay_key'] == '(1c9e)')
+    correction_rule = json.loads(rule_path.read_text(encoding='utf-8'))
+    correction_rule['lot_rule']['regex'] = r'QA lot correction: (EQA77)'
+    rule_path.write_text(json.dumps(correction_rule, ensure_ascii=False), encoding='utf-8')
+    pending_lot_revision = _reanalyze(root, path, unknown_run['id'], request='unknown-device-pending-lot')
+    pending_state = get_result_run(spec, unknown_run['id'])
+    assert not pending_state['pending_revision']['result']['error']
+    assert pending_state['pending_revision']['result']['lot_id'] == 'EQA77' and pending_state['lot_id'] == 'EQA79'
+    assert controller.list_qc_lots() and all(case.device_id for case in controller.list_qc_lots())
+    current_usage = get_lot_chronology(spec, profile_version_id=profile['version_id'], device_id='A')
+    uncertain_a = next(lot for lot in current_usage.to_dict()['lots'] if lot['kit_lot'] == 'EQA77')
+    assert not uncertain_a['close_available'] and not uncertain_a['last_usage_reliable'] and not uncertain_a['witnesses']
+    database_before = path.read_bytes(), path.stat().st_mtime_ns
+    with pytest.raises(QualityControlApplicationError):
+        controller.prepare_qc_lot_close(controller.get_qc_lot_detail(a_case))
+    # Supply the *current* chronology token, not merely a stale preview. The
+    # authoritative writer must independently reject this ambiguous usage.
+    model_a = json.loads(prepared_a.analysis.model_json)
+    with pytest.raises(QCConfigurationError, match='Nutzungsverlauf'):
+        close_lot(spec, opened_a['lot_key'], expected_version_id=opened_a['version_id'],
+            profile_version_id=profile['version_id'], expected_source_token=a_source['source_token'],
+            witness_kit_lot=prepared_a.witness_kit_lot, expected_witness_source_token=prepared_a.witness_source_token,
+            expected_chronology_token=current_usage.snapshot_sha256, analysis_model=model_a,
+            pdf_bytes=prepared_a.pdf_bytes, pdf_sha256=prepared_a.pdf_sha256,
+            algorithm_id=model_a['algorithm_id'], renderer_id=prepared_a.renderer_id, context=MutationContext('QA', 'reject-ambiguous-close'))
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == database_before
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM qc_lot_versions').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM qc_report_evidence').fetchone()[0] == 0
+    select_result_revision(str(path), unknown_run['id'], pending_lot_revision['revision_id'],
+        expected_selection_token=pending_state['selection_token'], action='keep_old', request_id='unknown-keep-old', decided_by='QA')
+    assert next(lot for lot in chronology()['lots'] if lot['kit_lot'] == 'EQA77')['close_available']
+    shutil.copyfile(Path(__file__).parents[1] / 'rules' / rule_path.name, rule_path)
+    unresolved = report('QAUNKNOWN', value='105')
+    uncertain = next(lot for lot in chronology()['lots'] if lot['kit_lot'] == 'EQA77')
+    assert not uncertain['close_available'] and 'duplicate_source_unresolved' in uncertain['reasons']
+    # Same-device duplicate stays a clarification case on A; it must not make
+    # C's unrelated confirmed population uncertain merely by sharing an assay.
+    confirm(unresolved, 'A', 'same-device')
+    c_later = report('QAC_LATER', day='17.11.2026', lot='EQA80')
+    confirm(c_later, 'C', 'c-later')
+    c_usage = get_lot_chronology(spec, profile_version_id=profile['version_id'], device_id='C').to_dict()
+    assert next(lot for lot in c_usage['lots'] if lot['kit_lot'] == 'EQA77')['close_available']
+    c_case = next(case for case in controller.list_qc_lots() if case.device_id == 'C' and case.kit_lot == 'EQA77' and case.assay_key == '(1c9e)')
+    c_preview = controller.prepare_qc_lot_close(controller.get_qc_lot_detail(c_case))
+    closed_c = controller.close_qc_lot(c_preview, operator_initials='QA', request_id='unrelated-device-close')
+    assert closed_c['state'] == 'closed'
+    foreign = write_record_sqlite(AssayRecord('OTHER', 'EQA77', 'foreign', {'DATUM': '14.11.2026'}, 'DEFAULT_DEVICE'),
+        RuleSet('OTHER', 'OTHER.json', {}), str(path), job_id='foreign').run_id
+    assert foreign
+    c_usage = get_lot_chronology(spec, profile_version_id=profile['version_id'], device_id='C').to_dict()
+    assert next(lot for lot in c_usage['lots'] if lot['kit_lot'] == 'EQA77')['close_available']
+    retry = submit(str(root / 'QAA.pdf'), str(root), sqlite_path=str(path), device_id='DEFAULT_DEVICE')
+    assert retry.status == 'SKIPPED'

@@ -54,6 +54,7 @@ def replace_validation(
     expected_selection_token: str | None = None,
     request_id: str | None = None,
     project_root: str | None = None,
+    expected_device_assignment_id: int | None = None,
 ) -> RunValidation:
     """Append-only correction. Does not update the previous validation."""
     return correct_validation(
@@ -64,4 +65,5 @@ def replace_validation(
         expected_selection_token=expected_selection_token,
         request_id=request_id,
         project_root=project_root,
+        expected_device_assignment_id=expected_device_assignment_id,
     )

@@ -497,3 +497,9 @@ flowchart LR
 - Legacy-PyInstaller-Spec bleibt nur aus Kompatibilitaetsgruenden im Repo und ist nicht mehr die bevorzugte Build-Quelle.
 
 Feldversuch-Anleitung: `docs/AP17A_FIELD_TRIAL_PACKAGE.md`
+
+### 2.2 report-device and optional profile ownership
+
+The existing owners remain authoritative. QC owns optional version-2 profiles, named device inventory and explicit retained drafts. DbWriter owns additive schema-2 report assignments, semantic device claims and candidate materialization; Resultstore projects them read-only and rejects incomplete marked component schemas. Resultvalidation binds each immutable human decision to the displayed selected result and whole-report assignment under its own transaction. Application's existing ResultsController orchestrates these two explicit steps; the same ValidationView handles initial review and Results-originated correction. The raw import device/key is never substituted for confirmed physical identity.
+
+New analysis model tuple `(4, arev2-qc-analysis-v5, arev2-qc-pdf-v5)` freezes per-function eligibility and source interpretation. The exact older tuples, including literal `(3, arev2-qc-analysis-v4, arev2-qc-pdf-v4)`, remain supported. Original archived model/PDF bytes are read and exported without migration or recalculation. Live QC sources, lot chooser, chronology, SD origins and stale-preview checks all use the effective physical device; unknown same-assay usage remains local uncertainty rather than disappearing or blocking unrelated assays.

@@ -1,20 +1,21 @@
 """Public API for the single versioned QC/device authority."""
-from .model import MutationContext, QCAnalysis, QCUsageSnapshot, QCPdfReport, QCConfigurationError, QCConflictError, QCReportError, QCStoreError, QualityControlError, content_hash
+from .model import ConfigurationContext, MutationContext, QCAnalysis, QCUsageSnapshot, QCPdfReport, QCConfigurationError, QCConflictError, QCReportError, QCStoreError, QualityControlError, content_hash
 from .store import (
     close_lot, configure_lot, get_inventory, get_lot, get_report_evidence, get_status,
     legacy_device_source, list_lots, lot_identity, migrate_legacy_devices, open_lot, reopen_lot, save_inventory,
     resolve_store_path as validate_store_spec,
 )
-from .profiles import get_profile, list_profiles, save_profile
+from .profiles import get_profile, list_profiles, save_profile, list_profile_drafts, save_profile_draft
 from .sources import get_lot_sources, get_lot_chronology
 from .analysis import analyze_lot
 from .pdf_report import export_report_evidence, render_analysis_pdf
 
 __all__ = [
-    "MutationContext", "QCConfigurationError", "QCConflictError", "QCStoreError", "QualityControlError",
+    "ConfigurationContext", "MutationContext", "QCConfigurationError", "QCConflictError", "QCStoreError", "QualityControlError",
     "get_inventory", "get_status", "legacy_device_source", "migrate_legacy_devices", "save_inventory",
     "close_lot", "configure_lot", "get_lot", "get_lot_sources", "get_profile", "get_report_evidence",
     "list_lots", "list_profiles", "open_lot", "reopen_lot", "save_profile",
+    "list_profile_drafts", "save_profile_draft",
     "lot_identity",
     "validate_store_spec",
     "QCAnalysis", "QCReportError", "analyze_lot",
@@ -85,6 +86,8 @@ def get_sd_reference_context(store_spec, *, lot_key: str, expected_version_id: i
         try:
             profile = get_profile(store_spec, version_id)
         except QCConfigurationError:
+            continue
+        if not profile["snapshot"].get("device_id") and reference.get("device_id") != snapshot["device_id"]:
             continue
         if legacy_manual:
             source = origin["snapshot"].get("source_manifest", {}) if origin else {}

@@ -27,6 +27,7 @@ class ValidationView(ttk.Frame):
         on_reanalyze: Callable[[], None] | None = None,
         on_choose: Callable[[str], None] | None = None,
         on_edit_rules: Callable[[], None] | None = None,
+        on_add_device: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master, style="Content.TFrame")
         self._on_refresh = on_refresh
@@ -36,6 +37,9 @@ class ValidationView(ttk.Frame):
         self._on_reanalyze = on_reanalyze
         self._on_choose = on_choose
         self._on_edit_rules = on_edit_rules
+        self._on_add_device = on_add_device
+        self._device_report_context = None
+        self._device_labels = {}
         self._reanalysis_busy = False
         self._items: dict[str, ValidationQueueItem] = {}
         self._default_operator_initials = ""
@@ -115,12 +119,31 @@ class ValidationView(ttk.Frame):
 
         form = ttk.Frame(workflow, style="CardInner.TFrame")
         form.grid(row=6, column=0, sticky="ew")
-        ttk.Label(form, text="Initialen").grid(row=0, column=0, sticky="w")
+        ttk.Label(form, text="Gerät dieses Berichts").grid(row=0, column=0, sticky="w")
+        self._var_report_device = tk.StringVar()
+        self._report_device_combo = ttk.Combobox(form, textvariable=self._var_report_device, state="readonly")
+        self._report_device_combo.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self._device_add_button = ttk.Button(form, text="Gerät hier anlegen", command=lambda: self._on_add_device and self._on_add_device())
+        self._device_add_button.grid(row=0, column=2, padx=(8, 0))
+        self._var_device_confirmed = tk.BooleanVar(value=False)
+        self._device_confirmation = ttk.Checkbutton(form, text="Gerät für diesen Quellbericht bestätigen", variable=self._var_device_confirmed)
+        self._device_confirmation.grid(row=1, column=1, sticky="w", pady=(4, 0))
+        self._var_device_reason = tk.StringVar()
+        self._device_reason_label = ttk.Label(form, text="Grund der Gerätekorrektur")
+        self._device_reason_entry = ttk.Entry(form, textvariable=self._var_device_reason)
+        self._device_reason_label.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self._device_reason_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+        self._device_reason_label.grid_remove()
+        self._device_reason_entry.grid_remove()
+        self._lbl_device_impact = ttk.Label(form, text="", wraplength=460, style="Muted.TLabel")
+        self._lbl_device_impact.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self._report_device_combo.bind("<<ComboboxSelected>>", self._device_selection_changed)
+        ttk.Label(form, text="Initialen").grid(row=3, column=0, sticky="w", pady=(8, 0))
         self._var_initials = tk.StringVar()
-        ttk.Entry(form, textvariable=self._var_initials, width=16).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Label(form, text="Kommentar (optional)").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(form, textvariable=self._var_initials, width=16).grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(form, text="Kommentar (optional)").grid(row=4, column=0, sticky="w", pady=(8, 0))
         self._var_comment = tk.StringVar()
-        ttk.Entry(form, textvariable=self._var_comment).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(form, textvariable=self._var_comment).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
         form.columnconfigure(1, weight=1)
         actions = ttk.Frame(workflow, style="CardInner.TFrame")
         actions.grid(row=7, column=0, sticky="ew", pady=(8, 0))
@@ -296,8 +319,49 @@ class ValidationView(ttk.Frame):
     def validation_comment(self) -> str:
         return self._var_comment.get()
 
+    def validation_device(self) -> str:
+        return self._device_labels.get(self._var_report_device.get(), "")
+
+    def validation_device_confirmed(self) -> bool:
+        return bool(self._var_device_confirmed.get())
+
+    def validation_device_reason(self) -> str:
+        return self._var_device_reason.get().strip()
+
+    def select_report_device(self, device_id: str) -> None:
+        self._var_report_device.set(next((label for label, key in self._device_labels.items() if key == device_id), ""))
+        self._device_selection_changed()
+
+    def _device_selection_changed(self, _event=None) -> None:
+        self._var_device_confirmed.set(False)
+        item = self.selected_item()
+        correction = bool(item and item.device_assignment_id and self.validation_device() != item.device_id)
+        self._device_reason_label.grid() if correction else self._device_reason_label.grid_remove()
+        self._device_reason_entry.grid() if correction else self._device_reason_entry.grid_remove()
+        self._device_confirmation.configure(text="Neues Berichtgerät bestätigen" if correction else
+            "Gerät dieses Berichts bereits bestätigt" if item and item.device_assignment_id else "Gerät für diesen Quellbericht bestätigen")
+        self._render_device_impact(item)
+
     def clear_comment(self) -> None:
         self._var_comment.set("")
+
+    def select_run(self, run_id: int) -> None:
+        key = str(run_id)
+        if key in self._items:
+            self._tree.selection_set(key)
+            self._tree.focus(key)
+            self._tree.see(key)
+            self._render_item(self._items[key])
+
+    def _render_device_impact(self, item) -> None:
+        if item is None:
+            self._lbl_device_impact.configure(text="")
+            return
+        old = next((name for key, name in item.device_options if key == item.device_id), "noch nicht bestätigt")
+        new = self._var_report_device.get() or "bitte wählen"
+        changed = bool(item.device_assignment_id and self.validation_device() != item.device_id)
+        self._lbl_device_impact.configure(text="\n".join((f"Bisher: {old} → Auswahl: {new}", *item.device_impact)))
+        self._btn_save.configure(text="Gerät ändern und diese Messung erneut freigeben" if changed else "Korrektur speichern" if item.validation_current else "Erneut validieren" if item.revalidation_required else "Validierung speichern")
 
     def render_cases(self, items: Sequence[ValidationQueueItem]) -> None:
         selected = self.selected_item()
@@ -312,12 +376,13 @@ class ValidationView(ttk.Frame):
             return
         self._empty.grid_remove()
         for item in items:
-            status = "Historie unklar" if item.validation_ambiguous else ("Vergleich offen" if item.comparison else ("Nacharbeit" if item.missing_fields or item.revision_error else "Offen"))
+            status = "Historie unklar" if item.validation_ambiguous else "Duplikat / Gerät klären" if item.candidate_id else "Erneut bestätigen" if item.revalidation_required else "Bestätigt · Korrektur möglich" if item.validation_current else ("Vergleich offen" if item.comparison else ("Nacharbeit" if item.missing_fields or item.revision_error else "Offen"))
+            device_name = next((name for key, name in item.device_options if key == item.device_id), item.device_id or "ungeklärt")
             self._tree.insert(
                 "",
                 "end",
                 iid=str(item.run_id),
-                values=(item.file_name or "-", item.assay_name or "Assayname fehlt", item.lot_id or "-", item.device_id or "-", format_timestamp(item.created_at), status),
+                values=(item.file_name or "-", item.assay_name or "Assayname fehlt", item.lot_id or "-", device_name, format_timestamp(item.created_at), status),
             )
         target = str(previous_run_id) if previous_run_id is not None and self._tree.exists(str(previous_run_id)) else str(items[0].run_id)
         retained = tuple(key for key in previous_selection if key in self._items)
@@ -344,6 +409,15 @@ class ValidationView(ttk.Frame):
         for row in self._fields.get_children():
             self._fields.delete(row)
         if item is None:
+            self._device_report_context = None
+            self._report_device_combo.configure(values=(), state="disabled")
+            self._var_report_device.set("")
+            self._var_device_confirmed.set(False)
+            self._device_confirmation.configure(state="disabled", text="Gerät für diesen Quellbericht bestätigen")
+            self._device_add_button.configure(state="disabled")
+            self._device_reason_label.grid_remove()
+            self._device_reason_entry.grid_remove()
+            self._render_device_impact(None)
             self._lbl_context.configure(text="Keine Messung ausgewaehlt.")
             self._btn_save.configure(state="disabled")
             self._btn_open_pdf.configure(state="disabled")
@@ -351,7 +425,25 @@ class ValidationView(ttk.Frame):
                 button.configure(state="disabled")
             self._lbl_pdf_status.configure(text="Keine offenen Validierungen." if not self._items else "Keine Messung ausgewaehlt.")
             return
-        status = "Validierungshistorie ist nicht eindeutig; bitte in Ergebnisse klaeren." if item.validation_ambiguous else f"Revision {item.revision_id}: bereit zur Erstvalidierung."
+        device_context = (item.report_id, item.device_assignment_id, item.device_options)
+        self._device_confirmation.configure(state="normal")
+        self._device_add_button.configure(state="normal")
+        if self._device_report_context != device_context:
+            self._device_report_context = device_context
+            counts = {}
+            for key, name in item.device_options:
+                counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
+            self._device_labels = {(name if counts[name.casefold()] == 1 else name + " · " + key[-6:]): key for key, name in item.device_options}
+            self._report_device_combo.configure(values=tuple(self._device_labels), state="readonly")
+            chosen = item.device_id if item.device_assignment_id else item.suggested_device_id
+            self._var_report_device.set(next((label for label, key in self._device_labels.items() if key == chosen), ""))
+            self._var_device_confirmed.set(bool(item.device_assignment_id))
+            self._device_confirmation.configure(text="Gerät dieses Berichts bereits bestätigt" if item.device_assignment_id else "Gerät für diesen Quellbericht bestätigen")
+            self._var_device_reason.set("")
+            self._device_reason_label.grid_remove()
+            self._device_reason_entry.grid_remove()
+        self._render_device_impact(item)
+        status = "Validierungshistorie ist nicht eindeutig; bitte in Ergebnisse klaeren." if item.validation_ambiguous else "Nach Gerätekorrektur erneut fachlich bestätigen." if item.revalidation_required else "Bereits validiert; Korrektur möglich." if item.validation_current else "Quellkandidat: Gerät klären; ein eigener Messlauf entsteht nur bei belegbar anderem Gerät." if item.candidate_id else f"Revision {item.revision_id}: bereit zur Erstvalidierung."
         comparison = item.comparison
         if comparison:
             status = "Vergleich offen. Alte oder neue Werte auswaehlen, danach separat validieren."
@@ -362,7 +454,7 @@ class ValidationView(ttk.Frame):
         self._lbl_context.configure(
             text=(
                 f"Bericht: {item.file_name or '-'} | Assay: {item.assay_name or 'Assayname fehlt'} | "
-                f"Charge/Lot: {item.lot_id or '-'} | Geraet: {item.device_id or '-'} | {status}"
+                f"Charge/Lot: {item.lot_id or '-'} | Gerät: {next((name for key, name in item.device_options if key == item.device_id), 'ungeklärt')} | {status}"
             )
         )
         self._fields.heading("old", text="Alte Werte" if comparison else "Gewaehlte Werte")
@@ -378,7 +470,7 @@ class ValidationView(ttk.Frame):
             self._fields.insert("", "end", values=("Historie: " + event.field_key, event.value, ""), tags=("metadata",))
         available = not item.validation_ambiguous and not item.revision_error and not self._reanalysis_busy
         self._btn_save.configure(state="normal" if available and not comparison and not item.missing_fields else "disabled")
-        self._btn_reanalyze.configure(state="normal" if available else "disabled")
+        self._btn_reanalyze.configure(state="normal" if available and not item.candidate_id and not item.validation_current else "disabled")
         self._btn_keep_old.configure(state="normal" if available and comparison and comparison.can_keep_old else "disabled")
         self._btn_accept_new.configure(state="normal" if available and comparison and comparison.can_accept_new else "disabled")
         self._btn_edit_rules.configure(state="normal" if not self._reanalysis_busy else "disabled")

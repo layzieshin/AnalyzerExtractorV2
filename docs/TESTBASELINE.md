@@ -1,15 +1,35 @@
 # AREV2 Test Baseline
 
-Date: 2026-11-13 (A1 integrated source release 2.1.0)
+Date: 2026-11-14 (2.2.0 UX/device work; Windows release qualification pending)
 
 Purpose: current verified source baseline with preserved historical phase evidence.
-The current release gate is A1 below; older gate labels, build results and pending
-review statements describe their recorded checkpoints and do not qualify 2.1.0.
+The current 2.2.0 gate is below; older gate labels, build results and pending
+review statements describe their recorded checkpoints and do not qualify 2.2.0.
 The 2026-07-09 AP-1 baseline (`74 passed`) is obsolete.
 
-## Current rebuild gates (2026-11-13)
+## 2.2.0 current qualification — Windows pending (2026-11-14)
 
-### A1 integrated source release 2.1.0: GATE_PASSED (2026-11-13)
+The current 2.2.0 source introduces optional assay-wide configuration, retained drafts, explicit whole-report device assignments, separate human revalidation and device-scoped QC. Every fresh capture, including an untouched v1 profile, uses feature-specific v3 source eligibility while preserving its explicit date/time/numeric settings and stored profile bytes. Rules JSON and the extraction contract remain unchanged. The existing 2.1.0 checkpoints below are historical evidence for that version, not a claim that they qualify the new source.
+
+Executed current checkpoints:
+
+- 235 focused persistence, reanalysis, ResultsController, QC profile/lot and architecture cases passed (8.79 s); this includes the single original-rule source scenario with materialization, third-source same-device duplicates, mixed reports, stale-state rejection, B reanalysis without moving A's raw alias, correction/revalidation and local chronology uncertainty.
+- Final v1-live/profile/analysis/ResultsController regression and the four affected real PDF cases: **241 passed, 0 failed/errors/skipped in 11.05 s**. Unchanged v1 configuration retains explicit time/numeric choices and profile bytes; missing time/SOLL/limits no longer removes valid IST values from descriptive statistics. Date-dependent charts retain their own valid-date subset, and explained PDFs preserve separate temporal reasons and raw date/time text.
+- A clearly synthetic original `(661f)` extractor/DbWriter component case passed. It proves explicit legacy identity and qualified claims without inventing DONE/PDF evidence; native import for that original rule is not claimed.
+- The real Linux desktop executed the new connected first-use scenario: explicitly chosen nonexistent SQLite file → neutral IST profile with visible unit → inline name-only A/B devices → original ANA/DFS70 PDFs → four individual human validations → per-device QK n=1 with means 101/103. The existing v1-profile editor roundtrip to optional v2 also passed. The existing adapter checks now use the canonical validation route: **85 native cases passed, zero failures/errors/skips in 3.35 s**. Independent manual desktop review passed initial review, inline A/B/C/D creation, whole-report correction, separate revalidation, friendly effective-device display, global badge and return to all open reports. The complete Windows suite/build is still pending.
+- Independently, a genuine archived v4 analysis/PDF created under unchanged 2.1.0 baseline code remained readable and its original PDF exported byte-exact under the new code; the source DB bytes and mtime were unchanged. Final independent geometry checks found 11 rows on one page, 60 rows on two pages and two levels of 30 rows on three pages, with zero detected overflow.
+
+The first actual Windows feature run on `a58d50b4b76f2eb5435d02db4d00ef50680dbf38` stopped before packaging with seven failed old adapter/fixture expectations, 1416 passed and one Tk-initialization skip. The connected native first-use scenario passed. The skipped node was identified as `test_rule_editor_phase6_layout.py::test_project_root_entry_is_readonly`; the next workflow prints skip reasons and retains failure JUnit. No Windows EXE is qualified by that failed run.
+
+The bounded follow-up corrects optional field choices, per-assay retained draft identities, name-only legacy inventory, independent temporal/statistical PDF expectations and explicit report-device setup in the existing watch/archive scenario. Two independently reproduced review findings are also fixed: a current chronology token cannot bypass ambiguous-usage closure in the writer, and an undated eligible value is normalized for independent single-value SD rules while sequence rules still require chronology. The focused follow-up passed **232 cases, zero failures/errors/skips in 9.26 s**; both findings also passed independent public-API reproductions, including unchanged DB bytes/mtime after rejected close. Complete fresh Windows qualification remains pending.
+
+The next exact-head Windows feature run on `3e02c764f48c9c6923e6264a84775120d68dd795` passed 1423 tests with no test failures/errors, but one different Tk initialization was skipped; rules, bundle/frozen smoke and extracted EXE startup/normal close passed. The zero-skip release gate correctly rejected that run. The error reported an unreadable installed `ttk/treeview.tcl` despite successful Tk use before and after it. This matches the documented Windows interaction between pytest's default FD capture and Tcl's cached standard handles ([pytest #10364](https://github.com/pytest-dev/pytest/issues/10364), [Tcl ticket 91c9bc1c45](https://core.tcl-lang.org/tcl/tktview/91c9bc1c457fda269ae18595944fc3c2b54d961d)).
+
+The bounded infrastructure correction uses [`--capture=sys`](https://docs.pytest.org/en/stable/how-to/capture-stdout-stderr.html): Python stdout/stderr remain captured without repeatedly replacing operating-system file descriptors. The complete suite, all assertions, native user flow and zero-failure/error/skip gates remain unchanged. No product/test code or Tcl installation paths are changed. Failure-only JUnit upload now runs at the end of the Windows job so it also preserves diagnostics when a later manifest gate fails. A fresh exact-head Windows build is required to qualify this change.
+
+Release qualification requires the complete Windows suite with zero failures/errors/skips, the connected native Tk scenario, source/bundled rules integrity, canonical onedir verification/frozen smoke, and startup/normal close of the extracted versioned EXE. The workflow records the actual suite count, commit, input fingerprint, dependencies, JUnit and desktop evidence. Feature runs publish artifacts only; the successful reviewed master build creates v2.2.0 on its exact commit and publishes verified assets. No fixed old test/input count substitutes for these gates.
+
+### Historical A1 integrated source release 2.1.0: GATE_PASSED (2026-11-13)
 
 Root issued **GO for P4+A1** on source metadata 2.1.0 after the independent
 standard-print review and one integrated native full-suite run: **1418 passed,

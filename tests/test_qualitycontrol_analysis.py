@@ -261,7 +261,7 @@ def test_sd_origin_defines_unit_and_measured_parameter_without_disabling_qmma(ki
     assert series["sd"] == {"available": False, "reason": reason} and not series["bands"]
     assert result["points"][0]["z"] is None and last_rule(result, "1_3s")["status"] == "unavailable"
     assert refs == before == result["sd_references"] and result["source_manifest"] == source
-    assert result["algorithm_id"] == "arev2-qc-analysis-v4"
+    assert result["algorithm_id"] == "arev2-qc-analysis-v5"
     assert result["sd_reference_context"]["references"]["c1"]["origin_profile_snapshot"] == origin["profile_snapshot"]
 
 
