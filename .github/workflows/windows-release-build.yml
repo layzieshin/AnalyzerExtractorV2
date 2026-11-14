@@ -26,7 +26,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONUNBUFFERED: '1'
       PYTHONUTF8: '1'
-      PYTEST_ADDOPTS: -rs --junitxml=../windows-tests.xml --basetemp=../pytest-windows-build
+      PYTEST_ADDOPTS: --capture=sys -rs --junitxml=../windows-tests.xml --basetemp=../pytest-windows-build
       SOURCE_COMMIT: ${{ github.sha }}
       RELEASE_ARCHIVE: AnalyzerResultExtractorV2-v2.2.0-windows-x64.zip
 
@@ -119,15 +119,6 @@ jobs:
       - name: Run canonical tests, rule checks, onedir build and frozen EXE smoke
         working-directory: product
         run: python packaging/build_onedir.py
-
-      - name: Retain JUnit diagnostics when qualification fails
-        if: failure()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: windows-failed-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: windows-tests.xml
-          if-no-files-found: warn
-          retention-days: 14
 
       - name: Verify and stage the canonical ZIP and build metadata
         shell: python
@@ -312,6 +303,15 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+      - name: Retain JUnit diagnostics when qualification fails
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-failed-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: windows-tests.xml
+          if-no-files-found: warn
+          retention-days: 14
 
   publish-windows-release:
     name: Publish the verified master build
