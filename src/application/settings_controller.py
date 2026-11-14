@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import replace
@@ -15,8 +16,8 @@ from src.runtime.api import (
     load_runtime_config,
 )
 from src.qualitycontrol.api import (
-    MutationContext, QualityControlError, get_inventory as qc_get_inventory,
-    legacy_device_source, list_profiles, migrate_legacy_devices, save_inventory, save_profile,
+    ConfigurationContext, MutationContext, QualityControlError, get_inventory as qc_get_inventory,
+    legacy_device_source, list_profiles, list_profile_drafts, save_profile_draft, migrate_legacy_devices, save_inventory, save_profile,
 )
 
 from .errors import QualityControlApplicationError, SettingsLoadError, SettingsSaveError, SettingsValidationError
@@ -43,6 +44,7 @@ _ALLOWED_KEYS = frozenset(
 class SettingsController:
     def __init__(self, project_root: str | Path) -> None:
         self._project_root = Path(project_root).resolve()
+        self._profile_editor_drafts: dict[tuple[str, str], dict[str, Any]] = {}
 
     @property
     def project_root(self) -> Path:
@@ -124,7 +126,7 @@ class SettingsController:
                 display_name=str(row.get("display_name") or row.get("device_id") or ""),
                 active=bool(row.get("active", True)),
                 serial_number=str(row.get("serial_number") or ""), lnr=str(row.get("lnr") or ""), eva=str(row.get("eva") or ""),
-                incomplete=bool(row.get("incomplete")), legacy=bool(row.get("legacy")),
+                incomplete=not bool(row.get("display_name")), legacy=bool(row.get("legacy")),
             )
             for row in list_devices(self._project_root, store_spec=spec)
         )
@@ -159,7 +161,8 @@ class SettingsController:
                 source_hash, message = source["sha256"], "Vorhandene Gerätedatei kann ausdrücklich übernommen werden."
             except QualityControlError as exc:
                 source_hash, message = "", str(exc)
-            return QCConfigurationState(spec["path"], inventory, profiles, source_hash, message)
+            return QCConfigurationState(spec["path"], inventory, profiles, source_hash, message,
+                retained_drafts=tuple(list_profile_drafts(spec)))
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
 
@@ -199,17 +202,20 @@ class SettingsController:
                 issues.append("Die zugehörige Regel ist nicht aktiv.")
             if key in errors:
                 issues.append(errors[key])
-            if not device or device.get("incomplete") or not device.get("active", True):
-                issues.append("Gerätebindung prüfen.")
+            if not device or not device.get("display_name") or not device.get("active", True):
+                if value["device_id"]:
+                    issues.append("Gerätebindung prüfen.")
             for control in value["controls"]:
                 mapping = control.get("fields", {})
+                modern = value.get("profile_schema_version") == 2
                 invalid = [f"{role}: {mapping.get(role) or 'fehlt'}" for role in ("MIN", "MAX", "SOLL", "IST")
-                           if not mapping.get(role) or mapping.get(role) not in fields.get(key, ())]
-                if len(set(mapping.values())) != 4:
-                    invalid.append("Vier verschiedene Felder erforderlich")
+                           if (not mapping.get(role) and (not modern or role == "IST")) or (mapping.get(role) and mapping.get(role) not in fields.get(key, ()))]
+                assigned = [field for field in mapping.values() if field]
+                if len(set(assigned)) != len(assigned):
+                    invalid.append("Zugeordnete Felder müssen verschieden sein")
                 if invalid:
                     issues.append(f"{control['name']}: {', '.join(invalid)}")
-            return QCAssayConfigurationItem(key, name, value["device_id"], device.get("display_name") or value["device_id"],
+            return QCAssayConfigurationItem(key, name, value["device_id"], device.get("display_name") or value["device_id"] or "Alle Geräte dieses Assays",
                 record["profile_id"], value["name"], record["version_id"], len(value["controls"]),
                 "Feldzuordnung prüfen" if issues else "Eingerichtet", tuple(issues))
 
@@ -221,6 +227,15 @@ class SettingsController:
         active_keys = {key for _name, key in assays}
         rows.extend(profile_row("Assay nicht aktiv", record["snapshot"]["assay_key"], record, active=False)
                     for record in state.profiles if record["snapshot"]["assay_key"] not in active_keys)
+        names = dict((key, name) for name, key in assays)
+        for draft in state.retained_drafts:
+            value = draft["snapshot"]
+            key = str(value.get("assay_key") or "")
+            device_id = str(value.get("device_id") or "")
+            rows.append(QCAssayConfigurationItem(key, names.get(key, "Assay nicht aktiv"), device_id,
+                devices.get(device_id, {}).get("display_name", "") or "Alle Geräte dieses Assays", draft["profile_id"],
+                str(value.get("name") or "Unbenannter Entwurf") + " (Entwurf)", draft["base_version_id"],
+                len(value.get("controls") or []), "Entwurf fortsetzen", (), draft["draft_id"]))
         return replace(state, assays=assays, field_choices=fields, assay_rows=tuple(rows))
 
     def save_qc_inventory(self, state: QCConfigurationState, snapshot: dict[str, Any], operator_initials: str,
@@ -228,7 +243,7 @@ class SettingsController:
         spec = self._qc_store(state.store_path)
         try:
             return save_inventory(spec, snapshot, expected_version_id=state.inventory["version_id"],
-                                  context=MutationContext(operator_initials, request_id))
+                                  context=ConfigurationContext(request_id, operator_initials))
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
 
@@ -241,11 +256,57 @@ class SettingsController:
         except Exception as exc:
             raise QualityControlApplicationError(f"Aktuelle Regelfelder konnten nicht geladen werden. Bitte die Regel und Feldzuordnung prüfen: {exc}") from exc
         try:
-            return save_profile(spec, snapshot, expected_version_id=expected_version_id,
-                expected_inventory_version_id=state.inventory["version_id"], context=MutationContext(operator_initials, request_id),
-                available_field_keys=fields)
+            result = save_profile(spec, snapshot, expected_version_id=expected_version_id,
+                expected_inventory_version_id=state.inventory["version_id"], context=ConfigurationContext(request_id, operator_initials),
+                available_field_keys=fields, draft_id=str(snapshot.get("_draft_id") or ""))
+            for key, draft in list(self._profile_editor_drafts.items()):
+                if key[0] == spec["path"] and draft.get("profile_id") == result["profile_id"]:
+                    del self._profile_editor_drafts[key]
+            return result
         except QualityControlError as exc:
             raise QualityControlApplicationError(str(exc)) from exc
+
+    def get_qc_profile_editor(self, state: QCConfigurationState, *, assay_key: str, profile_id: str = "", draft_id: str = "") -> dict[str, Any] | None:
+        """Session text wins over stored heads; stale bases remain visible."""
+        spec = self._qc_store(state.store_path)
+        key = (spec["path"], "draft:" + draft_id if draft_id else profile_id or "new:" + assay_key)
+        if key in self._profile_editor_drafts:
+            return copy.deepcopy(self._profile_editor_drafts[key])
+        retained = [row for row in state.retained_drafts if row["draft_id"] == draft_id] if draft_id else [row for row in state.retained_drafts if row["profile_id"] == profile_id] if profile_id else [
+            row for row in state.retained_drafts if row["snapshot"].get("assay_key") == assay_key and not row["base_version_id"]]
+        if len(retained) == 1:
+            row = retained[0]
+            draft = {"editor_key": key[1], "draft_id": row["draft_id"], "profile_id": row["profile_id"], "base_version_id": row["base_version_id"],
+                     "draft_version_id": row["version_id"], "snapshot": copy.deepcopy(row["snapshot"])}
+            self._profile_editor_drafts[key] = draft
+            return copy.deepcopy(draft)
+        return None
+
+    def update_qc_profile_editor(self, state: QCConfigurationState, draft: dict[str, Any], *, editor_key: str) -> None:
+        spec = self._qc_store(state.store_path)
+        self._profile_editor_drafts[(spec["path"], editor_key)] = copy.deepcopy(draft)
+
+    def retain_qc_profile_editor(self, state: QCConfigurationState, draft: dict[str, Any], *, editor_key: str, request_id: str) -> dict[str, Any]:
+        spec = self._qc_store(state.store_path)
+        try:
+            record = save_profile_draft(spec, draft_id=draft["draft_id"], profile_id=draft["profile_id"],
+                base_version_id=draft["base_version_id"], snapshot=draft["snapshot"], expected_version_id=draft.get("draft_version_id", 0),
+                context=ConfigurationContext(request_id))
+            updated = {**copy.deepcopy(draft), "editor_key": editor_key, "draft_version_id": record["version_id"]}
+            self.update_qc_profile_editor(state, updated, editor_key=editor_key)
+            return updated
+        except QualityControlError as exc:
+            raise QualityControlApplicationError(str(exc)) from exc
+
+    def discard_qc_profile_editor(self, state: QCConfigurationState, draft: dict[str, Any], *, editor_key: str, request_id: str) -> None:
+        spec = self._qc_store(state.store_path)
+        if draft.get("draft_version_id"):
+            try:
+                save_profile_draft(spec, draft_id=draft["draft_id"], profile_id=draft["profile_id"], base_version_id=draft["base_version_id"],
+                    snapshot=draft["snapshot"], expected_version_id=draft["draft_version_id"], context=ConfigurationContext(request_id), discard=True)
+            except QualityControlError as exc:
+                raise QualityControlApplicationError(str(exc)) from exc
+        self._profile_editor_drafts.pop((spec["path"], editor_key), None)
 
     def open_output_folder(self, *, path_opener=None) -> str:
         from .desktop_actions import open_path

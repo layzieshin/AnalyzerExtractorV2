@@ -234,3 +234,47 @@ def test_sqlite_writer_migrates_existing_runs_table(tmp_path: Path):
     with sqlite3.connect(sqlite_path) as conn:
         log_cols = {row[1] for row in conn.execute("PRAGMA table_info(duplicate_decision_log)").fetchall()}
     assert {"candidate_id", "action", "decided_at", "decided_by", "note"} <= log_cols
+
+
+def test_original_explicit_legacy_identity_has_separate_device_claims_without_fabricated_source_proof(tmp_path):
+    """Component QA only: the original 661f PDF start-anchor issue is preserved."""
+    from dataclasses import asdict, replace
+    from src.dbwriter.report_devices import _claim, semantic_identity
+    from src.dbwriter.api import ResultRevisionConflictError, ResultRevisionError, confirm_report_device
+    from src.extractor.api import extract_record
+    from src.ruleresolver.api import resolve_ruleset
+    from src.resultstore.api import get_report_device_context
+
+    rules = Path(__file__).parents[1] / 'rules'
+    ruleset = resolve_ruleset('(661f)', str(rules), str(rules / 'index.json'))
+    block = '\n'.join(['Validationskriterien erfüllt', 'Anti-dsDNA-NcX IgG',
+        r'Test: C:\QA\Anti-dsDNA-NcX IgG.asy (661f)', 'Anwender: QAA', 'Datum: 14.11.2026',
+        'Plattenname: QA77 Zeit: 08:05:00', 'Kit EQA77 271130', 'Validierungskriterien',
+        'PCQ1 90<=PCQ1<=110 90<=100<=110', 'NCQ1 15<=NCQ1<=25 15<=20<=25',
+        'PCQ1 Ergebnis 101 RU/ml', 'NCQ1 Ergebnis 19 RU/ml', 'S1 1,52 O.D. >0,4 O.D.',
+        'S2 1,62 O.D. >0,5 O.D.', 'S3 1,72 O.D. >0,6 O.D.', '__FILE_NAME_NOT_IN_TEXT__'])
+    first = extract_record(block, ruleset, device_id='IMPORT_A')
+    second = extract_record(block.replace('QAA', 'QAB').replace('101 RU/ml', '103 RU/ml'), ruleset, device_id='IMPORT_B')
+    assert first.dedupe_version == second.dedupe_version == 'explicit_legacy'
+    assert first.dedupe_key == second.dedupe_key and semantic_identity(asdict(first)) == semantic_identity(asdict(second))
+    assert semantic_identity(asdict(first)) == semantic_identity(asdict(replace(first, device_id='OTHER_IMPORT')))
+    path = tmp_path / 'legacy-component.sqlite'
+    a = write_record_sqlite(first, ruleset, str(path), job_id='synthetic-component-A', pdf_sha256='a' * 64, assay_block_hash='b' * 64)
+    resumed = write_record_sqlite(first, ruleset, str(path), job_id='synthetic-component-A', pdf_sha256='a' * 64, assay_block_hash='b' * 64)
+    b = write_record_sqlite(second, ruleset, str(path), job_id='synthetic-component-B', pdf_sha256='c' * 64, assay_block_hash='d' * 64)
+    assert a.status == 'inserted' and resumed.status == 'already_persisted' and resumed.run_id == a.run_id
+    assert b.status == 'duplicate_pending' and b.existing_run_id == a.run_id
+    # Pure claim primitive with labelled synthetic owner IDs. This does not
+    # pretend that a second persisted run or confirmed physical source exists.
+    with sqlite3.connect(path) as conn:
+        _claim(conn, asdict(first), 'PHYSICAL_A', 41, 1)
+        _claim(conn, asdict(second), 'PHYSICAL_B', 42, 2)
+        with pytest.raises(ResultRevisionConflictError):
+            _claim(conn, asdict(second), 'PHYSICAL_A', 42, 3)
+        assert conn.execute('SELECT COUNT(*) FROM run_device_claims').fetchone()[0] == 2
+        assert conn.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 1
+    spec = {'driver': 'sqlite', 'path': str(path)}
+    context = get_report_device_context(spec, 'synthetic-component-B')
+    with pytest.raises(ResultRevisionError, match='Quellbeleg'):
+        confirm_report_device(str(path), 'synthetic-component-B', 'PHYSICAL_B',
+            expected_context_token=context['context_token'], request_id='no-fabricated-proof', actor='QA', project_root=str(tmp_path))

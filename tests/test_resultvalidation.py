@@ -263,6 +263,7 @@ def test_existing_database_without_validation_table_is_extended(tmp_path: Path) 
         "selection_id",
         "selection_token",
         "request_id",
+        "device_assignment_id", "device_binding_token", "validation_kind",
     }
     assert by_name["validation_id"][5] == 1
     assert by_name["created_at_utc"][3] == 0
@@ -388,6 +389,7 @@ def test_public_api_and_architecture_boundary() -> None:
         "expected_selection_token",
         "request_id",
         "project_root",
+        "expected_device_assignment_id",
     ]
     assert inspect.signature(validate_run).parameters["comment"].default == ""
     assert list(inspect.signature(replace_validation).parameters) == [
@@ -398,6 +400,7 @@ def test_public_api_and_architecture_boundary() -> None:
         "expected_selection_token",
         "request_id",
         "project_root",
+        "expected_device_assignment_id",
     ]
     assert set(RunValidation.__dataclass_fields__) == {
         "validation_id",
@@ -411,6 +414,7 @@ def test_public_api_and_architecture_boundary() -> None:
         "selection_id",
         "selection_token",
         "request_id",
+        "device_assignment_id", "device_binding_token", "validation_kind",
     }
 
     resultstore_imports: list[str] = []
@@ -427,7 +431,7 @@ def test_public_api_and_architecture_boundary() -> None:
             for module in modules:
                 if module == "sqlite3" or module.startswith("sqlite3."):
                     assert path.name == "store.py"
-                if module.startswith("src.") and module not in {"src.resultstore.api", "src.jobcontroller.api"}:
+                if module.startswith("src.") and module not in {"src.resultstore.api", "src.jobcontroller.api", "src.qualitycontrol.api"}:
                     if module == "src.resultvalidation" or module.startswith("src.resultvalidation."):
                         continue
                     pytest.fail(f"{path.name} imports {module}")

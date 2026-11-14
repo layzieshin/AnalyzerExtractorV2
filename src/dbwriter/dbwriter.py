@@ -156,6 +156,12 @@ class DbWriter:
         payload = json.dumps(record.data, ensure_ascii=False)
         basis_payload = json.dumps(record.dedupe_basis, ensure_ascii=False)
         created_at = datetime.now(timezone.utc).isoformat()
+        resumed = conn.execute("""SELECT m.run_id,c.candidate_payload_json FROM candidate_materializations m
+            JOIN duplicate_candidates c ON c.id=m.candidate_id
+            WHERE c.pdf_sha256=? AND c.assay_block_hash=? AND c.assay_key=?""", (pdf_sha256, assay_block_hash, record.assay_key)).fetchall()
+        for run_id, frozen_payload in resumed:
+            if _loads_json_object(frozen_payload) == dict(record.data):
+                return DbWriteResult(sqlite_path=sqlite_path, table_name="runs", status="already_persisted", run_id=int(run_id))
         owners = identity_owners(conn, record.assay_key, record.dedupe_key)
         if len(owners) > 1:
             raise ValueError("duplicate_identity_ownership_ambiguous")
@@ -240,6 +246,7 @@ class DbWriter:
                     "pdf_path": pdf_path,
                     "lot_id": record.lot_id,
                     "ruleset_file": ruleset.ruleset_file,
+                    "source_provenance": dict(source_provenance or {}),
                 },
                 ensure_ascii=False,
             ),

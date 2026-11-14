@@ -1,14 +1,14 @@
-# UI V2.1 — Ablauf für die Produkt-Shell
+# UI 2.2 — Ablauf für die Produkt-Shell
 
-**Stand:** 2026-11-12 (Paket 3b; unabhängige Prüfung noch offen)
+**Stand:** 2026-11-14 (2.2.0; finaler Windows-Buildnachweis im Release)
 **Gilt für:** `AnalyzerDesktopApp`, Fenster **Analyzer Result Extractor**  
 **Nicht der Alltag:** Tab-Oberfläche `LegacyTestApp` (nur Support, siehe unten)
 
-SQLite auf diesem PC ist die verbindliche Ablage neuer Ergebnisse und Validierungen. Das Original-PDF dient zur Prüfung. Ein späterer PDF-Nachweis folgt separat. Neue Verarbeitung und Validierung ändern keine Excel-Dateien; vorhandene Arbeitsmappen bleiben erhalten. Ein späteres QMTool oder PostgreSQL gehört nicht zu dieser Version.
+SQLite auf diesem PC ist die verbindliche Ablage neuer Ergebnisse und Validierungen. Das Original-PDF dient zur Prüfung. QK-Berichte werden unter **Statistik** vorbereitet und nach Bestätigung unveränderlich archiviert. Neue Verarbeitung und Validierung ändern keine Excel-Dateien; vorhandene Arbeitsmappen bleiben erhalten. Ein späteres QMTool oder PostgreSQL gehört nicht zu dieser Version.
 
 ## Start
 
-`AnalyzerResultExtractorV2.exe` starten oder auf dem Entwicklungs-PC `python test_app_main.py`. Ohne gesetztes `ARE_LEGACY_UI` öffnet sich die Sidebar mit **Auswertung**, **Ergebnisse**, **Validierung**, **Regelwerke**, **Einstellungen** und **Diagnose**.
+`AnalyzerResultExtractorV2.exe` starten oder auf dem Entwicklungs-PC `python test_app_main.py`. Ohne gesetztes `ARE_LEGACY_UI` öffnet sich die Sidebar mit **Auswertung**, **Ergebnisse**, **Statistik**, **Validierung**, **Regelwerke**, **Einstellungen** und **Diagnose**.
 
 ## Einstellungen
 
@@ -20,7 +20,7 @@ Unter **Einstellungen** vor dem ersten Lauf prüfen und mit **Speichern** sicher
 | **Eingabeordner** / **Archivordner** | Quelle und Ziel für Auto-Import |
 | **Unterordner einbeziehen** | Auch PDFs in Unterordnern |
 | **Ablage** | Neue Ergebnisse und Validierungen werden immer in SQLite gespeichert |
-| **Gerät** | Gerätezuordnung; **Neu laden** aktualisiert die Liste |
+| **Gerät** | Importvorschlag; das tatsächliche Gerät wird am Quellbericht bestätigt |
 | **Operator-Initialen** | Vorschlag für die Validierung, keine Benutzerverwaltung |
 | **SQLite-Pfad** unter **Erweitert** | Nur ändern, wenn die Datenbank nicht am üblichen Ort liegen soll |
 
@@ -57,16 +57,19 @@ Neue PDFs im Eingabeordner werden im Hintergrund erkannt und verarbeitet. Nach e
 
 **Ergebnisse** listet die gespeicherten Berichte. **Details anzeigen** öffnet die Messungen eines Berichts. **PDF öffnen** und **Ausgabeordner öffnen** führen zum Original-PDF bzw. zum üblichen Ausgabeordner.
 
-Eine Messung auswählen. Der Bereich **Validierung** zeigt Initialen, Kommentar und die Historie.
+**In Validierung prüfen** öffnet Original-PDF und die Messungen des konkreten Berichts. Das Gerät einmal für den ganzen Bericht auswählen und bestätigen; danach jeden Assay mit Initialen und optionalem Kommentar einzeln freigeben. **Gerät hier anlegen** braucht nur einen unterscheidbaren Namen und erhält die begonnene Eingabe. Der Importvorschlag ist noch keine Gerätebestätigung.
 
-| Berichtstatus | Bedeutung | Nächste Aktion |
-|---------------|-----------|----------------|
-| **Unvalidiert** | Noch keine gültige Validierung | Initialen prüfen, optional Kommentar, **Validierung speichern** |
-| **Teilweise validiert** | Nur ein Teil der Messungen ist validiert | Offene Messung wählen und speichern |
-| **Validiert** | Alle Messungen des Berichts sind validiert | Keine weitere Pflicht |
-| **Prüfung erforderlich** | Fehler, Klärfall oder uneindeutige Historie | **Diagnose** bzw. Historie lesen, nicht still überschreiben |
+Eine vollständige Freigabe entfernt die Messungen aus der offenen Arbeitsliste. In **Ergebnisse → Validierung / Berichtgerät korrigieren** bleibt der Bericht erreichbar. Der bisherige und neue Gerätestand, betroffene Messungen/Assays und bestehende Chargen werden angezeigt. Ein Gerätewechsel braucht einen Grund; jeder betroffene Assay muss danach erneut freigegeben werden. Frühere Validierungen und QK-Berichte werden nicht überschrieben. Die Hauptnavigation **Validierung** führt zurück zu allen offenen Berichten.
 
-Eine vorhandene Validierung wird nicht überschrieben. **Validierung korrigieren** fragt nach und legt einen neuen SQLite-Eintrag an, der auf den bisherigen verweist. Erstvalidierung und Korrektur bleiben nach einem Neustart erhalten; sie ändern weder Messwerte noch Arbeitsmappen oder historische Ausgabepläne.
+## Profil und Qualitätskontrolle
+
+Auch vor dem ersten Import unter **Einstellungen → Assays & QK** einen Assay wählen. Profil-/Levelname und IST-Feld genügen. Profil und Gerät benötigen keine Initialen; Gerätename genügt, SN/LNR/EVA sind optional. Standard ist ein assayweites Profil, bei weiterhin gerätegetrennter Auswertung. SOLL/MIN/MAX, Datum-/Zeitformate und Westgard können später ergänzt werden. Für die Statistik eine gemeinsame Einheit bestätigen oder die Größe ausdrücklich dimensionslos markieren.
+
+Leere Datums-/Zeitformatfelder bedeuten automatische Erkennung bekannter Formate. Vorhandene bewusste Overrides bleiben erhalten. Unbekannte Uhrzeiten werden nicht erfunden. Fehlende Grenzen oder Zeitangaben sperren nur die Funktionen, die diese Angaben wirklich benötigen. Neue Profile haben Westgard ausgeschaltet.
+
+Ein begonnener Entwurf bleibt in der Sitzung erhalten, auch bei Inline-Geräteanlage oder Eingabefehlern. Beim Schließen kann **Entwurf behalten** gewählt werden. Der benannte Entwurf erscheint danach in derselben Übersicht mit **Entwurf fortsetzen**. **Weiteres Profil** kann bestehende Zuordnungen als neue Kopie übernehmen; veröffentlichte Fassungen bleiben erhalten.
+
+Unter **Statistik** Gerät/Assay/Kit-Charge auswählen. Kontrollserien und Kennzahlen verwenden nur freigegebene, passend zugeordnete Messungen dieses Geräts. **Abschluss prüfen** zeigt eine unverbindliche Vorschau; erst die Bestätigung speichert Modell und PDF zusammen. Geänderte Quellen oder Gerätestände erfordern eine neue Prüfung. Historische Original-PDFs werden bytegleich unter neuem Dateinamen exportiert.
 
 ## Diagnose und Nacharbeit
 
@@ -117,7 +120,7 @@ geänderten Ergebnis fordert die Anwendung zum Aktualisieren auf.
 
 Unter **Klärfälle (Duplikate)** stehen ausstehende Duplikate. **Details** zeigt den Vergleich. **Verwerfen** entfernt den Klärfall nach Bestätigung (`Duplikat-Kandidat … wirklich verwerfen?`).
 
-Es gibt keine Schaltfläche, um ein vorhandenes Ergebnis zu überschreiben oder das neue Ergebnis zusätzlich anzulegen. Overwrite und Add sind nicht verfügbar.
+Es gibt kein manuelles Überschreiben oder willkürliches Zusätzlich-Anlegen. Ein eigener Quellbericht steht auch in der Validierung. Nur ein belegbar anderes bestätigtes Gerät kann aus einem qualifizierten Kandidaten eine eigene Messung machen. Ein gleiches oder ungeklärtes Gerät bleibt ein Klärfall; identische PDF-Bytes werden nicht erneut gezählt.
 
 ## Regelwerke und Rule Editor
 

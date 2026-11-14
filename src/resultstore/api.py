@@ -11,6 +11,7 @@ from .sqlite_store import (
     list_result_charges,
     list_result_runs,
 )
+from .report_devices import get_report_device_context, list_pending_report_candidates
 
 __all__ = [
     "LEGACY_REPORT_TIME_WINDOW_S",
@@ -22,4 +23,5 @@ __all__ = [
     "list_result_assays",
     "list_result_charges",
     "list_result_runs",
+    "get_report_device_context", "list_pending_report_candidates",
 ]

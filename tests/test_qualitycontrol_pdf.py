@@ -19,6 +19,29 @@ from src.qualitycontrol.model import content_hash
 from test_qualitycontrol_analysis import manifest, manual, analyzed, reference_context
 from test_qualitycontrol_profiles_lots import fixture, add_run, payload
 
+
+def test_actual_only_profile_prints_usable_statistics_without_inactive_westgard_blocks(tmp_path):
+    from src.qualitycontrol.api import ConfigurationContext, save_profile
+    spec, _ = fixture(tmp_path, count=0)
+    value = {"profile_schema_version": 2, "profile_id": "simple", "name": "Einfaches Profil", "assay_key": "A", "unit": "U",
+             "controls": [{"control_id": "c1", "name": "Level 1", "fields": {"IST": "I1"}}]}
+    profile = save_profile(spec, value, expected_version_id=0, expected_inventory_version_id=1, context=ConfigurationContext("simple-print"))
+    add_run(spec, 1, data={"DATE": "2026-11-14", "I1": "42"})
+    add_run(spec, 2, data={"DATUM": "15.11.2026", "ZEIT": "8:05", "I1": "44"})
+    source = get_lot_sources(spec, profile_version_id=profile["version_id"], kit_lot="L1", device_id="dev")
+    analysis = analyze_lot(source, {})
+    series = analysis.to_dict()["computed_series"][0]
+    assert series["descriptive"]["n"] == 2 and series["descriptive"]["mean"]["value"] == "43"
+    assert len(series["chart"]["points"]) == 2 and all(point["z"] is None for point in series["chart"]["points"])
+    report = render_analysis_pdf(analysis)
+    path = tmp_path / "actual-only.pdf"
+    path.write_bytes(report.pdf_bytes)
+    text = extract_text(path)
+    assert "Mittelwert" in text and "Empirische SD" in text and "43" in text and "Level 1" in text
+    assert "14.11.2026" in text and "08:05" in text and "00:00" not in text
+    assert "Westgard" not in text and "SD-Referenz" not in text and "QMMA" not in text and "Zielwert" not in text
+    assert report.renderer_id == "arev2-qc-pdf-v5"
+
 def _extract_text_worker(source, destination, geometry_destination=None, structure_destination=None):
     import fitz
 
@@ -243,7 +266,7 @@ def test_archived_export_is_exact_and_optional_print_uses_only_stored_model(tmp_
     assert "Erläuterungen zur Auswertung" in printed_text
     if version != "current":
         assert "descriptive" not in model["computed_series"][0] and "Empirische SD" not in printed_text
-        assert "arev2-qc-pdf-v4" in printed_text
+        assert "arev2-qc-pdf-v5" in printed_text
     if version in {"genuine_pre_p2", "synthetic_v1"}:
         assert "Einzelwert-Prozentgrenzen" not in printed_text and "Herstellergrenzen:" not in printed_text
         assert "reference_lines" not in model["computed_series"][0]["chart"]
@@ -326,10 +349,9 @@ def test_stored_two_control_report_does_not_call_empty_selection_or_no_values_no
     pages = [" ".join(span["text"] for span in spans if span["page"] == index) for index in range(report.page_count)]
     first = next(page for page in pages if "Level: Kontrolle 1" in page)
     second = next(page for page in pages if "Level: Kontrolle 2" in page)
-    assert "Westgard: Nicht ausgewählt" in first and "Westgard: Nicht ausgewählt" in second
-    assert "Westgard nicht auswertbar: keine geeigneten Kontrollwerte." in first
-    assert "keine geeigneten Kontrollwerte" not in second
-    assert "Westgard: keine Warnung oder Ablehnung" not in text
+    assert "Westgard" not in first and "Westgard" not in second
+    assert "Anzahl: 0" in first and "Geeignet 0, ausgeschlossen 1" in first
+    assert "Anzahl: 1" in second and "Geeignet 1, ausgeschlossen 0" in second
     assert "QMMA: 1 U" in second and "QMMA: 0" not in first
     assert path.read_bytes() == before["pdf_bytes"] == report.pdf_bytes
     assert before["model"] == analysis.to_dict() and get_report_evidence(spec, lot_version_id=closed["version_id"]) == before
@@ -419,7 +441,7 @@ def test_real_pdf_explains_incompatible_sd_origin_while_qmma_remains_available(t
     readable = " ".join(extract_text(path).split())
     assert "QMMA: 6 B" in readable and "SD gehört zu einer anderen Einheit" in readable
     assert "SD-Bänder und Westgard-Auswertung nicht verfügbar" in readable
-    assert "arev2-qc-analysis-v4" in readable and "Mitte: 91" not in readable
+    assert "arev2-qc-analysis-v5" in readable and "Mitte: 91" not in readable
 
 
 def test_real_pdf_axis_labels_only_actual_measurements_and_handles_date_edge_and_empty(tmp_path: Path):
@@ -462,8 +484,8 @@ def test_real_pdf_preserves_frozen_raw_date_time_counterparts_without_interpreta
         add_run(spec, run_id, data=data)
     revised = time_profile(spec, old)
     source = get_lot_sources(spec, profile_version_id=revised["version_id"], kit_lot="L1")
-    assert source["included_count"] == 1 and source["excluded_count"] == 7
-    assert all(row["measured_at"] is None for row in source["population"] if row["run_id"] != 6)
+    assert source["included_count"] == 8 and source["excluded_count"] == 0
+    assert all(row["measured_at"] is None for row in source["population"] if row["run_id"] in (4, 5, 7, 8))
     for name, captured in (("raw-date-time-fields", source), ("raw-date-only-fields",
             get_lot_sources(spec, profile_version_id=old["version_id"], kit_lot="L1"))):
         analysis = analyze_lot(captured, {})
@@ -491,9 +513,12 @@ def test_real_pdf_preserves_frozen_raw_date_time_counterparts_without_interpreta
             assert rows[6] == "06.01.2026 11:30" and "11:30:00" not in text
             assert "Zeit Rohangabe: 24:00" in text and "Zeit Rohangabe: unlesbare Zeit" in text
             assert "Extrahierte Messzeit fehlt" in text and "Messzeit passt nicht zum festgelegten Format" in text
-            assert len(analysis.to_dict()["computed_series"][0]["chart"]["points"]) == 1
+            series = analysis.to_dict()["computed_series"][0]
+            assert series["descriptive"]["n"] == 8
+            assert len(series["chart"]["points"]) == 4  # Only four sources have a usable calendar date.
         else:
-            assert rows[6] == "06.01.2026" and "11:30" not in text
+            assert rows[6] == "06.01.2026"
+            assert next(point for point in analysis.to_dict()["points"] if point["run_id"] == 6)["measurement"]["time"] is None
         assert (analysis.model_json, analysis.model_sha256, content_hash(captured)) == before
     assert get_lot_sources(spec, profile_version_id=revised["version_id"], kit_lot="L1") == source
 
@@ -655,7 +680,7 @@ def test_p4_eleven_measurements_have_one_complete_primary_sheet_and_spaced_true_
     assert 'Digitaler Nachweis' in ' '.join(text.split())
     assert 'Vollständige Regelbefunde' not in text and 'Modell SHA-256' not in text
     assert all(word not in text for word in ('Labor Muster','Musterstraße','Kalibration','stored-run:'))
-    assert report.renderer_id == 'arev2-qc-pdf-v4' and analysis.model_json == QCAnalysis.freeze(model).model_json
+    assert report.renderer_id == 'arev2-qc-pdf-v5' and analysis.model_json == QCAnalysis.freeze(model).model_json
 
 
 def test_p4_no_explicit_run_field_never_labels_internal_identity_as_an_analytical_run(tmp_path):

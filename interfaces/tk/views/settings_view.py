@@ -171,13 +171,14 @@ class SettingsView(ttk.Frame):
     def _select_qc_row(self, _event=None) -> None:
         row = self.selected_qc_configuration()
         self._qc_edit.configure(state="normal" if row else "disabled")
+        self._qc_edit.configure(text="Entwurf fortsetzen" if row and row.draft_id else "Einrichten / Bearbeiten")
         if row:
             self._qc_detail.configure(text="; ".join(row.issues) if row.issues else
-                f"{row.assay_name} [{row.assay_key}] · {row.status}" + (f" · Fassung {row.profile_version_id}" if row.profile_id else " · Gerät und Level jetzt einrichten."))
+                f"{row.assay_name} [{row.assay_key}] · {row.status}" + (f" · Fassung {row.profile_version_id}" if row.profile_id else " · Level und IST-Feld wählen; ein Gerät ist für das Profil optional."))
 
     def render_qc_configuration(self, state: QCConfigurationState) -> None:
         previous = self.selected_qc_configuration()
-        identity = (previous.assay_key, previous.device_id, previous.profile_id) if previous else None
+        identity = (previous.assay_key, previous.device_id, previous.profile_id, previous.draft_id) if previous else None
         self._qc_state = state
         self._qc_rows.clear()
         self._qc_tree.delete(*self._qc_tree.get_children())
@@ -187,9 +188,9 @@ class SettingsView(ttk.Frame):
             identifier = str(index)
             self._qc_rows[identifier] = row
             self._qc_tree.insert("", "end", iid=identifier, values=(f"{row.assay_name} [{row.assay_key}]",
-                f"{row.device_name} [{row.device_id}]" if row.device_id else "Noch keinem Gerät zugeordnet",
-                f"{row.profile_name} [{row.profile_id}]" if row.profile_id else "Noch kein Profil", row.level_count, row.status))
-            if identity == (row.assay_key, row.device_id, row.profile_id):
+                row.device_name if row.device_id else "Alle Geräte des Assays" if row.profile_id else "Noch kein Profil",
+                row.profile_name if row.profile_id else "Noch kein Profil", row.level_count, row.status))
+            if identity == (row.assay_key, row.device_id, row.profile_id, row.draft_id):
                 selected = identifier
         if self._qc_rows:
             self._qc_tree.selection_set(selected or next(iter(self._qc_rows)))

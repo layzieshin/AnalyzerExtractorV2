@@ -11,6 +11,7 @@ This list tracks operational risks for the Tkinter/standalone test phase. It is 
 | SQLite runs after Excel in `both` mode | Excel can be OK while SQLite write fails | Use `rules_matrix_main.py --mode e2e` for release checks | P2 |
 | Dedupe fallback | Most rulesets rely on implicit fallback fields | Define explicit dedupe policy per ruleset | P1 |
 | Rules are structurally green but functionally uneven | `rules_validate_main.py` passes while extraction matrix has yellow/red rows | Use `rules_matrix_main.py --mode preview` as functional check | P0 |
+| Original `(661f)` PDF validation start anchor | `VALIDATION` requires the beginning of the extracted block, while the splitter starts that block with the assay name; a complete native PDF import is not qualified | Keep this rule unchanged; inspect the original rule/representative source separately. Legacy identity has component-only qualification, real two-assay delivery checks use original ANA/DFS70 | P1 |
 | Sample coverage incomplete | Active assays `(3ccc)`, `(6a74)`, `(661f)` are not detected in current sample PDFs | Add representative PDFs or mark coverage gap in baseline | P0 |
 
 Recommended gate during stabilization:

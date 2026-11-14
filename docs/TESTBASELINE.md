@@ -1,15 +1,27 @@
 # AREV2 Test Baseline
 
-Date: 2026-11-13 (A1 integrated source release 2.1.0)
+Date: 2026-11-14 (2.2.0 UX/device work; Windows release qualification pending)
 
 Purpose: current verified source baseline with preserved historical phase evidence.
-The current release gate is A1 below; older gate labels, build results and pending
-review statements describe their recorded checkpoints and do not qualify 2.1.0.
+The current 2.2.0 gate is below; older gate labels, build results and pending
+review statements describe their recorded checkpoints and do not qualify 2.2.0.
 The 2026-07-09 AP-1 baseline (`74 passed`) is obsolete.
 
-## Current rebuild gates (2026-11-13)
+## 2.2.0 current qualification — Windows pending (2026-11-14)
 
-### A1 integrated source release 2.1.0: GATE_PASSED (2026-11-13)
+The current 2.2.0 source introduces optional assay-wide configuration, retained drafts, explicit whole-report device assignments, separate human revalidation and device-scoped QC. Every fresh capture, including an untouched v1 profile, uses feature-specific v3 source eligibility while preserving its explicit date/time/numeric settings and stored profile bytes. Rules JSON and the extraction contract remain unchanged. The existing 2.1.0 checkpoints below are historical evidence for that version, not a claim that they qualify the new source.
+
+Executed current checkpoints:
+
+- 235 focused persistence, reanalysis, ResultsController, QC profile/lot and architecture cases passed (8.79 s); this includes the single original-rule source scenario with materialization, third-source same-device duplicates, mixed reports, stale-state rejection, B reanalysis without moving A's raw alias, correction/revalidation and local chronology uncertainty.
+- Final v1-live/profile/analysis/ResultsController regression and the four affected real PDF cases: **241 passed, 0 failed/errors/skipped in 11.05 s**. Unchanged v1 configuration retains explicit time/numeric choices and profile bytes; missing time/SOLL/limits no longer removes valid IST values from descriptive statistics. Date-dependent charts retain their own valid-date subset, and explained PDFs preserve separate temporal reasons and raw date/time text.
+- A clearly synthetic original `(661f)` extractor/DbWriter component case passed. It proves explicit legacy identity and qualified claims without inventing DONE/PDF evidence; native import for that original rule is not claimed.
+- The real Linux desktop executed the new connected first-use scenario: explicitly chosen nonexistent SQLite file → neutral IST profile with visible unit → inline name-only A/B devices → original ANA/DFS70 PDFs → four individual human validations → per-device QK n=1 with means 101/103. The existing v1-profile editor roundtrip to optional v2 also passed. The existing adapter checks now use the canonical validation route: **85 native cases passed, zero failures/errors/skips in 3.35 s**. Independent manual desktop review passed initial review, inline A/B/C/D creation, whole-report correction, separate revalidation, friendly effective-device display, global badge and return to all open reports. The complete Windows suite/build is still pending.
+- Independently, a genuine archived v4 analysis/PDF created under unchanged 2.1.0 baseline code remained readable and its original PDF exported byte-exact under the new code; the source DB bytes and mtime were unchanged. Final independent geometry checks found 11 rows on one page, 60 rows on two pages and two levels of 30 rows on three pages, with zero detected overflow.
+
+Release qualification requires the complete Windows suite with zero failures/errors/skips, the connected native Tk scenario, source/bundled rules integrity, canonical onedir verification/frozen smoke, and startup/normal close of the extracted versioned EXE. The workflow records the actual suite count, commit, input fingerprint, dependencies, JUnit and desktop evidence. Feature runs publish artifacts only; the successful reviewed master build creates v2.2.0 on its exact commit and publishes verified assets. No fixed old test/input count substitutes for these gates.
+
+### Historical A1 integrated source release 2.1.0: GATE_PASSED (2026-11-13)
 
 Root issued **GO for P4+A1** on source metadata 2.1.0 after the independent
 standard-print review and one integrated native full-suite run: **1418 passed,

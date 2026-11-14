@@ -27,6 +27,11 @@ MAX_METADATA_BYTES = 4096
 _RENDER_SLOT = threading.Lock()
 
 _REASONS = {
+    "unit_unconfirmed": "Einheit im QK-Profil ergänzen oder ausdrücklich dimensionslos wählen",
+    "target_unavailable": "Kein geeigneter SOLL für diese Bewertung",
+    "measurement_date_missing": "Messdatum nicht erfasst",
+    "measurement_date_conflict": "Datumsquellen widersprechen sich",
+    "measurement_time_conflict": "Zeitquellen widersprechen sich",
     "sd_origin_unavailable": "Herkunft der SD nicht ausreichend belegt",
     "sd_unit_incompatible": "SD gehört zu einer anderen Einheit",
     "sd_parameter_incompatible": "SD gehört zu einer anderen Messwertdefinition",
@@ -320,12 +325,23 @@ class _CompactPDFWriter(_PDFWriter):
         self.model = analysis.to_dict()
         self.source = self.model["source_manifest"]
         self.profile = self.source["profile_snapshot"]
+        self.modern = self.model["analysis_model_version"] >= 4
         self.device = next((row for row in self.source["inventory_snapshot"]["devices"] if row["device_id"] == self.source["device_id"]), {})
         self.font, self.fallback_font = fitz.Font("tiro"), fitz.Font("cjk")
         self.heading_font = fitz.Font("tibo")
         self._glyph_widths, self._glyph_fonts = {}, {}
         self.series, self.page, self.record_context = None, None, ""
         self.kind, self.y, self.section = "primary", 0.0, ""
+
+    def selected_feature(self, kind):
+        if not self.modern:
+            return True
+        control = next(row for row in self.profile["controls"] if row["control_id"] == self.series["control_id"])
+        fields = control["fields"]
+        return {"target": bool(fields.get("SOLL")), "manufacturer": bool(fields.get("MIN") and fields.get("MAX")),
+            "single_value": bool(self.profile.get("single_value_limits_enabled")),
+            "sd": bool(self.series["sd"]["available"] or self.model["sd_references"].get(self.series["control_id"]) or self.profile["enabled_rules"]),
+            "westgard": bool(self.profile["enabled_rules"])}[kind]
 
     @staticmethod
     def number(value):
@@ -364,8 +380,10 @@ class _CompactPDFWriter(_PDFWriter):
              "SN: " + str(self.device.get("serial_number") or "–"), "LNR: " + str(self.device.get("lnr") or "–") + " · EVA: " + str(self.device.get("eva") or "–")],
             ["Assay: " + str(self.model.get("presentation", {}).get("assay_name") or "Assayname fehlt"), "Assay-ID: " + self.source["assay_key"],
              "Level: " + self.series["control_name"], "Kit-/Reagenzcharge: " + self.source["kit_lot"]],
-            ["Zeitraum: " + date_span, "Einheit: " + self.series["unit"], "SOLL: " + self.number(self.series["qmma"].get("target")),
-             "Hersteller: " + bound("manufacturer"), "Einzelwert: " + bound("single_value")]]
+            ["Zeitraum: " + date_span, "Einheit: " + self.series["unit"],
+             *(["SOLL: " + self.number(self.series["qmma"].get("target"))] if self.selected_feature("target") else []),
+             *(["Hersteller: " + bound("manufacturer")] if self.selected_feature("manufacturer") else []),
+             *(["Einzelwert: " + bound("single_value")] if self.selected_feature("single_value") else [])]]
 
     def primary_header_height(self):
         return 17 + max(len(self.wrap("\n".join(values), 166, 8))*10 for values in self.primary_columns()) + 7
@@ -482,18 +500,25 @@ class _CompactPDFWriter(_PDFWriter):
                 self.draw_text(469,legend_y,text,size=6.8)
                 legend_y+=8.5
             legend_y+=4
-        legend("Messwerte","Punktstatus: Westgard")
-        legend("SOLL",self.number(chart.get("target")),"target")
+        legend("Messwerte","Punktstatus: Westgard" if self.selected_feature("westgard") else "Bestätigte Einzelmessungen")
+        if self.selected_feature("target"):
+            legend("SOLL",self.number(chart.get("target")),"target")
         legend("Mittelwert",self.metric(self.series["descriptive"]["mean"]),"mean")
         for kind,label in (("manufacturer","Herstellergrenzen"),("single_value","Einzelwertgrenzen")):
+            if not self.selected_feature(kind):
+                continue
             value=self.series["limits"][kind]
             detail=(self.number(value["lower"])+" / "+self.number(value["upper"])) if value["available"] else "nicht verfügbar"
             if kind=="single_value" and value.get("percent") is not None:
                 detail += " ("+value["percent"]+" %)"
             legend(label,detail,kind)
         sd = self.series["sd"]
-        legend("SD-Referenz",("Mitte: "+self.number(sd["center"])+"; SD "+self.number(sd["sd"])+"\n±1 / ±2 / ±3 SD") if sd["available"] else "nicht verfügbar","sd")
-        for text in self.wrap("Ring: Grenzbefund; Quadrat: Ablehnung; Dreieck: Warnung", 110, 6.8):
+        if self.selected_feature("sd"):
+            legend("SD-Referenz",("Mitte: "+self.number(sd["center"])+"; SD "+self.number(sd["sd"])+"\n±1 / ±2 / ±3 SD") if sd["available"] else "nicht verfügbar","sd")
+        marks = "Ring: Grenzbefund" if self.selected_feature("manufacturer") or self.selected_feature("single_value") else ""
+        if self.selected_feature("westgard"):
+            marks += "; Quadrat: Ablehnung; Dreieck: Warnung"
+        for text in self.wrap(marks, 110, 6.8) if marks else []:
             self.draw_text(448, legend_y, text, size=6.8)
             legend_y += 8.5
         if legend_y > top+232:
@@ -508,6 +533,8 @@ class _CompactPDFWriter(_PDFWriter):
             "QMMA relativ: "+(self.number(qmma["relative_percent"])+" %" if qmma["relative_percent"] is not None else "nicht verfügbar"),
             "QMMA-Grenze (relativ): "+(str(self.profile["relative_limit_percent"])+" %" if self.profile.get("relative_limit_percent") is not None else "nicht konfiguriert"),
             "QMMA-Bewertung: "+_STATUSES[qmma["limit_status"]]]
+        if not self.selected_feature("target"):
+            right = []
         notes = []
         summary=self.series["findings_summary"]
         sd=self.series["sd"]
@@ -518,7 +545,9 @@ class _CompactPDFWriter(_PDFWriter):
             westgard = "Westgard nicht vollständig verfügbar"
         else:
             westgard = "Westgard: "+_STATUSES[summary["westgard_status"]]
-        notes.append(sd_text+"; "+westgard+".")
+        selected_notes = ([sd_text] if self.selected_feature("sd") else []) + ([westgard] if self.selected_feature("westgard") else [])
+        if selected_notes:
+            notes.append("; ".join(selected_notes) + ".")
         if summary["manufacturer_exceeded_count"] or summary["single_value_exceeded_count"]:
             notes.append(f"Einzelwerte: Herstellergrenze {summary['manufacturer_exceeded_count']} × überschritten; Einzelwert-Prozentgrenze {summary['single_value_exceeded_count']} × überschritten.")
         return left, right, notes
@@ -563,6 +592,9 @@ class _CompactPDFWriter(_PDFWriter):
         self.kind="measurement"
         widths=(25,104,40,64,64,64,64,98)
         headings=("Pos","Datum / Zeit","Lauf","Messwert","Zielwert","Abw. abs.","Abw. %","Anwender")
+        if not self.selected_feature("target"):
+            widths = (25, 149, 50, 119, 180)
+            headings = ("Pos", "Datum / Zeit", "Lauf", "Messwert", "Anwender")
         notes = self.point_notes(points)
         footnote = f"Geeignet {self.series['included_count']}, ausgeschlossen {self.series['excluded_count']}; Datum ungeklärt {self.series['period']['unknown_date_count']}. * Nicht ausgewertet; … gekürzte Angabe."
         trailing_height = 6+sum(len(self.wrap(note, 523, 7))*10.5+4 for note in [footnote, *notes])+60
@@ -590,6 +622,8 @@ class _CompactPDFWriter(_PDFWriter):
                 self.short(point["raw"].get("IST")),self.short(point["raw"].get("SOLL")),
                 self.number(deviation["absolute"]["value"]) if deviation["absolute"]["available"] else "–",
                 self.number(deviation["relative_percent"]["value"]) if deviation["relative_percent"]["available"] else "–",self.short(operator,28))
+            if not self.selected_feature("target"):
+                row = (row[0], row[1], row[2], row[3], row[-1])
             cells=[self.wrap(value,width-6,7.5) for value,width in zip(row,widths)]
             height=max(14,max(map(len,cells))*9+3)
             remaining = (len(points)-index)*height+trailing_height if len(points)-index <= 3 else height
@@ -658,8 +692,9 @@ class _CompactPDFWriter(_PDFWriter):
         self.new_page("evidence")
         self.paragraph("Validierte Kit-Chargen-Auswertung · Eignung und menschliche Validierung sind getrennte Nachweise.", size=8)
         sd = self.series["sd"]
-        self.paragraph("SD-Referenz: "+(_reference_description(sd) if sd["available"] else _reason(sd["reason"]))+
-            ("." if sd["available"] else ". SD-Bänder und Westgard-Auswertung nicht verfügbar."), size=7.5)
+        if self.selected_feature("sd"):
+            self.paragraph("SD-Referenz: "+(_reference_description(sd) if sd["available"] else _reason(sd["reason"]))+
+                ("." if sd["available"] or not self.selected_feature("westgard") else ". SD-Bänder und Westgard-Auswertung nicht verfügbar."), size=7.5)
         for key in ("mean", "sample_sd", "cv_percent"):
             metric = self.series["descriptive"][key]
             if not metric["available"]:
@@ -708,7 +743,12 @@ class _CompactPDFWriter(_PDFWriter):
             assessments = "Eignung: "+("Berücksichtigt" if point["eligible"] else "Ausgeschlossen")
             if point["reasons"]:
                 assessments += " · "+"; ".join(_reason(reason) for reason in point["reasons"])
+            temporal_reasons = point.get("feature_reasons", {}).get("time", []) if self.modern else []
+            if temporal_reasons:
+                assessments += "; Zeitnachweis: " + "; ".join(_reason(reason) for reason in dict.fromkeys(temporal_reasons))
             for kind, label in (("manufacturer", "Hersteller"), ("single_value", "Einzelwert-Prozentgrenze")):
+                if not self.selected_feature(kind):
+                    continue
                 finding = point["limit_findings"][kind]
                 assessments += f"; {label}: {_STATUSES[finding['status']]}"
                 if finding["reason"]:
@@ -728,7 +768,8 @@ class _CompactPDFWriter(_PDFWriter):
             date_time = inline(raw(measured["date_raw"])+" / "+raw(measured["time_raw"]), 119, 2, "Datum/Zeit Rohangabe", position)
             for field, label, reason in (("date_raw", "Datum Rohangabe", "measurement_date_invalid"),
                     ("time_raw", "Zeit Rohangabe", "measurement_time_invalid")):
-                if reason in point["reasons"] and measured[field] is not None:
+                missing_interpretation = not measured.get("date" if field == "date_raw" else "time")
+                if (reason in point["reasons"] or self.modern and (reason in temporal_reasons or missing_interpretation)) and measured[field] is not None:
                     additions.append((position, label, raw(measured[field])))
             run_value = inline(run, 100, 1, "Analysenlauf (extrahiert)", position) if run is not None else "–"
             selection = point.get("selection_id") if point.get("selection_id") is not None else "Original"
@@ -821,7 +862,7 @@ def _render_compact_model(fitz, analysis, *, include_explanations=False):
 
 
 def _render_model(fitz, analysis: QCAnalysis, *, include_explanations=False):
-    if analysis.to_dict()["analysis_model_version"] == 3:
+    if analysis.to_dict()["analysis_model_version"] in (3, 4):
         return _render_compact_model(fitz,analysis,include_explanations=include_explanations)
     return _render_legacy_model(fitz,analysis,include_explanations=include_explanations)
 

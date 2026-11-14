@@ -1,0 +1,467 @@
+name: Build Windows v2.2.0
+run-name: Windows v2.2.0 · ${{ github.ref_name }} · ${{ github.sha }}
+
+on:
+  push:
+    branches:
+      - feature/ux-first-use-devices
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+      PYTHONUTF8: '1'
+      PYTEST_ADDOPTS: --junitxml=../windows-tests.xml --basetemp=../pytest-windows-build
+      SOURCE_COMMIT: ${{ github.sha }}
+      RELEASE_ARCHIVE: AnalyzerResultExtractorV2-v2.2.0-windows-x64.zip
+
+    steps:
+      - name: Preserve reviewed source bytes
+        run: git config --global core.autocrlf false
+
+      - name: Check out the exact triggering source commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: product
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python 3.12 x64
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+
+      - name: Isolate build dependencies from runner packages
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP 'arev2-build-venv'
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Join-Path $venv 'Scripts' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "VIRTUAL_ENV=$venv" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install declared dependencies and qualified build versions
+        working-directory: product
+        shell: python
+        run: |
+          import pathlib, subprocess, sys, tomllib
+          project = tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']
+          assert project['version'] == '2.2.0', project['version']
+          subprocess.run([
+              sys.executable, '-m', 'pip', 'install',
+              *project['dependencies'],
+              'PyMuPDF==1.26.6', 'openpyxl==3.1.5', 'pytest==9.2.0',
+              'PyInstaller==6.18.0',
+          ], check=True)
+
+      - name: Verify source commit, clean checkout and qualified input bytes
+        working-directory: product
+        shell: python
+        run: |
+          import os, pathlib, platform, runpy, subprocess
+          assert platform.system() == 'Windows' and platform.machine().upper() == 'AMD64'
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert head == os.environ['SOURCE_COMMIT'], head
+          status = subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=normal'], text=True)
+          assert not status.strip(), status
+          builder = runpy.run_path(str(pathlib.Path('packaging/build_onedir.py').resolve()))
+          inputs = builder['_product_inputs']()
+          fingerprint = builder['_fingerprint'](inputs)
+          assert inputs
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as environment:
+              environment.write(f'SOURCE_FINGERPRINT={fingerprint}\n')
+          print(f'Exact source {head}: {len(inputs)} inputs, {fingerprint}')
+
+      - name: Set the Windows runner desktop to 1920 by 1080
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue)) { Import-Module ServerCore }
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+
+      - name: Verify real Tk desktop and requested 1440 by 900 window size
+        shell: python
+        run: |
+          import time, tkinter as tk
+          root = tk.Tk()
+          try:
+              root.title('Windows build desktop qualification')
+              root.geometry('1440x900+0+0')
+              deadline = time.monotonic() + 15
+              while True:
+                  root.update()
+                  screen = (root.winfo_screenwidth(), root.winfo_screenheight())
+                  window = (root.winfo_width(), root.winfo_height())
+                  if screen[0] >= 1920 and screen[1] >= 1080 and window[0] >= 1400 and window[1] >= 860:
+                      break
+                  assert time.monotonic() < deadline, f'Desktop/window too small: screen={screen}, actual window={window}, requested=1440x900'
+                  time.sleep(0.25)
+              print(f'Qualified desktop screen={screen}, actual Tk window={window}')
+          finally:
+              root.destroy()
+
+      - name: Run canonical tests, rule checks, onedir build and frozen EXE smoke
+        working-directory: product
+        run: python packaging/build_onedir.py
+
+      - name: Verify and stage the canonical ZIP and build metadata
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, shutil, zipfile
+          workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          dist = workspace / 'product/packaging/dist_output'
+          app = dist / 'AnalyzerResultExtractorV2'
+          info_bytes = (app / 'build-info.json').read_bytes()
+          info = json.loads(info_bytes)
+          assert info['version'] == '2.2.0', info
+          assert info['base_commit'] == os.environ['SOURCE_COMMIT'], info['base_commit']
+          assert info['dirty_snapshot'] is False, info['dirty_snapshot']
+          assert info['source_identity'] == 'base-commit', info['source_identity']
+          assert info['source_tree_fingerprint'] == os.environ['SOURCE_FINGERPRINT']
+          assert info['platform'] == 'win32-AMD64', info['platform']
+          source_zip = dist / 'AnalyzerResultExtractorV2.zip'
+          prefix = 'AnalyzerResultExtractorV2/'
+          with zipfile.ZipFile(source_zip) as archive:
+              assert archive.testzip() is None, 'ZIP CRC check failed'
+              names = archive.namelist()
+              assert all(n.startswith(prefix) and '..' not in pathlib.PurePosixPath(n).parts for n in names)
+              assert archive.read(prefix + 'build-info.json') == info_bytes
+              exe = archive.read(prefix + 'AnalyzerResultExtractorV2.exe')
+              assert exe[:2] == b'MZ', 'Missing Windows PE executable'
+              assert archive.getinfo(prefix + '_internal/python312.dll').file_size > 0
+          delivery = workspace / 'delivery'
+          delivery.mkdir()
+          shutil.copyfile(source_zip, delivery / os.environ['RELEASE_ARCHIVE'])
+          (delivery / 'build-info.json').write_bytes(info_bytes)
+          shutil.copyfile(workspace / 'windows-tests.xml', delivery / 'windows-tests.xml')
+          shutil.copyfile(workspace / 'product/docs/RELEASE_NOTES_2_2_0.md', delivery / 'release-notes.md')
+          print(f'Staged ZIP SHA256: {hashlib.sha256(source_zip.read_bytes()).hexdigest()}')
+
+      - name: Start the extracted Windows EXE and capture its versioned window
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $delivery = Join-Path $env:GITHUB_WORKSPACE 'delivery'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'arev2-windows-desktop-smoke'
+          Expand-Archive -LiteralPath (Join-Path $delivery $env:RELEASE_ARCHIVE) -DestinationPath $smokeRoot
+          $app = Join-Path $smokeRoot 'AnalyzerResultExtractorV2'
+          $exe = Join-Path $app 'AnalyzerResultExtractorV2.exe'
+          $env:ARE_HOME = $app
+          Remove-Item Env:ARE_SMOKE_EXIT -ErrorAction SilentlyContinue
+          Remove-Item Env:ARE_START_RULE_EDITOR -ErrorAction SilentlyContinue
+          Remove-Item Env:ARE_LEGACY_UI -ErrorAction SilentlyContinue
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class WindowCapture {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct RECT { public int Left, Top, Right, Bottom; }
+              [DllImport("user32.dll")]
+              public static extern bool GetWindowRect(IntPtr window, out RECT rect);
+              [DllImport("user32.dll")]
+              public static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr window);
+              [DllImport("user32.dll")]
+              public static extern bool ShowWindow(IntPtr window, int command);
+          }
+          '@
+          Add-Type -AssemblyName System.Drawing
+          function Test-ContentVariation([System.Drawing.Bitmap]$Image) {
+            $colors = [System.Collections.Generic.HashSet[int]]::new()
+            $stepX = [Math]::Max(1, [int]($Image.Width / 12))
+            $stepY = [Math]::Max(1, [int]($Image.Height / 12))
+            for ($x = 30; $x -lt $Image.Width - 30; $x += $stepX) {
+              for ($y = 80; $y -lt $Image.Height - 30; $y += $stepY) {
+                [void]$colors.Add($Image.GetPixel($x, $y).ToArgb())
+              }
+            }
+            return $colors.Count -ge 3
+          }
+          $process = Start-Process -FilePath $exe -WorkingDirectory $app -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(45)
+            do {
+              Start-Sleep -Milliseconds 250
+              $process.Refresh()
+              if ($process.HasExited) { throw "EXE exited before showing a window: $($process.ExitCode)" }
+              $windowReady = $process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -like '*Version 2.2.0*'
+            } until ($windowReady -or (Get-Date) -ge $deadline)
+            if (-not $windowReady) { throw 'No version 2.2.0 application window appeared within 45 seconds' }
+            Start-Sleep -Seconds 2
+            $process.Refresh()
+            $title = $process.MainWindowTitle
+            [void][WindowCapture]::ShowWindow($process.MainWindowHandle, 9)
+            [void][WindowCapture]::SetForegroundWindow($process.MainWindowHandle)
+            Start-Sleep -Milliseconds 500
+            $rect = [WindowCapture+RECT]::new()
+            if (-not [WindowCapture]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) { throw 'GetWindowRect failed' }
+            $width = $rect.Right - $rect.Left
+            $height = $rect.Bottom - $rect.Top
+            if ($width -le 0 -or $height -le 0) { throw 'Application window has no area' }
+            $bitmap = [System.Drawing.Bitmap]::new($width, $height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $dc = $graphics.GetHdc()
+            try { $printed = [WindowCapture]::PrintWindow($process.MainWindowHandle, $dc, 2) }
+            finally { $graphics.ReleaseHdc($dc); $graphics.Dispose() }
+            $captureMethod = 'PrintWindow'
+            if (-not $printed -or -not (Test-ContentVariation $bitmap)) {
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              try { $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size) }
+              finally { $graphics.Dispose() }
+              $captureMethod = 'CopyFromScreen after foreground activation'
+            }
+            if (-not (Test-ContentVariation $bitmap)) { $bitmap.Dispose(); throw 'Window capture has no meaningful interior pixel variation' }
+            try { $bitmap.Save((Join-Path $delivery 'windows-desktop-smoke.png'), [System.Drawing.Imaging.ImageFormat]::Png) }
+            finally { $bitmap.Dispose() }
+            if (-not $process.CloseMainWindow()) { throw 'Could not request normal application close' }
+            if (-not $process.WaitForExit(15000)) { throw 'Application did not close normally within 15 seconds' }
+            if ($process.ExitCode -ne 0) { throw "Application close returned $($process.ExitCode)" }
+            @{
+              qualification = 'Windows hosted-runner startup and normal-close smoke'
+              source = 'Extracted release ZIP'
+              title = $title
+              window_width = $width
+              window_height = $height
+              exit_code = $process.ExitCode
+              print_window_returned_success = $printed
+              capture_method = $captureMethod
+              interior_pixel_variation_verified = $true
+              screenshot = 'windows-desktop-smoke.png'
+              screenshot_note = 'Window interior has at least three sampled colors; inspect image separately for rendering quality'
+            } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM (Join-Path $delivery 'windows-desktop-smoke.json')
+          }
+          finally {
+            $process.Refresh()
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+
+      - name: Write external provenance manifest and SHA256SUMS
+        shell: python
+        run: |
+          import datetime, hashlib, json, os, pathlib, platform, xml.etree.ElementTree as ET
+          delivery = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'delivery'
+          info = json.loads((delivery / 'build-info.json').read_bytes())
+          suites = list(ET.parse(delivery / 'windows-tests.xml').getroot().iter('testsuite'))
+          junit = {key: sum(int(suite.attrib.get(key, 0)) for suite in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
+          junit['passed'] = junit['tests'] - junit['failures'] - junit['errors'] - junit['skipped']
+          assert junit['tests'] > 0 and junit['failures'] == junit['errors'] == junit['skipped'] == 0, junit
+          native_name = 'test_native_first_use_original_reports_are_validated_and_evaluated_per_device'
+          native = [case for case in ET.parse(delivery / 'windows-tests.xml').getroot().iter('testcase') if case.attrib.get('name') == native_name]
+          assert len(native) == 1 and not list(native[0]), 'The real native first-use scenario did not pass'
+          files = [
+              {'name': p.name, 'bytes': p.stat().st_size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+              for p in sorted(delivery.iterdir()) if p.is_file()
+          ]
+          manifest = {
+              'product': info['product'], 'version': info['version'],
+              'target': 'Windows x64', 'source_commit': info['base_commit'],
+              'source_tree_fingerprint': info['source_tree_fingerprint'],
+              'source_input_count': len(info['inputs']), 'dirty_snapshot': info['dirty_snapshot'],
+              'built_at_utc': info['built_at_utc'],
+              'qualified_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'workflow_commit': os.environ['GITHUB_SHA'], 'workflow_ref': os.environ['GITHUB_REF'],
+              'actions_run': f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              'actions_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'runner_os': os.environ['RUNNER_OS'], 'runner_arch': os.environ['RUNNER_ARCH'],
+              'runner_image': os.environ.get('ImageOS'), 'runner_image_version': os.environ.get('ImageVersion'),
+              'windows': platform.platform(), 'python': platform.python_version(),
+              'canonical_builder': 'packaging/build_onedir.py',
+              'canonical_checks': ['full pytest suite', 'source and bundled rule integrity', 'bundle verification', 'frozen EXE startup smoke', 'canonical ZIP creation'],
+              'windows_pytest': junit,
+              'windows_pytest_junit': 'windows-tests.xml',
+              'native_user_scenario': native_name,
+              'native_user_actions': ['nonexistent chosen SQLite store', 'neutral actual-only profile and visible unit', 'inline name-only devices', 'two original-rule PDF reports and separate assay validations', 'per-device QC n=1 and means 101/103'],
+              'desktop_smoke': json.loads((delivery / 'windows-desktop-smoke.json').read_bytes()),
+              'files': files,
+          }
+          (delivery / 'windows-build-manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+          sums = ''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(delivery.iterdir()) if p.is_file())
+          (delivery / 'SHA256SUMS').write_text(sums, encoding='utf-8')
+          print(sums)
+
+      - name: Upload verified Windows release files
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: AnalyzerResultExtractorV2-v2.2.0-windows-x64
+          path: delivery/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish-windows-release:
+    name: Publish the verified master build
+    needs: windows-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Download the exact successful Windows artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: AnalyzerResultExtractorV2-v2.2.0-windows-x64
+          path: delivery
+
+      - name: Verify source and assets, create the exact tag, then publish without replacing files
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, subprocess, tempfile, xml.etree.ElementTree as ET, zipfile
+          delivery = pathlib.Path('delivery')
+          repository = os.environ['GITHUB_REPOSITORY']
+          expected = os.environ['EXPECTED_COMMIT']
+          version, tag = '2.2.0', 'v2.2.0'
+          archive_name = 'AnalyzerResultExtractorV2-v2.2.0-windows-x64.zip'
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          sums = {}
+          for line in (delivery / 'SHA256SUMS').read_text(encoding='utf-8').splitlines():
+              sha, name = line.split('  ', 1)
+              assert pathlib.PurePosixPath(name).name == name and name not in sums
+              assert len(sha) == 64 and digest(delivery / name) == sha, name
+              sums[name] = sha
+          actual = {path.name for path in delivery.iterdir() if path.is_file()}
+          assert actual == set(sums) | {'SHA256SUMS'}
+          assert {archive_name, 'build-info.json', 'windows-build-manifest.json', 'windows-tests.xml', 'windows-desktop-smoke.json', 'windows-desktop-smoke.png', 'release-notes.md'} <= set(sums)
+          info = json.loads((delivery / 'build-info.json').read_bytes())
+          assert info['version'] == version and info['base_commit'] == expected
+          assert info['source_identity'] == 'base-commit' and info['dirty_snapshot'] is False
+          assert info['platform'] == 'win32-AMD64' and info['inputs']
+          manifest = json.loads((delivery / 'windows-build-manifest.json').read_bytes())
+          assert manifest['version'] == version and manifest['source_commit'] == manifest['workflow_commit'] == expected
+          assert manifest['workflow_ref'] == 'refs/heads/master' and manifest['dirty_snapshot'] is False
+          assert manifest['source_tree_fingerprint'] == info['source_tree_fingerprint']
+          assert manifest['source_input_count'] == len(info['inputs'])
+          for item in manifest['files']:
+              assert item['name'] in sums and item['sha256'] == sums[item['name']]
+              assert item['bytes'] == (delivery / item['name']).stat().st_size
+          with zipfile.ZipFile(delivery / archive_name) as archive:
+              assert archive.testzip() is None
+              prefix = 'AnalyzerResultExtractorV2/'
+              assert all(name.startswith(prefix) and '..' not in pathlib.PurePosixPath(name).parts for name in archive.namelist())
+              assert archive.read(prefix + 'build-info.json') == (delivery / 'build-info.json').read_bytes()
+              assert archive.read(prefix + 'AnalyzerResultExtractorV2.exe')[:2] == b'MZ'
+              assert archive.getinfo(prefix + '_internal/python312.dll').file_size > 0
+          tree = ET.parse(delivery / 'windows-tests.xml').getroot()
+          junit = {key: sum(int(suite.attrib.get(key, 0)) for suite in tree.iter('testsuite')) for key in ('tests', 'failures', 'errors', 'skipped')}
+          junit['passed'] = junit['tests'] - junit['failures'] - junit['errors'] - junit['skipped']
+          assert junit['tests'] > 0 and junit['failures'] == junit['errors'] == junit['skipped'] == 0
+          assert junit == manifest['windows_pytest']
+          native_name = 'test_native_first_use_original_reports_are_validated_and_evaluated_per_device'
+          native = [case for case in tree.iter('testcase') if case.attrib.get('name') == native_name]
+          assert len(native) == 1 and not list(native[0]) and manifest['native_user_scenario'] == native_name
+          smoke = json.loads((delivery / 'windows-desktop-smoke.json').read_bytes())
+          assert smoke['exit_code'] == 0 and 'Version 2.2.0' in smoke['title']
+          assert smoke['interior_pixel_variation_verified'] is True
+          assert smoke == manifest['desktop_smoke']
+          def gh(*args, binary=False, missing=False):
+              result = subprocess.run(['gh', *args], capture_output=True)
+              if result.returncode:
+                  if missing and b'HTTP 404' in result.stderr:
+                      return None
+                  raise RuntimeError(result.stderr.decode('utf-8', 'replace'))
+              return result.stdout if binary else json.loads(result.stdout)
+          def api(endpoint, **kwargs):
+              return gh('api', f'repos/{repository}/{endpoint}', **kwargs)
+          # No workflow on a feature branch can enter this job. Verify source
+          # identity and every asset before the first external mutation.
+          assert api('commits/' + expected)['sha'] == expected
+          reference = api('git/ref/tags/' + tag, missing=True)
+          if reference is None:
+              gh('api', '--method', 'POST', f'repos/{repository}/git/refs', '-f', 'ref=refs/tags/' + tag, '-f', 'sha=' + expected)
+          reference = api('git/ref/tags/' + tag)['object']
+          while reference['type'] == 'tag':
+              reference = api('git/tags/' + reference['sha'])['object']
+          if reference['type'] == 'commit' and reference['sha'] != expected:
+              released = api('releases/tags/' + tag)
+              assert not released['draft'] and not released['prerelease'] and released['tag_name'] == tag
+              comparison = api(f"compare/{reference['sha']}...{expected}")
+              assert comparison['status'] == 'ahead' and comparison['merge_base_commit']['sha'] == reference['sha']
+              assets = {item['name']: item for item in api(f"releases/{released['id']}/assets?per_page=100")}
+              assert actual <= set(assets), 'The earlier published release is incomplete'
+              def prior_bytes(name):
+                  assert assets[name]['size'] > 0
+                  return gh('api', f"repos/{repository}/releases/assets/{assets[name]['id']}", '-H', 'Accept: application/octet-stream', binary=True)
+              prior_sums = {}
+              for line in prior_bytes('SHA256SUMS').decode('utf-8').splitlines():
+                  sha, name = line.split('  ', 1)
+                  assert pathlib.PurePosixPath(name).name == name and name not in prior_sums
+                  assert name in assets and hashlib.sha256(prior_bytes(name)).hexdigest() == sha
+                  prior_sums[name] = sha
+              assert actual - {'SHA256SUMS'} <= set(prior_sums)
+              prior_info = json.loads(prior_bytes('build-info.json'))
+              assert prior_info['version'] == version and prior_info['base_commit'] == reference['sha'] and prior_info['dirty_snapshot'] is False
+              prior_manifest = json.loads(prior_bytes('windows-build-manifest.json'))
+              assert prior_manifest['source_commit'] == reference['sha'] and prior_manifest['version'] == version
+              prior_tests = prior_manifest['windows_pytest']
+              assert prior_tests['tests'] > 0 and prior_tests['failures'] == prior_tests['errors'] == prior_tests['skipped'] == 0
+              message = f"{tag} was already published from ancestor {reference['sha']}; existing verified assets retained, no release mutation for {expected}."
+              print(message)
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+                  summary.write(message + '\n')
+              raise SystemExit(0)
+          assert reference['type'] == 'commit' and reference['sha'] == expected
+          title = 'Analyzer Result Extractor V2 2.2.0'
+          notes = (delivery / 'release-notes.md').read_text(encoding='utf-8').rstrip() + '\n\n## Windows-Download\n\n'
+          notes += f'[Windows-Paket 2.2.0 (64 Bit)](https://github.com/{repository}/releases/download/{tag}/{archive_name})\n\n'
+          notes += 'ZIP vollständig entpacken und AnalyzerResultExtractorV2.exe starten; _internal und rules gehören zum Paket. Python ist auf dem Ziel-PC nicht nötig.\n\n'
+          notes += '**Update einer bestehenden portablen Installation:** Anwendung schließen und vorher sichern. EXE, _internal und build-info.json ersetzen. Vorhandene rules, storage, jobs, input und output einschließlich SQLite und eingefrorener Verarbeitungsbelege behalten.\n\n'
+          notes += f"Windows-Prüfung dieses Commits: {junit['passed']} Tests bestanden, 0 übersprungen, 0 Fehler. Echter Tk-Erstnutzungsablauf vom nicht vorhandenen Ergebnisspeicher bis zur gerätegetrennten QK bestanden. Entpackte EXE mit Versionsfenster gestartet und regulär geschlossen.\n\nAusgangscommit: `{expected}`. Eingabe-Fingerprint: `{info['source_tree_fingerprint']}`. Einzelbelege und SHA256SUMS sind angehängt.\n"
+          notes_path = pathlib.Path('release-notes-final.md')
+          notes_path.write_text(notes, encoding='utf-8')
+          # The tag endpoint lists published releases only. Authenticated
+          # pagination also finds a draft left by an interrupted upload.
+          pages = gh('api', f'repos/{repository}/releases?per_page=100', '--paginate', '--slurp')
+          matching = [item for page in pages for item in page if item['tag_name'] == tag]
+          assert len(matching) <= 1, 'Multiple release drafts use this tag'
+          release = matching[0] if matching else None
+          if release is None:
+              payload = pathlib.Path('create-release.json')
+              payload.write_text(json.dumps({'tag_name': tag, 'target_commitish': expected, 'name': title,
+                  'body': notes, 'draft': True, 'prerelease': False}), encoding='utf-8')
+              release = gh('api', '--method', 'POST', f'repos/{repository}/releases', '--input', str(payload))
+          assert release['tag_name'] == tag and release['prerelease'] is False
+          existing = {item['name']: item for item in api(f"releases/{release['id']}/assets?per_page=100")}
+          assert not set(existing) - actual, 'Unexpected assets on this release'
+          for name in sorted(actual):
+              file = delivery / name
+              if name in existing:
+                  asset = existing[name]
+                  assert asset['size'] == file.stat().st_size, name
+                  remote = gh('api', f"repos/{repository}/releases/assets/{asset['id']}", '-H', 'Accept: application/octet-stream', binary=True)
+                  assert hashlib.sha256(remote).hexdigest() == digest(file), name
+              else:
+                  subprocess.run(['gh', 'release', 'upload', tag, str(file), '--repo', repository], check=True)
+          # Re-read all published bytes, including retries after partial upload.
+          assets = {item['name']: item for item in api(f"releases/{release['id']}/assets?per_page=100")}
+          assert set(assets) == actual
+          for name, asset in assets.items():
+              assert asset['size'] == (delivery / name).stat().st_size
+              remote = gh('api', f"repos/{repository}/releases/assets/{asset['id']}", '-H', 'Accept: application/octet-stream', binary=True)
+              assert hashlib.sha256(remote).hexdigest() == digest(delivery / name), name
+          subprocess.run(['gh', 'release', 'edit', tag, '--repo', repository, '--verify-tag', '--draft=false', '--latest',
+              '--title', title, '--notes-file', str(notes_path)], check=True)
+          published = api('releases/tags/' + tag)
+          assert not published['draft'] and published['name'] == title
+          assert published['body'].splitlines() == notes.rstrip().splitlines()
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write(f"Published {published['html_url']} from `{expected}`; {junit['passed']} Windows tests, native first-use and extracted EXE smoke passed.\n")

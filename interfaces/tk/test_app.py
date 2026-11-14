@@ -1587,6 +1587,8 @@ class AnalyzerDesktopApp(tk.Tk):
         self._settings_save_latest_edit_generation = 0
         self._settings_save_inflight_id: int | None = None
         self._current_view = "dashboard"
+        self._validation_report_scope = None
+        self._validation_store_scope = None
         self._validation_window_restore: tuple[str, str] | None = None
         self._validation_pdf_pending: tuple[int, str, int, int, float] | None = None
         self._nav_buttons: dict[str, ttk.Button] = {}
@@ -1607,7 +1609,7 @@ class AnalyzerDesktopApp(tk.Tk):
             if key == "validation":
                 row = ttk.Frame(nav, style="Nav.TFrame")
                 row.pack(fill="x", pady=(0, 4))
-                btn = ttk.Button(row, text=label, style="Nav.TButton", command=lambda k=key: self.show_view(k))
+                btn = ttk.Button(row, text=label, style="Nav.TButton", command=self._open_validation_queue)
                 btn.pack(side="left", fill="x", expand=True)
                 self._validation_badge = StatusBadge(row, "0", kind="good")
                 self._validation_badge.pack(side="right", padx=(6, 2))
@@ -1665,6 +1667,7 @@ class AnalyzerDesktopApp(tk.Tk):
             on_reanalyze=self._reanalyze_validation_cases,
             on_choose=self._choose_validation_result,
             on_edit_rules=self.open_rule_editor,
+            on_add_device=self._add_validation_device,
         )
         self._views["rules"] = RulesView(
             content,
@@ -1744,6 +1747,8 @@ class AnalyzerDesktopApp(tk.Tk):
             return
         previous = self._current_view
         if previous == "validation" and key != "validation":
+            self._validation_report_scope = None
+            self._validation_store_scope = None
             self._views["validation"].suspend_pdf_preview()
             self._validation_pdf_pending = None
             self._restore_validation_window()
@@ -1915,7 +1920,9 @@ class AnalyzerDesktopApp(tk.Tk):
         elif view_key == "results":
             payload["reports"] = self._services.results.list_recent_reports()
         elif view_key == "validation":
-            payload["validation_cases"] = validation_cases
+            scope = getattr(self, "_validation_report_scope", None)
+            payload["validation_cases"] = (self._services.results.list_open_validation_cases(report_id=scope, include_validated=True, store_path=self._validation_store_scope)
+                if scope else validation_cases)
         elif view_key == "rules":
             payload["inventory"] = self._services.rules.list_inventory()
         elif view_key == "settings":
@@ -2113,6 +2120,11 @@ class AnalyzerDesktopApp(tk.Tk):
         if badge is not None:
             badge.set_status(str(max(0, int(count))), kind="warning" if count else "good")
 
+    def _open_validation_queue(self) -> None:
+        self._validation_report_scope = None
+        self._validation_store_scope = None
+        self.show_view("validation")
+
     def _save_pending_validation(self) -> None:
         if not self._require_services():
             return
@@ -2132,6 +2144,11 @@ class AnalyzerDesktopApp(tk.Tk):
             self._show_info_dialog(self, "Validierung", "Bitte Initialen fuer die Validierung angeben.")
             return
         comment = str(validation.validation_comment() or "").strip()
+        device_id = getattr(validation, "validation_device", lambda: "")()
+        if item.device_context_token and (not device_id or not validation.validation_device_confirmed()):
+            self._show_info_dialog(self, "Gerät dieses Berichts", "Bitte das konkrete Gerät auswählen und für diesen Quellbericht bestätigen. Ein Importvorschlag allein genügt nicht.")
+            return
+        device_reason = getattr(validation, "validation_device_reason", lambda: "")()
         binding = {}
         if item.selection_token:
             binding = {"expected_selection_token": item.selection_token, "store_path": item.store_path, "request_id": uuid.uuid4().hex}
@@ -2142,16 +2159,71 @@ class AnalyzerDesktopApp(tk.Tk):
 
         def work() -> tuple[object, object]:
             assert self._services is not None
-            saved = self._services.results.validate_report_run(item.report_id, item.run_id, initials, comment, **binding)
-            return saved, self._services.results.list_open_validation_cases()
+            run_id = item.run_id
+            current_binding = dict(binding)
+            if item.device_context_token:
+                request_id = current_binding.get("request_id") or uuid.uuid4().hex
+                context = self._services.results.confirm_report_device(item.report_id, device_id,
+                    expected_context_token=item.device_context_token, operator_initials=initials, request_id=request_id + ":device",
+                    reason=device_reason, store_path=item.store_path)
+                if item.candidate_id:
+                    materialized = [row for row in context["runs"] if row.get("source_provenance", {}).get("device_materialization", {}).get("candidate_id") == item.candidate_id]
+                    if len(materialized) != 1:
+                        from src.application.api import ValidationConflictError
+                        raise ValidationConflictError("Dieser Quellkandidat bleibt ein Duplikat-/Klärfall: gleiches oder noch ungeklärtes Vergleichsgerät. Kein zusätzlicher Messwert wurde validiert.")
+                    run_id = int(materialized[0]["id"])
+                    current_binding["expected_selection_token"] = materialized[0]["selection_token"]
+                current_binding.update(expected_device_assignment_id=context["assignment_id"], store_path=item.store_path, request_id=request_id + ":validation")
+            operation = (self._services.results.correct_report_run if item.validation_current and device_id == item.device_id
+                else self._services.results.validate_report_run)
+            saved = operation(item.report_id, run_id, initials, comment, **current_binding)
+            scope = getattr(self, "_validation_report_scope", None)
+            pending = self._services.results.list_open_validation_cases()
+            items = self._services.results.list_open_validation_cases(report_id=scope, include_validated=True, store_path=self._validation_store_scope) if scope else pending
+            return saved, items, len(pending)
 
-        def on_success(result: tuple[object, object]) -> None:
-            saved, items = result
+        def on_success(result) -> None:
+            saved, items, pending_count = result
             validation.clear_comment()
             validation.render_cases(items)
-            self._set_validation_badge(len(items))
+            self._set_validation_badge(pending_count)
 
-        self._task_runner.submit(key, work, on_success=on_success, on_error=self._show_task_error)
+        def on_error(exc):
+            self._show_task_error(exc)
+            self.refresh_current_view()
+        self._task_runner.submit(key, work, on_success=on_success, on_error=on_error)
+
+    def _add_validation_device(self) -> None:
+        from uuid import uuid4
+        from interfaces.tk.widgets.dialogs import show_qc_inventory_dialog
+        if not self._require_services():
+            return
+        validation = self._views["validation"]
+        selected = validation.selected_item()
+        if selected is None:
+            return
+        def loaded(state):
+            if not self._qc_store_is_displayed(state.store_path):
+                return
+            old_ids = {row["device_id"] for row in state.inventory["snapshot"]["devices"]}
+            def submit(snapshot, _initials, dialog):
+                request = uuid4().hex
+                added = [row["device_id"] for row in snapshot["devices"] if row["device_id"] not in old_ids]
+                def work():
+                    self._services.settings.save_qc_inventory(state, snapshot, "", request)
+                    scope = getattr(self, "_validation_report_scope", None)
+                    pending = self._services.results.list_open_validation_cases()
+                    cases = self._services.results.list_open_validation_cases(report_id=scope, include_validated=True, store_path=self._validation_store_scope) if scope else pending
+                    return cases, added[-1] if added else snapshot["default_device_id"], len(pending)
+                def saved(result):
+                    cases, chosen, pending_count = result
+                    validation.render_cases(cases)
+                    validation.select_report_device(chosen)
+                    self._set_validation_badge(pending_count)
+                self._submit_qc_write(work, dialog, state.store_path, refresh=False, on_success=saved)
+            show_qc_inventory_dialog(self, state, initials="", on_submit=submit, new_device=True)
+        self._task_runner.submit("validation-device-list", self._services.settings.get_qc_configuration,
+            on_success=loaded, on_error=self._show_qc_error)
 
     def _reanalyze_validation_cases(self) -> None:
         if not self._require_services():
@@ -2241,74 +2313,31 @@ class AnalyzerDesktopApp(tk.Tk):
         )
 
     def _correct_selected_validation(self) -> None:
-        if not self._require_services():
-            return
-        request = self._selected_validation_request()
-        if request is None:
-            return
-        if not self._show_confirm_dialog(
-            self,
-            "Validierung korrigieren",
-            (
-                "Korrektur der Validierung: Die bestehende Validierung wird nicht überschrieben. "
-                "Es wird ein neuer Datensatz angelegt, der auf die bisherige Validierung verweist. "
-                "Diese Korrektur jetzt speichern?"
-            ),
-        ):
-            return
-        self._submit_validation(*request, correct=True)
+        self._open_results_validation()
 
     def _start_validation(self, *, correct: bool) -> None:
+        self._open_results_validation()
+
+    def _open_results_validation(self) -> None:
         if not self._require_services():
             return
-        request = self._selected_validation_request()
-        if request is None:
-            return
-        self._submit_validation(*request, correct=correct)
-
-    def _selected_validation_request(self) -> tuple[str, int, str, str] | None:
         results = self._views["results"]
         report_id = str(results.current_detail_report_id() or "")
-        run_id = results.validation_run_id()
-        if not report_id or run_id is None:
-            self._show_info_dialog(self, "Validierung", "Bitte eine Messung auswählen.")
-            return None
-        initials = str(results.validation_initials() or "").strip()
-        if not initials:
-            self._show_info_dialog(self, "Validierung", "Bitte Initialen für die Validierung angeben.")
-            return None
-        return report_id, int(run_id), initials, str(results.validation_comment() or "").strip()
-
-    def _submit_validation(self, report_id: str, run_id: int, initials: str, comment: str, *, correct: bool) -> None:
-        key = f"validation-{report_id}-{run_id}"
-        if self._task_runner.is_active(key):
-            self._show_info_dialog(self, "Validierung", "Die Validierung wird bereits gespeichert.")
+        if not report_id:
+            self._show_info_dialog(self, "Validierung", "Bitte einen Bericht auswählen.")
             return
-        results_view = self._views["results"]
-        token, store_path = getattr(results_view, "validation_result_binding", lambda: ("", ""))()
-        binding = {"expected_selection_token": token, "store_path": store_path, "request_id": uuid.uuid4().hex} if token else {}
-
-        def work() -> tuple[object, object, object]:
-            assert self._services is not None
-            if correct:
-                saved = self._services.results.correct_report_run(report_id, run_id, initials, comment, **binding)
-            else:
-                saved = self._services.results.validate_report_run(report_id, run_id, initials, comment, **binding)
-            detail = self._services.results.get_report_detail(report_id)
-            reports = self._services.results.list_recent_reports()
-            return saved, detail, reports
-
-        def on_success(result: tuple[object, object, object]) -> None:
-            saved, detail, reports = result
-            results = self._views["results"]
-            results.render_report_list(reports)
-            if detail is None:
-                self._show_error_dialog(self, "Validierung", "Bericht nicht gefunden.")
-                return
-            results.clear_validation_comment()
-            self._apply_report_detail(results, detail)
-
-        self._task_runner.submit(key, work, on_success=on_success, on_error=self._show_task_error)
+        selected_run = results.validation_run_id()
+        _token, displayed_store = getattr(results, "validation_result_binding", lambda: ("", ""))()
+        self._validation_report_scope = report_id
+        self._validation_store_scope = displayed_store or None
+        self.show_view("validation", refresh=False)
+        def loaded(items):
+            view = self._views["validation"]
+            view.render_cases(items)
+            if selected_run is not None:
+                view.select_run(selected_run)
+        self._task_runner.submit("report-validation", lambda: self._services.results.list_open_validation_cases(
+            report_id=report_id, include_validated=True, store_path=displayed_store or None), on_success=loaded, on_error=self._show_task_error)
 
     def _show_results_list(self) -> None:
         self._views["results"].show_list()
@@ -2474,7 +2503,7 @@ class AnalyzerDesktopApp(tk.Tk):
         else:
             self._show_task_error(exc)
 
-    def _submit_qc_write(self, work, dialog, store_path: str, *, results=False) -> None:
+    def _submit_qc_write(self, work, dialog, store_path: str, *, results=False, on_success=None, refresh=True) -> None:
         if not self._qc_store_is_displayed(store_path):
             self._show_error_dialog(self, "Qualitätskontrolle", "Der Ergebnisspeicher wurde gewechselt. Bitte den Dialog schließen und neu laden.")
             return
@@ -2486,7 +2515,9 @@ class AnalyzerDesktopApp(tk.Tk):
         def success(_result):
             if dialog.winfo_exists():
                 dialog.destroy()
-            if self._qc_store_is_displayed(store_path):
+            if on_success:
+                on_success(_result)
+            if refresh and self._qc_store_is_displayed(store_path):
                 self._open_qc_lots() if results else self._reload_devices()
 
         def error(exc):
@@ -2528,11 +2559,50 @@ class AnalyzerDesktopApp(tk.Tk):
                     return
                 def submit(snapshot, expected, initials, dialog):
                     request = uuid4().hex
-                    self._submit_qc_write(lambda: self._services.settings.save_qc_profile(state, snapshot,
+                    self._submit_qc_write(lambda: self._services.settings.save_qc_profile(getattr(dialog, "qc_state", state), snapshot,
                         expected_version_id=expected, operator_initials=initials, request_id=request), dialog, state.store_path)
+                def changed(draft):
+                    self._services.settings.update_qc_profile_editor(state, draft, editor_key=draft["editor_key"])
+                def retain(draft, dialog):
+                    request = uuid4().hex
+                    self._submit_qc_write(lambda: self._services.settings.retain_qc_profile_editor(state, draft,
+                        editor_key=draft["editor_key"], request_id=request), dialog, state.store_path)
+                def discard(draft, dialog):
+                    request = uuid4().hex
+                    self._submit_qc_write(lambda: self._services.settings.discard_qc_profile_editor(state, draft,
+                        editor_key=draft["editor_key"], request_id=request), dialog, state.store_path)
+                def inline_device(profile_dialog, device_added):
+                    current_state = profile_dialog.qc_state
+                    existing = {row["device_id"] for row in current_state.inventory["snapshot"]["devices"]}
+                    def save_device(snapshot, _initials, device_dialog):
+                        request = uuid4().hex
+                        added = [row["device_id"] for row in snapshot["devices"] if row["device_id"] not in existing]
+                        def work():
+                            self._services.settings.save_qc_inventory(current_state, snapshot, "", request)
+                            return self._services.settings.get_qc_assay_configuration(), added[-1] if added else snapshot["default_device_id"]
+                        self._submit_qc_write(work, device_dialog, state.store_path, refresh=False,
+                            on_success=lambda result: device_added(*result))
+                    device_dialog = show_qc_inventory_dialog(profile_dialog, current_state, initials="", on_submit=save_device, new_device=True)
+                    device_dialog.on_cancel = lambda: (profile_dialog.grab_set(), True)[1]
+                assay_key = selected.assay_key if selected else (assays[0][1] if len(assays) == 1 else "")
+                profile_id = selected.profile_id if selected and not new_profile and selected.profile_version_id else ""
+                get_editor = getattr(self._services.settings, "get_qc_profile_editor", lambda *_args, **_kwargs: None)
+                draft_id = getattr(selected, "draft_id", "") if selected and not new_profile else ""
+                editor = get_editor(state, assay_key=assay_key, profile_id=profile_id, draft_id=draft_id)
+                if new_profile and selected and selected.profile_id and editor is None:
+                    import copy
+                    original = next((row for row in state.profiles if row["profile_id"] == selected.profile_id), None)
+                    if original:
+                        snapshot = copy.deepcopy(original["snapshot"])
+                        snapshot.update(profile_schema_version=2, profile_id="profile-" + uuid4().hex,
+                            name=snapshot["name"] + " – Kopie", device_id="", enabled_rules=[])
+                        for control in snapshot["controls"]:
+                            control["sd_reference"] = None
+                        editor = {"editor_key": "new:" + assay_key, "draft_id": "draft-" + uuid4().hex,
+                            "profile_id": snapshot["profile_id"], "base_version_id": 0, "draft_version_id": 0, "snapshot": snapshot}
                 show_qc_profile_dialog(self, state, initials=self._qc_initials(), assays=assays, field_choices=fields, on_submit=submit,
-                    selected_assay_key=selected.assay_key if selected else "",
-                    selected_profile_id=selected.profile_id if selected and not new_profile else "")
+                    selected_assay_key=assay_key, selected_profile_id=profile_id, editor=editor,
+                    on_draft_change=changed, on_retain=retain, on_discard=discard, on_add_device=inline_device)
             elif kind == "migrate":
                 if not state.legacy_source_sha256:
                     self._show_error_dialog(self, "Geräte übernehmen", state.legacy_message)

@@ -45,6 +45,49 @@ def write_synthetic_catalog(root: Path, assays):
     (rules / "index.json").write_text(json.dumps({"assays": index}), encoding="utf-8")
 
 
+def test_first_configuration_save_needs_only_assay_level_and_actual_field_without_inventory_or_actor(tmp_path):
+    """First-use owner flow starts with no DB, device, profile or prepared actor."""
+    from src.qualitycontrol.api import MutationContext, QCConfigurationError, get_inventory, get_profile
+    write_synthetic_catalog(tmp_path, {"A": ("Assay A", ["I1"])})
+    path = tmp_path / "chosen.sqlite3"
+    services = create_desktop_services(tmp_path)
+    services.settings.save(DesktopSettings("sqlite", str(path), "", None))
+    state = services.settings.get_qc_assay_configuration()
+    assert not path.exists() and state.inventory["version_id"] == 0
+    value = {"profile_schema_version": 2, "profile_id": "first-profile", "name": "Assay A",
+             "assay_key": "A", "controls": [{"control_id": "first-level", "name": "Level 1", "fields": {"IST": "I1"}}]}
+    raw = {**copy.deepcopy(value), "name": "unvollständiger Rohtext  ", "controls": []}
+    draft = {"draft_id": "first-draft", "profile_id": "first-profile", "base_version_id": 0, "draft_version_id": 0, "snapshot": raw}
+    services.settings.update_qc_profile_editor(state, draft, editor_key="new:A")
+    assert not path.exists() and services.settings.get_qc_profile_editor(state, assay_key="A") == draft
+    kept = services.settings.retain_qc_profile_editor(state, draft, editor_key="new:A", request_id="keep-raw")
+    services = create_desktop_services(tmp_path)
+    state = services.settings.get_qc_assay_configuration()
+    assert not state.profiles and state.inventory["version_id"] == 0
+    assert services.settings.get_qc_profile_editor(state, assay_key="A") == kept
+    assert kept["snapshot"]["name"].endswith("  ") and kept["snapshot"]["controls"] == []
+    saved = services.settings.save_qc_profile(state, {**value, "_draft_id": "first-draft"}, expected_version_id=0, operator_initials="", request_id="first-save")
+    assert saved["actor"] == "" and saved["snapshot"]["device_id"] == ""
+    assert saved["snapshot"]["enabled_rules"] == [] and saved["snapshot"]["numeric_grammar"] == "auto"
+    assert saved["snapshot"]["measurement_date_format"] == "" and saved["snapshot"]["unit"] == ""
+    assert get_inventory({"driver": "sqlite", "path": str(path)})["version_id"] == 0
+    reopened = services.settings.get_qc_assay_configuration()
+    assert reopened.retained_drafts == ()
+    assert reopened.assay_rows[0].status == "Eingerichtet"
+    assert reopened.assay_rows[0].device_name == "Alle Geräte dieses Assays"
+    inventory = services.settings.save_qc_inventory(reopened, {"default_device_id": "device-a", "devices": [
+        {"device_id": "device-a", "display_name": "Arbeitsplatz A"}]}, "", "name-only-device")
+    assert inventory["actor"] == "" and not inventory["snapshot"]["devices"][0]["incomplete"]
+    assert not any(inventory["snapshot"]["devices"][0][key] for key in ("serial_number", "lnr", "eva"))
+    assert get_profile({"driver": "sqlite", "path": str(path)}, saved["version_id"]) == saved
+    collision = copy.deepcopy(inventory["snapshot"])
+    collision["devices"].append({"device_id": "device-b", "display_name": "arbeitsplatz a"})
+    with pytest.raises(QualityControlApplicationError, match="unterscheidbaren"):
+        services.settings.save_qc_inventory(services.settings.get_qc_configuration(), collision, "", "ambiguous-name")
+    with pytest.raises(QCConfigurationError, match="Initialen"):
+        MutationContext("", "clinical-mutation")
+
+
 def test_assay_overview_keeps_duplicate_names_profiles_and_unconfigured_assays_separate(tmp_path):
     from src.qualitycontrol.api import MutationContext, save_profile
     spec, old = fixture(tmp_path, count=0)
@@ -415,7 +458,9 @@ def test_profile_qk_editor_roundtrip_preserves_advanced_controls_and_separates_p
         assert str(qc_widget(dialog, ttk.Combobox, label="Assay").cget("state")) == "disabled"
         for label in ("Untergrenze (MIN)", "Obergrenze (MAX)", "Zielwert (SOLL)", "Gemessener Wert (IST)"):
             widget = qc_widget(dialog, ttk.Combobox, label=label)
-            assert str(widget.cget("state")) == "readonly" and tuple(widget.cget("values")) == tuple(keys)
+            assert str(widget.cget("state")) == "readonly" and tuple(widget.cget("values")) == ("", *keys)
+        for label in ("Untergrenze (MIN)", "Obergrenze (MAX)", "Zielwert (SOLL)"):
+            edit_qc_field(dialog, label, "")
         percent = qc_widget(dialog, ttk.Entry, label="Erlaubte Abweichung %")
         assert str(percent.cget("state")) == "disabled" and percent.get() == ""
         qc_widget(dialog, ttk.Checkbutton, text="RiliBÄK-Grenzen vorhanden").invoke()
@@ -432,10 +477,11 @@ def test_profile_qk_editor_roundtrip_preserves_advanced_controls_and_separates_p
         assert qc_widget(dialog, ttk.Combobox, label="SD-Referenz").get() == "Bestehende Referenz behalten"
         dialog.save_button.invoke()
         snapshot, expected, initials, _ = submitted[-1]
-        saved = services.settings.save_qc_profile(state, snapshot, expected_version_id=expected, operator_initials=initials, request_id="roundtrip-edit")
+        saved = services.settings.save_qc_profile(state, snapshot, expected_version_id=expected, operator_initials="", request_id="roundtrip-edit")
         expected_snapshot = copy.deepcopy(old["snapshot"])
         expected_snapshot["controls"][0]["name"] = "Pcq1"
-        expected_snapshot.update(single_value_limits_enabled=True, single_value_limit_percent="12.5")
+        expected_snapshot["controls"][0]["fields"].update(MIN="", MAX="", SOLL="")
+        expected_snapshot.update(profile_schema_version=2, dimensionless=False, single_value_limits_enabled=True, single_value_limit_percent="12.5")
         assert saved["snapshot"] == expected_snapshot
         assert get_profile(spec, old["version_id"]) == old
         qc_widget(dialog, ttk.Checkbutton, text="RiliBÄK-Grenzen vorhanden").invoke()
@@ -596,14 +642,17 @@ def test_existing_settings_save_and_qc_actions_fit_minimum_window():
         root.destroy()
 
 
-def test_profile_device_options_keep_alias_ids_with_identical_name_and_serial(tmp_path: Path):
+def test_profile_device_options_keep_existing_alias_ids_with_identical_name_and_serial(tmp_path: Path):
     spec, _ = fixture(tmp_path)
     services = services_for(tmp_path, spec)
     state = services.settings.get_qc_configuration()
     inventory = copy.deepcopy(state.inventory["snapshot"])
     alias = {**inventory["devices"][0], "device_id": "historical-alias"}
     inventory["devices"].append(alias)
-    services.settings.save_qc_inventory(state, inventory, "RR", "add-alias")
+    # Existing same-name aliases remain readable and distinct. New same-name
+    # devices now require a distinguishing name at their explicit creation.
+    with sqlite3.connect(spec["path"]) as conn:
+        conn.execute("UPDATE qc_inventory_versions SET snapshot_json=? WHERE version_id=?", (json.dumps(inventory), state.inventory["version_id"]))
     state = services.settings.get_qc_configuration()
     alias_profile = {**copy.deepcopy(state.profiles[0]["snapshot"]), "profile_id": "alias-profile", "name": "Aliasprofil", "device_id": "historical-alias"}
     services.settings.save_qc_profile(state, alias_profile, expected_version_id=0, operator_initials="RR", request_id="alias-profile")
@@ -629,7 +678,7 @@ def test_profile_device_options_keep_alias_ids_with_identical_name_and_serial(tm
         profile_combo, device_combo = find_combo(dialog, "Prüfprofil"), find_combo(dialog, "Gerät")
         options = tuple(device_combo.cget("values"))
         assert len(options) == len(set(options)) == 2
-        assert any("historical-alias" in label for label in options)
+        assert any("historical-alias"[-6:] in label for label in options)
         for record in state.profiles:
             profile_combo.set(next(label for label in profile_combo.cget("values") if label.endswith(f"· Fassung {record['version_id']}")))
             profile_combo.event_generate("<<ComboboxSelected>>")
@@ -969,7 +1018,7 @@ def test_irrational_calculated_values_are_short_in_pdf_and_mapped_ui_without_rou
     original_json, original_hash = analysis.model_json, analysis.model_sha256
     model = analysis.to_dict()
     series = model["computed_series"][0]
-    assert model["algorithm_id"] == "arev2-qc-analysis-v4" and series["qmma"]["limit_status"] == "exceeded"
+    assert model["algorithm_id"] == "arev2-qc-analysis-v5" and series["qmma"]["limit_status"] == "exceeded"
     assert all(len(value) > 12 for value in (series["qmma"]["value"], series["sd"]["sd"], series["sd"]["center"]))
     case = QCLotCase(source["store_path"], "synthetic-display", "dev", "Laborgerät", "A", "L1", "open", 1, 1,
                      ((1, "Synthetisches Prüfprofil"),), source["start_date"])
@@ -1554,3 +1603,146 @@ def test_p3_native_post_close_refresh_clears_selection_details_without_false_mis
         assert "zuerst ein Prüfprofil" in view._qc_summary.cget("text")
     finally:
         root.destroy()
+
+
+def test_native_first_use_original_reports_are_validated_and_evaluated_per_device(tmp_path):
+    """Real Tk callbacks/task runner, nonexistent DB, original rules, QA-only PDFs."""
+    import shutil
+    import time
+    import fitz
+    from interfaces.tk.test_app import AnalyzerDesktopApp
+    from src.jobcontroller.api import submit
+    from src.qualitycontrol.api import list_profiles
+    from src.resultvalidation.api import list_run_validations_readonly
+
+    root = tmp_path / 'native-first-use'
+    root.mkdir()
+    shutil.copytree(Path(__file__).parents[1] / 'rules', root / 'rules')
+    database = root / 'chosen-first.sqlite3'
+    spec = {'driver': 'sqlite', 'path': str(database)}
+    services = create_desktop_services(root)
+    services.settings.save(DesktopSettings('sqlite', str(database), '', 'DEFAULT_DEVICE'))
+    assert not database.exists()
+    try:
+        app = AnalyzerDesktopApp(root, services=services)
+    except tk.TclError as exc:
+        pytest.skip(f'Tk unavailable: {exc}')
+
+    def wait_for(predicate, description, timeout=15):
+        deadline = time.monotonic() + timeout
+        outcome = []
+        def poll():
+            try:
+                if predicate():
+                    outcome.append(True)
+                    app.quit()
+                elif time.monotonic() >= deadline:
+                    outcome.append(False)
+                    app.quit()
+                else:
+                    app.after(15, poll)
+            except BaseException as exc:
+                outcome.append(exc)
+                app.quit()
+        app.after(0, poll)
+        app.mainloop()
+        assert outcome and outcome[0] is True, description + ': ' + repr(outcome)
+
+    def dialog_titled(title):
+        def children(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from children(child)
+        return next((child for child in children(app) if isinstance(child, tk.Toplevel) and child.title() == title), None)
+
+    try:
+        app.show_view('settings')
+        settings = app._views['settings']
+        wait_for(lambda: bool(settings._qc_rows), 'original assay catalog is displayed')
+        ana_row = next(key for key, row in settings._qc_rows.items() if row.assay_key == '(1c9e)')
+        settings._qc_tree.selection_set(ana_row)
+        settings._select_qc_row(None)
+        settings._qc_edit.invoke()
+        wait_for(lambda: dialog_titled('Assays & QK – Profil einrichten') is not None, 'profile opens before first import')
+        profile = dialog_titled('Assays & QK – Profil einrichten')
+        edit_qc_field(profile, 'Profilname', 'ANA QA neutral')
+        edit_qc_field(profile, 'Levelname', 'Positive QA')
+        edit_qc_field(profile, 'Gemessener Wert (IST)', 'PCS1_IST')
+        unit = edit_qc_field(profile, 'Einheit für gemeinsame Auswertung', 'QA-Skala')
+        wait_for(lambda: unit.winfo_viewable(), 'unit input is visibly mapped in the basic profile form')
+        qc_widget(profile, ttk.Button, text='Gerät hier anlegen').invoke()
+        wait_for(lambda: dialog_titled('Gerät hier anlegen') is not None, 'inline name-only device opens')
+        inventory = dialog_titled('Gerät hier anlegen')
+        edit_qc_field(inventory, 'Gerätename', 'QA Gerät A')
+        inventory.save_button.invoke()
+        wait_for(lambda: not inventory.winfo_exists(), 'inline device is saved by real worker')
+        assert qc_widget(profile, ttk.Entry, label='Profilname').get() == 'ANA QA neutral'
+        assert qc_widget(profile, ttk.Combobox, label='Gemessener Wert (IST)').get() == 'PCS1_IST'
+        qc_widget(profile, ttk.Checkbutton, text='Nur für ein Gerät').invoke()
+        profile.save_button.invoke()
+        wait_for(lambda: not profile.winfo_exists(), 'neutral profile is saved without an actor or formats')
+        stored = list_profiles(spec)[0]['snapshot']
+        assert stored['device_id'] == '' and stored['enabled_rules'] == [] and stored['unit'] == 'QA-Skala'
+        assert not stored['measurement_date_format'] and not stored.get('measurement_time_format')
+        with sqlite3.connect(database) as conn:
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='runs'").fetchone()
+        devices = get_inventory(spec)['snapshot']['devices']
+        a_device = next(row['device_id'] for row in devices if row['display_name'] == 'QA Gerät A')
+        assert all(not row[key] for row in devices for key in ('serial_number', 'lnr', 'eva'))
+        reports = []
+        for suffix, value in (('A', '101'), ('B', '103')):
+            pdf = root / ('QA-' + suffix + '.pdf')
+            with fitz.open() as document:
+                for name, key in (('ANA Screen IgG', '(1c9e)'), ('Anti-DFS70 IgG', '(0437)')):
+                    lines = [name, f'Test: C:\\QA\\{name}.asy {key}', 'Anwender: QA' + suffix, 'Datum: 14.11.2026',
+                        'Plattenname: QA77 Zeit: 08:05:00', 'Kit EQA77 271130', 'C1 1,5 O.D. 0,5 O.D.',
+                        'PCS1 100 Ziel 90 - 110', 'NCS1 20 Ziel 15 - 25', 'Validationskriterien erfüllt'] + ['QA FUELLZEILE'] * 33
+                    lines[36], lines[39], lines[42] = 'C1 1,51', 'PCS1 ' + value, 'NCS1 19'
+                    page = document.new_page()
+                    for index, line in enumerate(lines):
+                        page.insert_text((36, 44 + 15 * index), line, fontsize=10)
+                document.save(pdf)
+            result = submit(str(pdf), str(root), sqlite_path=str(database), device_id='DEFAULT_DEVICE')
+            assert result.status == 'DONE', result.details
+            reports.append(result.job_id)
+        app._nav_buttons['validation'].invoke()
+        validation = app._views['validation']
+        wait_for(lambda: len(validation._items) == 4, 'both assays of both real source reports appear')
+        # Two separate human decisions per source; choosing A for its first
+        # assay confirms the whole report, but does not validate its second.
+        for report_index, report_id in enumerate(reports):
+            for assay in ('(1c9e)', '(0437)'):
+                wait_for(lambda: any(row.report_id == report_id and row.assay_key == assay for row in validation._items.values()), 'pending assay is available')
+                case = next(row for row in validation._items.values() if row.report_id == report_id and row.assay_key == assay)
+                validation.select_run(case.run_id)
+                if report_index == 1 and assay == '(1c9e)':
+                    qc_widget(validation, ttk.Button, text='Gerät hier anlegen').invoke()
+                    wait_for(lambda: dialog_titled('Gerät hier anlegen') is not None, 'second device can be added without losing validation')
+                    inventory = dialog_titled('Gerät hier anlegen')
+                    edit_qc_field(inventory, 'Gerätename', 'QA Gerät B')
+                    inventory.save_button.invoke()
+                    wait_for(lambda: not inventory.winfo_exists(), 'second name-only device is saved')
+                validation._var_report_device.set('QA Gerät ' + ('A' if report_index == 0 else 'B'))
+                validation._report_device_combo.event_generate('<<ComboboxSelected>>')
+                wait_for(lambda: validation.validation_device() != '', 'named device is selected')
+                validation._var_device_confirmed.set(True)
+                validation._var_initials.set('QA')
+                validation._btn_save.invoke()
+                wait_for(lambda: case.run_id not in [row.run_id for row in validation._items.values()], 'one assay is separately validated')
+        assert len(list_run_validations_readonly(spec, [1, 2, 3, 4]).records) == 4
+        assert not services.results.list_open_validation_cases()
+        app._nav_buttons['statistics'].invoke()
+        statistics = app._views['statistics']
+        wait_for(lambda: len(statistics._qc_cases) == 4, 'four real device/assay cases are displayed')
+        for name, expected in (('QA Gerät A', '101'), ('QA Gerät B', '103')):
+            case = next(row for row in statistics._qc_cases.values() if row.assay_key == '(1c9e)' and row.device_name == name)
+            statistics._qc_tree.selection_set(case.lot_key)
+            statistics._qc_tree.event_generate('<<TreeviewSelect>>')
+            wait_for(lambda: statistics._qc_analysis is not None and statistics._qc_detail.case.lot_key == case.lot_key and statistics._qc_chart_hits, 'device-specific QC and its real chart are rendered')
+            result = statistics._qc_model['computed_series'][0]['descriptive']
+            assert result['n'] == 1 and result['mean']['value'] == expected
+            assert statistics._qc_chart_hits and 'Westgard' not in statistics._qc_legend.cget('text')
+        assert len({row['device_id'] for row in get_inventory(spec)['snapshot']['devices'] if row['display_name']}) == 2
+        assert a_device in {row.device_id for row in statistics._qc_cases.values()}
+    finally:
+        app.destroy()

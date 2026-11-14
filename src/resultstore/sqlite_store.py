@@ -204,6 +204,14 @@ def list_report_summaries(store_spec: dict[str, Any], *, limit: int = 50) -> dic
     summaries: list[dict[str, Any]] = []
     for report_id, runs in grouped.items():
         summaries.append(_report_summary_from_runs(report_id, runs))
+    from .report_devices import list_pending_report_candidates
+    by_id = {item["report_id"]: item for item in summaries}
+    for candidate in list_pending_report_candidates(store_spec):
+        report_id = candidate["report_id"]
+        if not report_id:
+            continue
+        by_id[report_id] = _with_pending_candidate(by_id.get(report_id), candidate)
+    summaries = list(by_id.values())
     summaries.sort(
         key=lambda item: (
             str(item.get("latest_created_at") or ""),
@@ -232,9 +240,26 @@ def get_report_runs(store_spec: dict[str, Any], report_id: str) -> dict[str, Any
     with _connect_readonly(path) as conn:
         grouped = _group_runs_into_reports(conn, select_cols, columns)
     matched = grouped.get(target)
-    if not matched:
-        return None
-    return _report_detail_payload(target, matched)
+    result = _report_detail_payload(target, matched) if matched else None
+    from .report_devices import list_pending_report_candidates
+    for candidate in list_pending_report_candidates(store_spec):
+        if candidate["report_id"] == target:
+            result = _with_pending_candidate(result, candidate)
+    return result
+
+
+def _with_pending_candidate(report, candidate):
+    """A pending source belongs to its own PDF, without becoming a measurement."""
+    if report is None:
+        report = {"report_id": candidate["report_id"], "job_id": candidate["report_id"],
+            "pdf_path": candidate["meta"].get("pdf_path", ""), "pdf_sha256": candidate["pdf_sha256"], "runs": [],
+            "run_count": 0, "assay_count": 0, "assay_keys": [], "device_ids": [],
+            "latest_created_at": candidate["detected_at"], "earliest_created_at": candidate["detected_at"]}
+    report.setdefault("pending_candidates", []).append(candidate)
+    report["pending_candidate_count"] = len(report["pending_candidates"])
+    report["assay_keys"] = sorted(set(report["assay_keys"]) | {candidate["assay_key"]})
+    report["assay_count"] = len(report["assay_keys"])
+    return report
 
 
 def get_result_run(store_spec: dict[str, Any], run_id: int) -> dict[str, Any] | None:
@@ -533,7 +558,7 @@ def _report_summary_from_runs(report_id: str, runs: list[dict[str, Any]]) -> dic
         key=str.casefold,
     )
     device_ids = sorted(
-        {str(row.get("device_id") or "") for row in runs if row.get("device_id")},
+        {str(row.get("effective_device_id", row.get("device_id")) or "") for row in runs if row.get("effective_device_id", row.get("device_id"))},
         key=str.casefold,
     )
     earliest, latest = _report_created_at_bounds(runs)

@@ -499,3 +499,11 @@ from src.assaycandidate.api import find_assay_candidates
 
 - Das QMTool soll AREV2 spaeter nur als Konsument der hier dokumentierten Public APIs verwenden.
 - Modulvertrag, PyQt-Integration, Navigation oder QM-spezifische Settings liegen bewusst ausserhalb dieses Repos.
+
+## 2.2 configuration and report-device binding
+
+`src.qualitycontrol.api.ConfigurationContext(request_id, operator_initials='', reason='')` identifies reversible configuration writes without requiring a clinical actor. `MutationContext` remains strict for lot publication and clinical actions. New profile editor saves use `profile_schema_version=2`: a named IST level is required; device scope and feature-specific settings are optional. Old immutable snapshots remain unchanged. Session drafts belong to SettingsController; explicit retained versions use the same QC SQLite owner.
+
+`src.resultstore.api.get_report_device_context` and `list_pending_report_candidates` are read-only. `src.dbwriter.api.confirm_report_device` owns whole-report assignment, source verification, qualified identity claims and candidate materialization under its writer transaction. It does not validate results or alter frozen DONE jobs. The import/raw identity and confirmed effective device remain separate fields. `ResultsController.list_open_validation_cases(report_id=..., include_validated=True, store_path=...)` supports the existing Results correction entry through the same validation view.
+
+`validate_run` and `correct_validation` accept `expected_device_assignment_id` together with the displayed result selection. New proven-source runs require an explicit confirmed assignment. A changed report assignment invalidates old effective human bindings until each run is explicitly revalidated. Versioned assignments, validations and historical QK/PDF evidence are append-only. Neutral profiles require the actual `device_id` when capturing QC sources/chronology; consumers must not pool devices or infer a physical device from an import default.

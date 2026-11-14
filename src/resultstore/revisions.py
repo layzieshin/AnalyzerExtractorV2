@@ -42,8 +42,19 @@ def project_run(conn: sqlite3.Connection, run: dict[str, Any]) -> dict[str, Any]
         present = tables.intersection(component_tables)
         if present and present != component_tables:
             raise ValueError("result_revision_schema_incomplete")
-        if present and [int(row[0]) for row in conn.execute("SELECT version FROM dbwriter_schema_migrations")] != [1]:
+        if present and [int(row[0]) for row in conn.execute("SELECT version FROM dbwriter_schema_migrations ORDER BY version")] not in ([1], [1, 2]):
             raise ValueError("result_revision_schema_unknown")
+        if present:
+            expected = {
+                "run_source_provenance": {"run_id", "snapshot_json"},
+                "run_result_revisions": {"revision_id", "run_id", "request_id", "expected_selection_token", "supersedes_revision_id", "snapshot_json", "created_by", "created_at"},
+                "run_result_selections": {"selection_id", "run_id", "revision_id", "resolves_revision_id", "previous_selection_token", "action", "request_id", "decided_by", "note", "created_at"},
+                "run_identity_aliases": {"alias_id", "assay_key", "dedupe_key", "run_id", "revision_id", "created_at"},
+            }
+            if any({str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")} != columns for table, columns in expected.items()):
+                raise ValueError("result_revision_schema_incomplete")
+        from .report_devices import check_device_schema
+        check_device_schema(conn)
         if "run_source_provenance" in tables:
             row = conn.execute("SELECT snapshot_json FROM run_source_provenance WHERE run_id=?", (run_id,)).fetchone()
             if row:
@@ -91,7 +102,8 @@ def project_run(conn: sqlite3.Connection, run: dict[str, Any]) -> dict[str, Any]
         run["result_date"] = str(payload.get("DATUM") or payload.get("date") or "")
     except (KeyError, TypeError, ValueError, sqlite3.Error) as exc:
         run["revision_error"] = f"Ergebnishistorie unlesbar; bitte Datenbestand klaeren: {exc}"
-    return run
+    from .report_devices import project_device
+    return project_device(conn, run)
 
 
 def _validate_history(run_id, original, revisions, selections, by_id):
