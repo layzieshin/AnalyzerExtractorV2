@@ -1,5 +1,5 @@
 name: Build Windows v2.1.0
-run-name: Windows v2.1.0 from verified a9abfcc
+run-name: Windows v2.1.0 qualification c1d14b8, product a9abfcc
 
 on:
   push:
@@ -27,7 +27,8 @@ jobs:
       PYTHONUNBUFFERED: '1'
       PYTHONUTF8: '1'
       PYTEST_ADDOPTS: --junitxml=../windows-tests.xml --basetemp=../pytest-windows-build
-      SOURCE_COMMIT: a9abfcc6f7831b09a8669b2528a09119608494c2
+      SOURCE_COMMIT: c1d14b866ca0ef7581415a611127a8f8d5cbf6fe
+      RELEASE_SOURCE_COMMIT: a9abfcc6f7831b09a8669b2528a09119608494c2
       SOURCE_FINGERPRINT: 7df4a470bfe2647c171678e74e698163d1f00a3a6a99bab292c17d37bbc3999b
       RELEASE_ARCHIVE: AnalyzerResultExtractorV2-v2.1.0-windows-x64.zip
 
@@ -35,12 +36,12 @@ jobs:
       - name: Preserve qualified source bytes
         run: git config --global core.autocrlf false
 
-      - name: Check out the verified product commit separately
+      - name: Check out the tests-only Windows qualification commit separately
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: a9abfcc6f7831b09a8669b2528a09119608494c2
+          ref: c1d14b866ca0ef7581415a611127a8f8d5cbf6fe
           path: product
-          fetch-depth: 1
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Set up Python 3.12 x64
@@ -79,6 +80,10 @@ jobs:
           assert platform.system() == 'Windows' and platform.machine().upper() == 'AMD64'
           head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           assert head == os.environ['SOURCE_COMMIT'], head
+          parents = subprocess.check_output(['git', 'rev-list', '--parents', '-n', '1', 'HEAD'], text=True).strip().split()
+          assert parents == [head, os.environ['RELEASE_SOURCE_COMMIT']], parents
+          changed = subprocess.check_output(['git', 'diff', '--name-only', 'HEAD^', 'HEAD'], text=True).splitlines()
+          assert set(changed) == {'tests/test_resultstore.py', 'tests/test_application_rules_controller.py'} and len(changed) == 2, changed
           status = subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=normal'], text=True)
           assert not status.strip(), status
           builder = runpy.run_path(str(pathlib.Path('packaging/build_onedir.py').resolve()))
@@ -87,6 +92,34 @@ jobs:
           assert len(inputs) == 197, len(inputs)
           assert fingerprint == os.environ['SOURCE_FINGERPRINT'], fingerprint
           print(f'Qualified {head}: {len(inputs)} inputs, {fingerprint}')
+
+      - name: Set the Windows runner desktop to 1920 by 1080
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue)) { Import-Module ServerCore }
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+
+      - name: Verify real Tk desktop and requested 1440 by 900 window size
+        shell: python
+        run: |
+          import time, tkinter as tk
+          root = tk.Tk()
+          try:
+              root.title('Windows build desktop qualification')
+              root.geometry('1440x900+0+0')
+              deadline = time.monotonic() + 15
+              while True:
+                  root.update()
+                  screen = (root.winfo_screenwidth(), root.winfo_screenheight())
+                  window = (root.winfo_width(), root.winfo_height())
+                  if screen[0] >= 1920 and screen[1] >= 1080 and window[0] >= 1400 and window[1] >= 860:
+                      break
+                  assert time.monotonic() < deadline, f'Desktop/window too small: screen={screen}, actual window={window}, requested=1440x900'
+                  time.sleep(0.25)
+              print(f'Qualified desktop screen={screen}, actual Tk window={window}')
+          finally:
+              root.destroy()
 
       - name: Run canonical tests, rule checks, onedir build and frozen EXE smoke
         working-directory: product
@@ -146,9 +179,24 @@ jobs:
               public static extern bool GetWindowRect(IntPtr window, out RECT rect);
               [DllImport("user32.dll")]
               public static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr window);
+              [DllImport("user32.dll")]
+              public static extern bool ShowWindow(IntPtr window, int command);
           }
           '@
           Add-Type -AssemblyName System.Drawing
+          function Test-ContentVariation([System.Drawing.Bitmap]$Image) {
+            $colors = [System.Collections.Generic.HashSet[int]]::new()
+            $stepX = [Math]::Max(1, [int]($Image.Width / 12))
+            $stepY = [Math]::Max(1, [int]($Image.Height / 12))
+            for ($x = 30; $x -lt $Image.Width - 30; $x += $stepX) {
+              for ($y = 80; $y -lt $Image.Height - 30; $y += $stepY) {
+                [void]$colors.Add($Image.GetPixel($x, $y).ToArgb())
+              }
+            }
+            return $colors.Count -ge 3
+          }
           $process = Start-Process -FilePath $exe -WorkingDirectory $app -PassThru
           try {
             $deadline = (Get-Date).AddSeconds(45)
@@ -162,6 +210,9 @@ jobs:
             Start-Sleep -Seconds 2
             $process.Refresh()
             $title = $process.MainWindowTitle
+            [void][WindowCapture]::ShowWindow($process.MainWindowHandle, 9)
+            [void][WindowCapture]::SetForegroundWindow($process.MainWindowHandle)
+            Start-Sleep -Milliseconds 500
             $rect = [WindowCapture+RECT]::new()
             if (-not [WindowCapture]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) { throw 'GetWindowRect failed' }
             $width = $rect.Right - $rect.Left
@@ -172,6 +223,14 @@ jobs:
             $dc = $graphics.GetHdc()
             try { $printed = [WindowCapture]::PrintWindow($process.MainWindowHandle, $dc, 2) }
             finally { $graphics.ReleaseHdc($dc); $graphics.Dispose() }
+            $captureMethod = 'PrintWindow'
+            if (-not $printed -or -not (Test-ContentVariation $bitmap)) {
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              try { $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size) }
+              finally { $graphics.Dispose() }
+              $captureMethod = 'CopyFromScreen after foreground activation'
+            }
+            if (-not (Test-ContentVariation $bitmap)) { $bitmap.Dispose(); throw 'Window capture has no meaningful interior pixel variation' }
             try { $bitmap.Save((Join-Path $delivery 'windows-desktop-smoke.png'), [System.Drawing.Imaging.ImageFormat]::Png) }
             finally { $bitmap.Dispose() }
             if (-not $process.CloseMainWindow()) { throw 'Could not request normal application close' }
@@ -185,8 +244,10 @@ jobs:
               window_height = $height
               exit_code = $process.ExitCode
               print_window_returned_success = $printed
+              capture_method = $captureMethod
+              interior_pixel_variation_verified = $true
               screenshot = 'windows-desktop-smoke.png'
-              screenshot_note = 'PrintWindow capture; inspect image separately for rendering quality'
+              screenshot_note = 'Window interior has at least three sampled colors; inspect image separately for rendering quality'
             } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM (Join-Path $delivery 'windows-desktop-smoke.json')
           }
           finally {
@@ -203,7 +264,7 @@ jobs:
           suites = list(ET.parse(delivery / 'windows-tests.xml').getroot().iter('testsuite'))
           junit = {key: sum(int(suite.attrib.get(key, 0)) for suite in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
           junit['passed'] = junit['tests'] - junit['failures'] - junit['errors'] - junit['skipped']
-          assert junit['tests'] > 0 and junit['failures'] == 0 and junit['errors'] == 0, junit
+          assert junit['tests'] == 1418 and junit['failures'] == 0 and junit['errors'] == 0 and junit['skipped'] == 0, junit
           files = [
               {'name': p.name, 'bytes': p.stat().st_size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
               for p in sorted(delivery.iterdir()) if p.is_file()
@@ -211,6 +272,10 @@ jobs:
           manifest = {
               'product': info['product'], 'version': info['version'],
               'target': 'Windows x64', 'source_commit': info['base_commit'],
+              'qualification_commit': info['base_commit'],
+              'release_source_commit': os.environ['RELEASE_SOURCE_COMMIT'],
+              'qualification_changes': ['tests/test_resultstore.py', 'tests/test_application_rules_controller.py'],
+              'qualification_contract': 'Tests-only Windows qualification commit; all 197 product inputs match the published release commit',
               'source_tree_fingerprint': info['source_tree_fingerprint'],
               'source_input_count': len(info['inputs']), 'dirty_snapshot': info['dirty_snapshot'],
               'built_at_utc': info['built_at_utc'],
@@ -264,7 +329,8 @@ jobs:
         run: |
           import hashlib, json, os, pathlib, re, subprocess, zipfile, xml.etree.ElementTree as ET
           delivery = pathlib.Path('delivery')
-          expected_commit = 'a9abfcc6f7831b09a8669b2528a09119608494c2'
+          expected_commit = 'c1d14b866ca0ef7581415a611127a8f8d5cbf6fe'
+          expected_release_commit = 'a9abfcc6f7831b09a8669b2528a09119608494c2'
           expected_fingerprint = '7df4a470bfe2647c171678e74e698163d1f00a3a6a99bab292c17d37bbc3999b'
           archive_name = 'AnalyzerResultExtractorV2-v2.1.0-windows-x64.zip'
           expected_names = {
@@ -298,16 +364,18 @@ jobs:
               assert archive.read('AnalyzerResultExtractorV2/AnalyzerResultExtractorV2.exe')[:2] == b'MZ'
           manifest = json.loads((delivery / 'windows-build-manifest.json').read_bytes())
           assert manifest['version'] == '2.1.0' and manifest['source_commit'] == expected_commit
+          assert manifest['qualification_commit'] == expected_commit and manifest['release_source_commit'] == expected_release_commit
           assert manifest['source_tree_fingerprint'] == expected_fingerprint and manifest['dirty_snapshot'] is False
           assert manifest['runner_os'] == 'Windows' and manifest['runner_arch'] == 'X64'
           suites = list(ET.parse(delivery / 'windows-tests.xml').getroot().iter('testsuite'))
           junit = {key: sum(int(suite.attrib.get(key, 0)) for suite in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
           junit['passed'] = junit['tests'] - junit['failures'] - junit['errors'] - junit['skipped']
-          assert junit['tests'] > 0 and junit['failures'] == 0 and junit['errors'] == 0, junit
+          assert junit['tests'] == 1418 and junit['failures'] == 0 and junit['errors'] == 0 and junit['skipped'] == 0, junit
           assert manifest['windows_pytest'] == junit
           smoke = json.loads((delivery / 'windows-desktop-smoke.json').read_bytes())
           assert smoke['exit_code'] == 0 and 'Version 2.1.0' in smoke['title']
           assert smoke['window_width'] > 0 and smoke['window_height'] > 0
+          assert smoke['interior_pixel_variation_verified'] is True
 
           repository = os.environ['GITHUB_REPOSITORY']
           def api(endpoint):
@@ -321,14 +389,30 @@ jobs:
                   break
               assert tag['type'] == 'tag', tag
               tag = api(f"git/tags/{tag['sha']}")['object']
-          assert tag['type'] == 'commit' and tag['sha'] == expected_commit, tag
+          assert tag['type'] == 'commit' and tag['sha'] == expected_release_commit, tag
           publish_names = [archive_name, 'SHA256SUMS', 'windows-build-manifest.json', 'build-info.json', 'windows-tests.xml', 'windows-desktop-smoke.json', 'windows-desktop-smoke.png']
-          existing = {asset['name'] for asset in release['assets']}
-          assert not existing.intersection(publish_names), f'Refusing to replace existing assets: {existing.intersection(publish_names)}'
-          subprocess.run([
-              'gh', 'release', 'upload', 'v2.1.0',
-              *[str(delivery / name) for name in publish_names], '--repo', repository,
-          ], check=True)
+          existing = {asset['name']: asset for asset in release['assets']}
+          missing = []
+          for name in publish_names:
+              if name not in existing:
+                  missing.append(name)
+                  continue
+              asset = existing[name]
+              path = delivery / name
+              assert asset['state'] == 'uploaded' and asset['size'] == path.stat().st_size, f'Existing asset differs: {name}'
+              expected_digest = 'sha256:' + hashlib.sha256(path.read_bytes()).hexdigest()
+              if asset.get('digest'):
+                  actual_digest = asset['digest']
+              else:
+                  remote_bytes = subprocess.check_output(['gh', 'api', f"repos/{repository}/releases/assets/{asset['id']}", '-H', 'Accept: application/octet-stream'])
+                  actual_digest = 'sha256:' + hashlib.sha256(remote_bytes).hexdigest()
+              assert actual_digest == expected_digest, f'Existing asset differs: {name}'
+              print(f'Accepted identical existing asset: {name}')
+          if missing:
+              subprocess.run([
+                  'gh', 'release', 'upload', 'v2.1.0',
+                  *[str(delivery / name) for name in missing], '--repo', repository,
+              ], check=True)
           published = api('releases/445111615')
           assets = {asset['name']: asset for asset in published['assets']}
           for name in publish_names:
@@ -347,6 +431,10 @@ jobs:
               f"{junit['failures']} fehlgeschlagen, {junit['errors']} Fehler. "
               'Der kanonische Build prüfte die gebündelte EXE; zusätzlich wurde die EXE aus der entpackten Release-ZIP gestartet, '
               'der Fenstertitel mit Version 2.1.0 geprüft und die Anwendung regulär geschlossen.\n\n'
+              f'Der tatsächliche Buildcommit ist `{expected_commit}` (Windows-Qualifizierungscommit mit genau zwei portablen Testkorrekturen). '
+              f'Der veröffentlichte Produktstand und unveränderte Versionstag verweisen auf `{expected_release_commit}`. '
+              'Alle 197 Produkteingaben sind bytegleich; ihr gemeinsamer SHA256-Fingerprint ist '
+              f'`{expected_fingerprint}`.\n\n'
               'Die beigefügten `SHA256SUMS`, `build-info.json`, `windows-build-manifest.json`, `windows-tests.xml` '
               'und `windows-desktop-smoke.json` dokumentieren Prüfsummen, Herkunft und Windows-Prüfungen. '
               '`windows-desktop-smoke.png` ist die Fensteraufnahme des Windows-Runners.\n'
@@ -360,7 +448,7 @@ jobs:
               '--title', title, '--notes-file', str(notes_file),
           ], check=True)
           updated = api('releases/445111615')
-          assert updated['name'] == title and updated['body'] == notes
+          assert updated['name'] == title and updated['body'].splitlines() == notes.splitlines()
           summary = f"Windows v2.1.0 package published to {published['html_url']}\n\nWindows pytest: {junit['passed']} passed, {junit['skipped']} skipped, {junit['failures']} failures, {junit['errors']} errors. Canonical frozen EXE smoke and extracted ZIP window startup/normal close passed.\n"
           pathlib.Path(os.environ['GITHUB_STEP_SUMMARY']).write_text(summary, encoding='utf-8')
           print(summary)
