@@ -1,0 +1,366 @@
+name: Build Windows v2.1.0
+run-name: Windows v2.1.0 from verified a9abfcc
+
+on:
+  push:
+    branches:
+      - build/windows-v2.1.0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-v2.1.0
+  cancel-in-progress: false
+
+jobs:
+  windows-build:
+    if: github.ref == 'refs/heads/build/windows-v2.1.0'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+      PYTHONUTF8: '1'
+      PYTEST_ADDOPTS: --junitxml=../windows-tests.xml --basetemp=../pytest-windows-build
+      SOURCE_COMMIT: a9abfcc6f7831b09a8669b2528a09119608494c2
+      SOURCE_FINGERPRINT: 7df4a470bfe2647c171678e74e698163d1f00a3a6a99bab292c17d37bbc3999b
+      RELEASE_ARCHIVE: AnalyzerResultExtractorV2-v2.1.0-windows-x64.zip
+
+    steps:
+      - name: Preserve qualified source bytes
+        run: git config --global core.autocrlf false
+
+      - name: Check out the verified product commit separately
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: a9abfcc6f7831b09a8669b2528a09119608494c2
+          path: product
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python 3.12 x64
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+
+      - name: Isolate build dependencies from runner packages
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP 'arev2-build-venv'
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Join-Path $venv 'Scripts' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "VIRTUAL_ENV=$venv" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install declared dependencies and qualified build versions
+        working-directory: product
+        shell: python
+        run: |
+          import pathlib, subprocess, sys, tomllib
+          project = tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']
+          assert project['version'] == '2.1.0', project['version']
+          subprocess.run([
+              sys.executable, '-m', 'pip', 'install',
+              *project['dependencies'],
+              'PyMuPDF==1.26.6', 'openpyxl==3.1.5', 'pytest==9.2.0',
+              'PyInstaller==6.18.0',
+          ], check=True)
+
+      - name: Verify source commit, clean checkout and qualified input bytes
+        working-directory: product
+        shell: python
+        run: |
+          import os, pathlib, platform, runpy, subprocess
+          assert platform.system() == 'Windows' and platform.machine().upper() == 'AMD64'
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert head == os.environ['SOURCE_COMMIT'], head
+          status = subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=normal'], text=True)
+          assert not status.strip(), status
+          builder = runpy.run_path(str(pathlib.Path('packaging/build_onedir.py').resolve()))
+          inputs = builder['_product_inputs']()
+          fingerprint = builder['_fingerprint'](inputs)
+          assert len(inputs) == 197, len(inputs)
+          assert fingerprint == os.environ['SOURCE_FINGERPRINT'], fingerprint
+          print(f'Qualified {head}: {len(inputs)} inputs, {fingerprint}')
+
+      - name: Run canonical tests, rule checks, onedir build and frozen EXE smoke
+        working-directory: product
+        run: python packaging/build_onedir.py
+
+      - name: Verify and stage the canonical ZIP and build metadata
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, shutil, zipfile
+          workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          dist = workspace / 'product/packaging/dist_output'
+          app = dist / 'AnalyzerResultExtractorV2'
+          info_bytes = (app / 'build-info.json').read_bytes()
+          info = json.loads(info_bytes)
+          assert info['version'] == '2.1.0', info
+          assert info['base_commit'] == os.environ['SOURCE_COMMIT'], info['base_commit']
+          assert info['dirty_snapshot'] is False, info['dirty_snapshot']
+          assert info['source_identity'] == 'base-commit', info['source_identity']
+          assert info['source_tree_fingerprint'] == os.environ['SOURCE_FINGERPRINT']
+          assert info['platform'] == 'win32-AMD64', info['platform']
+          source_zip = dist / 'AnalyzerResultExtractorV2.zip'
+          prefix = 'AnalyzerResultExtractorV2/'
+          with zipfile.ZipFile(source_zip) as archive:
+              assert archive.testzip() is None, 'ZIP CRC check failed'
+              names = archive.namelist()
+              assert all(n.startswith(prefix) and '..' not in pathlib.PurePosixPath(n).parts for n in names)
+              assert archive.read(prefix + 'build-info.json') == info_bytes
+              exe = archive.read(prefix + 'AnalyzerResultExtractorV2.exe')
+              assert exe[:2] == b'MZ', 'Missing Windows PE executable'
+              assert archive.getinfo(prefix + '_internal/python312.dll').file_size > 0
+          delivery = workspace / 'delivery'
+          delivery.mkdir()
+          shutil.copyfile(source_zip, delivery / os.environ['RELEASE_ARCHIVE'])
+          (delivery / 'build-info.json').write_bytes(info_bytes)
+          shutil.copyfile(workspace / 'windows-tests.xml', delivery / 'windows-tests.xml')
+          print(f'Staged ZIP SHA256: {hashlib.sha256(source_zip.read_bytes()).hexdigest()}')
+
+      - name: Start the extracted Windows EXE and capture its versioned window
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $delivery = Join-Path $env:GITHUB_WORKSPACE 'delivery'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'arev2-windows-desktop-smoke'
+          Expand-Archive -LiteralPath (Join-Path $delivery $env:RELEASE_ARCHIVE) -DestinationPath $smokeRoot
+          $app = Join-Path $smokeRoot 'AnalyzerResultExtractorV2'
+          $exe = Join-Path $app 'AnalyzerResultExtractorV2.exe'
+          $env:ARE_HOME = $app
+          Remove-Item Env:ARE_SMOKE_EXIT -ErrorAction SilentlyContinue
+          Remove-Item Env:ARE_START_RULE_EDITOR -ErrorAction SilentlyContinue
+          Remove-Item Env:ARE_LEGACY_UI -ErrorAction SilentlyContinue
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class WindowCapture {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct RECT { public int Left, Top, Right, Bottom; }
+              [DllImport("user32.dll")]
+              public static extern bool GetWindowRect(IntPtr window, out RECT rect);
+              [DllImport("user32.dll")]
+              public static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
+          }
+          '@
+          Add-Type -AssemblyName System.Drawing
+          $process = Start-Process -FilePath $exe -WorkingDirectory $app -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(45)
+            do {
+              Start-Sleep -Milliseconds 250
+              $process.Refresh()
+              if ($process.HasExited) { throw "EXE exited before showing a window: $($process.ExitCode)" }
+              $windowReady = $process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -like '*Version 2.1.0*'
+            } until ($windowReady -or (Get-Date) -ge $deadline)
+            if (-not $windowReady) { throw 'No version 2.1.0 application window appeared within 45 seconds' }
+            Start-Sleep -Seconds 2
+            $process.Refresh()
+            $title = $process.MainWindowTitle
+            $rect = [WindowCapture+RECT]::new()
+            if (-not [WindowCapture]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) { throw 'GetWindowRect failed' }
+            $width = $rect.Right - $rect.Left
+            $height = $rect.Bottom - $rect.Top
+            if ($width -le 0 -or $height -le 0) { throw 'Application window has no area' }
+            $bitmap = [System.Drawing.Bitmap]::new($width, $height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $dc = $graphics.GetHdc()
+            try { $printed = [WindowCapture]::PrintWindow($process.MainWindowHandle, $dc, 2) }
+            finally { $graphics.ReleaseHdc($dc); $graphics.Dispose() }
+            try { $bitmap.Save((Join-Path $delivery 'windows-desktop-smoke.png'), [System.Drawing.Imaging.ImageFormat]::Png) }
+            finally { $bitmap.Dispose() }
+            if (-not $process.CloseMainWindow()) { throw 'Could not request normal application close' }
+            if (-not $process.WaitForExit(15000)) { throw 'Application did not close normally within 15 seconds' }
+            if ($process.ExitCode -ne 0) { throw "Application close returned $($process.ExitCode)" }
+            @{
+              qualification = 'Windows hosted-runner startup and normal-close smoke'
+              source = 'Extracted release ZIP'
+              title = $title
+              window_width = $width
+              window_height = $height
+              exit_code = $process.ExitCode
+              print_window_returned_success = $printed
+              screenshot = 'windows-desktop-smoke.png'
+              screenshot_note = 'PrintWindow capture; inspect image separately for rendering quality'
+            } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM (Join-Path $delivery 'windows-desktop-smoke.json')
+          }
+          finally {
+            $process.Refresh()
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+
+      - name: Write external provenance manifest and SHA256SUMS
+        shell: python
+        run: |
+          import datetime, hashlib, json, os, pathlib, platform, xml.etree.ElementTree as ET
+          delivery = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'delivery'
+          info = json.loads((delivery / 'build-info.json').read_bytes())
+          suites = list(ET.parse(delivery / 'windows-tests.xml').getroot().iter('testsuite'))
+          junit = {key: sum(int(suite.attrib.get(key, 0)) for suite in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
+          junit['passed'] = junit['tests'] - junit['failures'] - junit['errors'] - junit['skipped']
+          assert junit['tests'] > 0 and junit['failures'] == 0 and junit['errors'] == 0, junit
+          files = [
+              {'name': p.name, 'bytes': p.stat().st_size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+              for p in sorted(delivery.iterdir()) if p.is_file()
+          ]
+          manifest = {
+              'product': info['product'], 'version': info['version'],
+              'target': 'Windows x64', 'source_commit': info['base_commit'],
+              'source_tree_fingerprint': info['source_tree_fingerprint'],
+              'source_input_count': len(info['inputs']), 'dirty_snapshot': info['dirty_snapshot'],
+              'built_at_utc': info['built_at_utc'],
+              'qualified_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'workflow_commit': os.environ['GITHUB_SHA'], 'workflow_ref': os.environ['GITHUB_REF'],
+              'actions_run': f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              'actions_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'runner_os': os.environ['RUNNER_OS'], 'runner_arch': os.environ['RUNNER_ARCH'],
+              'runner_image': os.environ.get('ImageOS'), 'runner_image_version': os.environ.get('ImageVersion'),
+              'windows': platform.platform(), 'python': platform.python_version(),
+              'canonical_builder': 'packaging/build_onedir.py',
+              'canonical_checks': ['full pytest suite', 'source and bundled rule integrity', 'bundle verification', 'frozen EXE startup smoke', 'canonical ZIP creation'],
+              'windows_pytest': junit,
+              'windows_pytest_junit': 'windows-tests.xml',
+              'desktop_smoke': json.loads((delivery / 'windows-desktop-smoke.json').read_bytes()),
+              'files': files,
+          }
+          (delivery / 'windows-build-manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+          sums = ''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(delivery.iterdir()) if p.is_file())
+          (delivery / 'SHA256SUMS').write_text(sums, encoding='utf-8')
+          print(sums)
+
+      - name: Upload verified Windows release files
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: AnalyzerResultExtractorV2-v2.1.0-windows-x64
+          path: delivery/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish-windows-release:
+    name: Publish verified Windows package to existing release
+    needs: windows-build
+    if: github.ref == 'refs/heads/build/windows-v2.1.0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the qualified Windows files
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: AnalyzerResultExtractorV2-v2.1.0-windows-x64
+          path: delivery
+
+      - name: Verify all checksums, build identity, Windows tests and release target; upload without replacing assets
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import hashlib, json, os, pathlib, re, subprocess, zipfile, xml.etree.ElementTree as ET
+          delivery = pathlib.Path('delivery')
+          expected_commit = 'a9abfcc6f7831b09a8669b2528a09119608494c2'
+          expected_fingerprint = '7df4a470bfe2647c171678e74e698163d1f00a3a6a99bab292c17d37bbc3999b'
+          archive_name = 'AnalyzerResultExtractorV2-v2.1.0-windows-x64.zip'
+          expected_names = {
+              archive_name, 'build-info.json', 'windows-build-manifest.json',
+              'windows-tests.xml', 'windows-desktop-smoke.json', 'windows-desktop-smoke.png',
+          }
+          checked = set()
+          for line in (delivery / 'SHA256SUMS').read_text(encoding='utf-8').splitlines():
+              match = re.fullmatch(r'([0-9a-f]{64})  ([^/\\]+)', line)
+              assert match, f'Invalid checksum entry: {line!r}'
+              digest, name = match.groups()
+              assert name not in checked and name in expected_names, name
+              path = delivery / name
+              assert path.is_file() and not path.is_symlink(), name
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, f'Checksum mismatch: {name}'
+              checked.add(name)
+          assert checked == expected_names, f'Missing checksum coverage: {expected_names - checked}'
+          assert {p.name for p in delivery.iterdir()} == expected_names | {'SHA256SUMS'}
+          info_bytes = (delivery / 'build-info.json').read_bytes()
+          info = json.loads(info_bytes)
+          assert info['version'] == '2.1.0' and info['base_commit'] == expected_commit
+          assert info['dirty_snapshot'] is False and info['source_identity'] == 'base-commit'
+          assert info['source_tree_fingerprint'] == expected_fingerprint
+          assert info['platform'] == 'win32-AMD64' and info['python_version'].startswith('3.12.')
+          assert len(info['inputs']) == 197
+          fingerprint = hashlib.sha256(json.dumps(info['inputs'], sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+          assert fingerprint == expected_fingerprint
+          with zipfile.ZipFile(delivery / archive_name) as archive:
+              assert archive.testzip() is None, 'Release ZIP CRC check failed'
+              assert archive.read('AnalyzerResultExtractorV2/build-info.json') == info_bytes
+              assert archive.read('AnalyzerResultExtractorV2/AnalyzerResultExtractorV2.exe')[:2] == b'MZ'
+          manifest = json.loads((delivery / 'windows-build-manifest.json').read_bytes())
+          assert manifest['version'] == '2.1.0' and manifest['source_commit'] == expected_commit
+          assert manifest['source_tree_fingerprint'] == expected_fingerprint and manifest['dirty_snapshot'] is False
+          assert manifest['runner_os'] == 'Windows' and manifest['runner_arch'] == 'X64'
+          suites = list(ET.parse(delivery / 'windows-tests.xml').getroot().iter('testsuite'))
+          junit = {key: sum(int(suite.attrib.get(key, 0)) for suite in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
+          junit['passed'] = junit['tests'] - junit['failures'] - junit['errors'] - junit['skipped']
+          assert junit['tests'] > 0 and junit['failures'] == 0 and junit['errors'] == 0, junit
+          assert manifest['windows_pytest'] == junit
+          smoke = json.loads((delivery / 'windows-desktop-smoke.json').read_bytes())
+          assert smoke['exit_code'] == 0 and 'Version 2.1.0' in smoke['title']
+          assert smoke['window_width'] > 0 and smoke['window_height'] > 0
+
+          repository = os.environ['GITHUB_REPOSITORY']
+          def api(endpoint):
+              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repository}/{endpoint}'], text=True))
+          release = api('releases/445111615')
+          assert release['id'] == 445111615 and release['tag_name'] == 'v2.1.0' and release['draft'] is False
+          assert api('releases/tags/v2.1.0')['id'] == release['id']
+          tag = api('git/ref/tags/v2.1.0')['object']
+          for _ in range(5):
+              if tag['type'] == 'commit':
+                  break
+              assert tag['type'] == 'tag', tag
+              tag = api(f"git/tags/{tag['sha']}")['object']
+          assert tag['type'] == 'commit' and tag['sha'] == expected_commit, tag
+          publish_names = [archive_name, 'SHA256SUMS', 'windows-build-manifest.json', 'build-info.json', 'windows-tests.xml', 'windows-desktop-smoke.json', 'windows-desktop-smoke.png']
+          existing = {asset['name'] for asset in release['assets']}
+          assert not existing.intersection(publish_names), f'Refusing to replace existing assets: {existing.intersection(publish_names)}'
+          subprocess.run([
+              'gh', 'release', 'upload', 'v2.1.0',
+              *[str(delivery / name) for name in publish_names], '--repo', repository,
+          ], check=True)
+          published = api('releases/445111615')
+          assets = {asset['name']: asset for asset in published['assets']}
+          for name in publish_names:
+              assert name in assets and assets[name]['state'] == 'uploaded', name
+              path = delivery / name
+              assert assets[name]['size'] == path.stat().st_size, name
+              if assets[name].get('digest'):
+                  assert assets[name]['digest'] == 'sha256:' + hashlib.sha256(path.read_bytes()).hexdigest(), name
+          prefix = (release.get('body') or '').split('## Download', 1)[0].rstrip()
+          download = (
+              '## Download\n\n'
+              f"[Windows-Paket v2.1.0 (64 Bit)]({assets[archive_name]['browser_download_url']})\n\n"
+              'Die ZIP vollständig entpacken und im entpackten Ordner `AnalyzerResultExtractorV2.exe` starten. '
+              'Die Ordner `_internal` und `rules` müssen neben der EXE bleiben. Eine separate Python-Installation ist für dieses Windows-Paket nicht erforderlich.\n\n'
+              f"Auf Windows geprüft: {junit['passed']} Tests bestanden, {junit['skipped']} übersprungen, "
+              f"{junit['failures']} fehlgeschlagen, {junit['errors']} Fehler. "
+              'Der kanonische Build prüfte die gebündelte EXE; zusätzlich wurde die EXE aus der entpackten Release-ZIP gestartet, '
+              'der Fenstertitel mit Version 2.1.0 geprüft und die Anwendung regulär geschlossen.\n\n'
+              'Die beigefügten `SHA256SUMS`, `build-info.json`, `windows-build-manifest.json`, `windows-tests.xml` '
+              'und `windows-desktop-smoke.json` dokumentieren Prüfsummen, Herkunft und Windows-Prüfungen. '
+              '`windows-desktop-smoke.png` ist die Fensteraufnahme des Windows-Runners.\n'
+          )
+          notes = (prefix + '\n\n' if prefix else '') + download
+          notes_file = pathlib.Path(os.environ['RUNNER_TEMP']) / 'arev2-windows-release-notes.md'
+          notes_file.write_text(notes, encoding='utf-8')
+          title = 'Analyzer Result Extractor V2 2.1.0'
+          subprocess.run([
+              'gh', 'release', 'edit', 'v2.1.0', '--repo', repository,
+              '--title', title, '--notes-file', str(notes_file),
+          ], check=True)
+          updated = api('releases/445111615')
+          assert updated['name'] == title and updated['body'] == notes
+          summary = f"Windows v2.1.0 package published to {published['html_url']}\n\nWindows pytest: {junit['passed']} passed, {junit['skipped']} skipped, {junit['failures']} failures, {junit['errors']} errors. Canonical frozen EXE smoke and extracted ZIP window startup/normal close passed.\n"
+          pathlib.Path(os.environ['GITHUB_STEP_SUMMARY']).write_text(summary, encoding='utf-8')
+          print(summary)
