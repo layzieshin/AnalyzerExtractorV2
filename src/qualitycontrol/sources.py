@@ -315,6 +315,7 @@ def get_lot_chronology(store_spec: Mapping[str, Any], *, profile_version_id: int
         if relevant:
             lot["close_available"] = False
             lot["last_usage_reliable"] = False
+            lot["witnesses"] = []
             lot["reasons"].extend(sorted({item["reason"] for item in relevant}))
     snapshot = {"chronology_version": "qc-usage-v1", "store_path": str(resolve_store_path(store_spec)),
         "device_id": effective_device, "assay_key": configuration["assay_key"], "profile_version_id": profile_version_id,

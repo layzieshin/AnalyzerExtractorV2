@@ -799,8 +799,19 @@ def test_watch_archive_depends_on_sqlite_done_and_never_on_validation_or_excel(
     from dataclasses import replace
     services.settings.save(replace(services.settings.load(), sqlite_path=str(sqlite_path)))
     report = services.results.list_recent_reports()[0]
-    validated = services.results.validate_report_run(report.report_id, ids[0], "AB")
-    corrected = services.results.correct_report_run(report.report_id, ids[0], "CD")
+    # Archiving completed before any human decision. The explicit later
+    # report-device confirmation and validation must still touch no Excel/job
+    # evidence and must resolve the original bytes through their archive path.
+    inventory_state = services.settings.get_qc_configuration()
+    services.settings.save_qc_inventory(inventory_state, {"default_device_id": "dev1", "devices": [
+        {"device_id": "dev1", "display_name": "Synthetic watch analyzer"}]}, "", "watch-device")
+    context = services.results.get_report_device_context(report.report_id)
+    assigned = services.results.confirm_report_device(report.report_id, "dev1",
+        expected_context_token=context["context_token"], operator_initials="AB", request_id="watch-report-device")
+    binding = {"expected_selection_token": assigned["runs"][0]["selection_token"],
+        "expected_device_assignment_id": assigned["assignment_id"], "store_path": str(sqlite_path)}
+    validated = services.results.validate_report_run(report.report_id, ids[0], "AB", request_id="watch-validate", **binding)
+    corrected = services.results.correct_report_run(report.report_id, ids[0], "CD", request_id="watch-correct", **binding)
     assert validated.excel_export_status == corrected.excel_export_status == "not_required"
     released = release_validated_run(
         root, record.processing_job_id, ids[0], operator_initials="AB",

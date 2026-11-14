@@ -557,8 +557,10 @@ def close_lot(store_spec: Mapping[str, Any], lot_key: str, *, expected_version_i
         if not baseline_usage or usage.snapshot_sha256 != baseline_usage:
             raise QCConflictError("Der vollständige Nutzungs- oder Konfigurationsstand wurde geändert. Bitte den Abschluss neu prüfen.")
         own = next((row for row in usage.to_dict()["lots"] if row["kit_lot"] == kit_lot), None)
-        witnesses = [row for row in own["witnesses"] if row["kit_lot"] == witness_kit_lot] if own else []
-        if not witnesses:
+        if not own or not own["last_usage_reliable"]:
+            raise QCConfigurationError("Der Nutzungsverlauf dieser Charge ist nicht eindeutig; bitte Geräte- oder Quellzuordnung klären.")
+        witnesses = [row for row in own["witnesses"] if row["kit_lot"] == witness_kit_lot]
+        if not own["close_available"] or not witnesses:
             raise QCConfigurationError("Eine sicher spätere Nutzung einer anderen Kit-Charge ist nicht belegt.")
         witness = _capture(store_spec, selected_profile, witness_kit_lot, captured["device_id"])
         if witness["source_token"] != expected_witness_source_token:

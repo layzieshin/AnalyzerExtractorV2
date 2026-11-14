@@ -483,6 +483,12 @@ def _analyze(manifest: dict[str, Any], references: dict[str, Any], sd_context: d
                         relative_reason="" if target > 0 else "positive_target_required", limit_status=limit_status,
                         relative_limit_percent=limit)
         reference = _sd_reference(references.get(identifier), identifier, target, manifest, sd_context)
+        if modern:
+            # A single observation needs a qualified value/reference, not a
+            # timestamp. Chronology still gates windows and sequence rules.
+            for point in prepared:
+                if point["eligible"] and reference["available"]:
+                    point.update(_normalization(point["_actual"], reference))
         buckets = defaultdict(list)
         for point in prepared:
             if point["_date"] is not None:
@@ -504,7 +510,7 @@ def _analyze(manifest: dict[str, Any], references: dict[str, Any], sd_context: d
             ambiguous = len(bucket) != 1 or any(point["order_ambiguous"] for point in bucket)
             for point in bucket:
                 point["order_ambiguous"] = ambiguous
-                if point["eligible"] and reference["available"]:
+                if not modern and point["eligible"] and reference["available"]:
                     point.update(_normalization(point["_actual"], reference))
                 seconds = Decimal(measured_at.hour * 3600 + measured_at.minute * 60 + measured_at.second)
                 point["chart_x"] = _text(Decimal(measured_at.toordinal()) + seconds / 86400)

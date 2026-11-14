@@ -547,11 +547,19 @@ def test_optional_time_pdf_names_errors_and_preserves_old_profile_sd_and_evidenc
     history_before = list_lots(spec, include_history=True)
     revised = time_profile(spec, old)
     current = get_lot_sources(spec, profile_version_id=revised["version_id"], kit_lot="L1")
-    assert current["included_count"] == 1 and current["excluded_count"] == 2
+    assert current["included_count"] == 3 and current["excluded_count"] == 0
     origin = get_sd_reference_context(spec, lot_key=closed["lot_key"], expected_version_id=closed["version_id"])
     analysis = analyze_lot(current, refs, sd_reference_context=origin)
     assert analysis.to_dict()["computed_series"][0]["sd"]["available"]
-    report = render_analysis_pdf(analysis)
+    series = analysis.to_dict()["computed_series"][0]
+    assert series["descriptive"]["n"] == series["qmma"]["n"] == 3
+    assert series["descriptive"]["mean"]["value"] == "42"
+    assert series["qmma"]["value"] == "2"
+    measurements = {point["run_id"]: point["measurement"] for point in analysis.to_dict()["points"]}
+    assert measurements[1]["time"] is measurements[2]["time"] is None
+    assert measurements[1]["precision"] == measurements[2]["precision"] == "day"
+    assert measurements[3]["time"] == "08:00" and measurements[3]["precision"] == "minutes"
+    report = render_analysis_pdf(analysis, include_explanations=True)
     path = tmp_path / "optional-time-errors.pdf"
     path.write_bytes(report.pdf_bytes)
     geometry = path.with_suffix(".geometry.json")

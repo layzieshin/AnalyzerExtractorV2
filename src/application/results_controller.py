@@ -373,7 +373,7 @@ class ResultsController:
             self._qc_current_lot(detail.case, spec)
             usage = get_lot_chronology(spec, profile_version_id=detail.case.profile_version_id, device_id=detail.case.device_id)
             own = next((row for row in usage.to_dict()["lots"] if row["kit_lot"] == detail.case.kit_lot), None)
-            identities = {row["kit_lot"] for row in own["witnesses"]} if own else set()
+            identities = {row["kit_lot"] for row in own["witnesses"]} if own and own["close_available"] and own["last_usage_reliable"] else set()
             return tuple(self.get_qc_lot_detail(case, profile_version_id=detail.case.profile_version_id)
                 for case in self.list_qc_lots() if case.kit_lot in identities and
                 (case.device_id, case.assay_key) == (detail.case.device_id, detail.case.assay_key))
@@ -395,7 +395,7 @@ class ResultsController:
                 raise QualityControlApplicationError("Die Quellen wurden geändert. Bitte neu laden.")
             usage = json.loads(captured.chronology_json)
             own = next((row for row in usage["lots"] if row["kit_lot"] == case.kit_lot), None)
-            if not own or not own["witnesses"]:
+            if not own or not own["close_available"] or not own["last_usage_reliable"] or not own["witnesses"]:
                 raise QualityControlApplicationError(captured.case.close_reason)
             witness = own["witnesses"][0]
             witness_source = get_lot_sources(spec, profile_version_id=case.profile_version_id, kit_lot=witness["kit_lot"], device_id=case.device_id)

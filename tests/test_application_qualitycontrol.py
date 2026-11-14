@@ -542,7 +542,7 @@ def test_new_profile_assay_change_clears_foreign_mappings_and_old_invalid_key_st
         root.update()
         for label in ("Untergrenze (MIN)", "Obergrenze (MAX)", "Zielwert (SOLL)", "Gemessener Wert (IST)"):
             field = qc_widget(dialog, ttk.Combobox, label=label)
-            assert field.get() == "" and tuple(field.cget("values")) == tuple(choices["B"])
+            assert field.get() == "" and tuple(field.cget("values")) == ("", *choices["B"])
         dialog.save_button.invoke()
         assert not submitted
         dialog.destroy()
@@ -728,6 +728,7 @@ def test_profile_same_assay_names_bind_stable_keys_by_option_index(tmp_path):
         dialog.save_button.invoke()
         created_id = submitted[-1][0]["profile_id"]
         control_id = submitted[-1][0]["controls"][0]["control_id"]
+        a_snapshot = copy.deepcopy(submitted[-1][0])
         assert created_id != old["profile_id"] and submitted[-1][0]["assay_key"] == "A"
         assay.current(1)
         assay.event_generate("<<ComboboxSelected>>")
@@ -736,15 +737,35 @@ def test_profile_same_assay_names_bind_stable_keys_by_option_index(tmp_path):
         assert qc_widget(dialog, ttk.Combobox, label="Messdatumsfeld").cget("values") == ("", *choices["B"])
         for label in ("Untergrenze (MIN)", "Obergrenze (MAX)", "Zielwert (SOLL)", "Gemessener Wert (IST)"):
             widget = qc_widget(dialog, ttk.Combobox, label=label)
-            assert widget.get() == "" and widget.cget("values") == tuple(choices["B"])
+            assert widget.get() == "" and widget.cget("values") == ("", *choices["B"])
         assert qc_widget(dialog, ttk.Combobox, label="SD-Referenz").get() == "Keine SD"
         for label, key in (("Untergrenze (MIN)", "BN"), ("Obergrenze (MAX)", "BX"), ("Zielwert (SOLL)", "BS"), ("Gemessener Wert (IST)", "BI")):
             edit_qc_field(dialog, label, key)
         dialog.save_button.invoke()
         assert submitted[-1][0]["assay_key"] == "B" and submitted[-1][1] == 0
-        assert submitted[-1][0]["profile_id"] == created_id
-        assert submitted[-1][0]["controls"][0]["control_id"] == control_id
+        b_snapshot = copy.deepcopy(submitted[-1][0])
+        assert b_snapshot["profile_id"] != created_id and b_snapshot["_draft_id"] != a_snapshot["_draft_id"]
+        assert b_snapshot["controls"][0]["control_id"] != control_id
         assert submitted[-1][0]["controls"][0]["sd_reference"] is None
+        assay.current(0)
+        assay.event_generate("<<ComboboxSelected>>")
+        root.update()
+        assert assay.get() == "Gleicher Vollname [A]" and qc_widget(dialog, ttk.Entry, label="Levelname").get() == "Freier Name"
+        assert qc_widget(dialog, ttk.Combobox, label="SD-Referenz").get() == "Manuelle SD"
+        assert qc_widget(dialog, ttk.Entry, label="Manuelle SD (optional, Punkt)").get() == "2"
+        dialog.save_button.invoke()
+        restored = submitted[-1][0]
+        assert restored["profile_id"] == created_id and restored["_draft_id"] == a_snapshot["_draft_id"]
+        assert restored["controls"][0]["control_id"] == control_id
+        assert restored["controls"][0]["fields"] == a_snapshot["controls"][0]["fields"]
+        assert restored["controls"][0]["sd_reference"] == a_snapshot["controls"][0]["sd_reference"]
+        assay.current(1)
+        assay.event_generate("<<ComboboxSelected>>")
+        root.update()
+        dialog.save_button.invoke()
+        assert submitted[-1][0]["profile_id"] == b_snapshot["profile_id"]
+        assert submitted[-1][0]["_draft_id"] == b_snapshot["_draft_id"]
+        assert submitted[-1][0]["controls"] == b_snapshot["controls"]
     finally:
         root.destroy()
 
@@ -1605,15 +1626,22 @@ def test_p3_native_post_close_refresh_clears_selection_details_without_false_mis
         root.destroy()
 
 
-def test_native_first_use_original_reports_are_validated_and_evaluated_per_device(tmp_path):
+def test_native_first_use_original_reports_are_validated_and_evaluated_per_device(tmp_path, request):
     """Real Tk callbacks/task runner, nonexistent DB, original rules, QA-only PDFs."""
     import shutil
     import time
+    import gc
     import fitz
     from interfaces.tk.test_app import AnalyzerDesktopApp
     from src.jobcontroller.api import submit
     from src.qualitycontrol.api import list_profiles
     from src.resultvalidation.api import list_run_validations_readonly
+
+    # Older dialog tests and this real app own cyclic Tk variable callbacks.
+    # Finalize those on the test's Tk thread before any worker can trigger GC,
+    # then again after this test's local app references have left scope.
+    gc.collect()
+    request.addfinalizer(gc.collect)
 
     root = tmp_path / 'native-first-use'
     root.mkdir()

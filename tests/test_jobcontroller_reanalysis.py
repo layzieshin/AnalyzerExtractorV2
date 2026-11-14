@@ -357,7 +357,8 @@ def test_original_reports_keep_device_identity_through_materialization_reanalysi
     from src.dbwriter.api import confirm_report_device, write_record_sqlite
     from src.extractor.api import AssayRecord
     from src.qualitycontrol.api import (ConfigurationContext, save_inventory, save_profile,
-        get_lot_sources, get_lot_chronology, analyze_lot)
+        get_lot_sources, get_lot_chronology, analyze_lot, MutationContext, QCConfigurationError, open_lot, close_lot)
+    from src.application.api import DesktopSettings, ResultsController, QualityControlApplicationError
     from src.resultstore.api import (get_report_device_context, get_report_runs,
         list_pending_report_candidates, list_result_runs)
 
@@ -481,6 +482,12 @@ def test_original_reports_keep_device_identity_through_materialization_reanalysi
     def chronology():
         return get_lot_chronology(spec, profile_version_id=profile['version_id'], device_id='A').to_dict()
     assert next(lot for lot in chronology()['lots'] if lot['kit_lot'] == 'EQA77')['close_available']
+    controller = ResultsController(root, settings_provider=lambda: DesktopSettings('sqlite', str(path)))
+    a_source = get_lot_sources(spec, profile_version_id=profile['version_id'], kit_lot='EQA77', device_id='A')
+    opened_a = open_lot(spec, profile_version_id=profile['version_id'], kit_lot='EQA77', device_id='A',
+        expected_source_token=a_source['source_token'], context=MutationContext('QA', 'open-a'))
+    a_case = next(case for case in controller.list_qc_lots() if case.device_id == 'A' and case.kit_lot == 'EQA77' and case.assay_key == '(1c9e)')
+    prepared_a = controller.prepare_qc_lot_close(controller.get_qc_lot_detail(a_case))
     # An unknown-device run may have another selected and pending lot. It
     # creates no empty-device UI case, while both possible lots stay relevant.
     unknown_lot = report('QAPENDING_LOT', day='16.11.2026', lot='EQA79')
@@ -492,10 +499,27 @@ def test_original_reports_keep_device_identity_through_materialization_reanalysi
     pending_state = get_result_run(spec, unknown_run['id'])
     assert not pending_state['pending_revision']['result']['error']
     assert pending_state['pending_revision']['result']['lot_id'] == 'EQA77' and pending_state['lot_id'] == 'EQA79'
-    from src.application.api import DesktopSettings, ResultsController
-    controller = ResultsController(root, settings_provider=lambda: DesktopSettings('sqlite', str(path)))
     assert controller.list_qc_lots() and all(case.device_id for case in controller.list_qc_lots())
-    assert not next(lot for lot in chronology()['lots'] if lot['kit_lot'] == 'EQA77')['close_available']
+    current_usage = get_lot_chronology(spec, profile_version_id=profile['version_id'], device_id='A')
+    uncertain_a = next(lot for lot in current_usage.to_dict()['lots'] if lot['kit_lot'] == 'EQA77')
+    assert not uncertain_a['close_available'] and not uncertain_a['last_usage_reliable'] and not uncertain_a['witnesses']
+    database_before = path.read_bytes(), path.stat().st_mtime_ns
+    with pytest.raises(QualityControlApplicationError):
+        controller.prepare_qc_lot_close(controller.get_qc_lot_detail(a_case))
+    # Supply the *current* chronology token, not merely a stale preview. The
+    # authoritative writer must independently reject this ambiguous usage.
+    model_a = json.loads(prepared_a.analysis.model_json)
+    with pytest.raises(QCConfigurationError, match='Nutzungsverlauf'):
+        close_lot(spec, opened_a['lot_key'], expected_version_id=opened_a['version_id'],
+            profile_version_id=profile['version_id'], expected_source_token=a_source['source_token'],
+            witness_kit_lot=prepared_a.witness_kit_lot, expected_witness_source_token=prepared_a.witness_source_token,
+            expected_chronology_token=current_usage.snapshot_sha256, analysis_model=model_a,
+            pdf_bytes=prepared_a.pdf_bytes, pdf_sha256=prepared_a.pdf_sha256,
+            algorithm_id=model_a['algorithm_id'], renderer_id=prepared_a.renderer_id, context=MutationContext('QA', 'reject-ambiguous-close'))
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == database_before
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM qc_lot_versions').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM qc_report_evidence').fetchone()[0] == 0
     select_result_revision(str(path), unknown_run['id'], pending_lot_revision['revision_id'],
         expected_selection_token=pending_state['selection_token'], action='keep_old', request_id='unknown-keep-old', decided_by='QA')
     assert next(lot for lot in chronology()['lots'] if lot['kit_lot'] == 'EQA77')['close_available']
@@ -510,6 +534,10 @@ def test_original_reports_keep_device_identity_through_materialization_reanalysi
     confirm(c_later, 'C', 'c-later')
     c_usage = get_lot_chronology(spec, profile_version_id=profile['version_id'], device_id='C').to_dict()
     assert next(lot for lot in c_usage['lots'] if lot['kit_lot'] == 'EQA77')['close_available']
+    c_case = next(case for case in controller.list_qc_lots() if case.device_id == 'C' and case.kit_lot == 'EQA77' and case.assay_key == '(1c9e)')
+    c_preview = controller.prepare_qc_lot_close(controller.get_qc_lot_detail(c_case))
+    closed_c = controller.close_qc_lot(c_preview, operator_initials='QA', request_id='unrelated-device-close')
+    assert closed_c['state'] == 'closed'
     foreign = write_record_sqlite(AssayRecord('OTHER', 'EQA77', 'foreign', {'DATUM': '14.11.2026'}, 'DEFAULT_DEVICE'),
         RuleSet('OTHER', 'OTHER.json', {}), str(path), job_id='foreign').run_id
     assert foreign

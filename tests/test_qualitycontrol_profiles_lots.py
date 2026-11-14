@@ -232,6 +232,22 @@ def test_assaywide_actual_only_profile_keeps_independent_statistics_and_honest_s
     sd_context = get_sd_reference_context(spec, lot_key=lot["lot_key"], expected_version_id=lot["version_id"])
     evaluated = analyze_lot(own, lot["snapshot"]["sd_references"], sd_reference_context=sd_context).to_dict()
     assert evaluated["computed_series"][0]["unit"] == "1" and evaluated["computed_series"][0]["sd"]["available"]
+    # An undated single value can be normalized and checked against its
+    # explicitly bound SD; sequence rules still need actual chronology.
+    undated_profile = save_profile(spec, {**value, "profile_id": "undated-sd", "enabled_rules": ["1_2s", "1_3s", "2_2s", "4_1s", "10x"],
+        "controls": [{"control_id": "c1", "name": "Level 1", "fields": {"IST": "I1", "SOLL": "S1"}}]},
+        expected_version_id=0, expected_inventory_version_id=1, context=ConfigurationContext("undated-sd-profile"))
+    add_run(spec, 5, lot="UNDATED", data={"DATE": "unlesbar", "I1": "104", "S1": "100"})
+    undated = get_lot_sources(spec, profile_version_id=undated_profile["version_id"], kit_lot="UNDATED", device_id="dev")
+    opened = open_lot(spec, profile_version_id=undated_profile["version_id"], kit_lot="UNDATED", device_id="dev",
+        expected_source_token=undated["source_token"], sd_references={"c1": {"kind": "manual", "value": "1"}}, context=context("undated-sd"))
+    origin = get_sd_reference_context(spec, lot_key=opened["lot_key"], expected_version_id=opened["version_id"])
+    checked = analyze_lot(undated, opened["snapshot"]["sd_references"], sd_reference_context=origin).to_dict()
+    assert checked["points"][0]["z"] == "4" and checked["points"][0]["measured_at"] is None
+    assert checked["points"][0]["measurement"]["date"] is checked["points"][0]["measurement"]["time"] is None
+    findings = {finding["rule"]: finding for finding in checked["analytical_runs"][0]["findings"]}
+    assert findings["1_2s"]["status"] == "warning" and findings["1_3s"]["status"] == "reject"
+    assert all(findings[rule]["status"] == "unavailable" for rule in ("2_2s", "4_1s", "10x"))
 
 
 @pytest.mark.parametrize("optional", [{}, {"measurement_time_field": "", "measurement_time_format": ""},
