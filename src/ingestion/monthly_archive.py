@@ -87,12 +87,20 @@ def preview_monthly_archive(project_root, *, input_path, archive_path, store_pat
                     or plate.casefold() in {str(value).casefold() for value in proof["plate_candidates"]})]
     res_files = {path_key(item.path): item for item in files if item.kind == "res"}
     groups = []
-    manual_owners = defaultdict(set)
-    for pdf, res in assignments.items():
-        matching = next((row for rows in grouped.values() for row in rows if path_key(row[0].path) == pdf), None)
-        if res not in res_files or matching is None:
+    for res in assignments.values():
+        if res not in res_files:
             raise MonthlyArchiveError("Manuell gewählte RES-Datei fehlt im Eingang.")
-        manual_owners[res].add(matching[2].casefold())
+    effective_res, res_owners = {}, defaultdict(set)
+    # Resolve the whole input before granting any group removal rights. A
+    # manual choice overrides automatic matching for its entire plate; other
+    # plates' automatic consumers still own their effective RES as well.
+    for key, rows in grouped.items():
+        manual_selected = {assignments[path_key(item.path)] for item, _, _, _ in rows if path_key(item.path) in assignments}
+        matching_res = ([res_files[value] for value in sorted(manual_selected)] if manual_selected else
+                        [item for item in res_files.values() if rows[0][2] and Path(item.path).stem.casefold() == key])
+        effective_res[key] = manual_selected, matching_res
+        for item in matching_res:
+            res_owners[path_key(item.path)].add(key)
     for key, rows in grouped.items():
         reasons, members, no_res = [], [row[0] for row in rows], []
         names, dates = {row[2] for row in rows}, {row[3] for row in rows}
@@ -122,17 +130,9 @@ def preview_monthly_archive(project_root, *, input_path, archive_path, store_pat
                 target = str(_month_dir(archive, measured))
         except MonthlyArchiveError as exc:
             reasons.append(str(exc))
-        matching_res = [item for item in res_files.values() if Path(item.path).stem.casefold() == plate.casefold() and plate]
-        manual_selected = {assignments[path_key(item.path)] for item, _, _, _ in rows if path_key(item.path) in assignments}
-        if manual_selected:
-            matching_res = [res_files[value] for value in sorted(manual_selected)]
-        for item, _, _, _ in rows:
-            manual = assignments.get(path_key(item.path))
-            if manual:
-                if len(manual_owners[manual]) != 1:
-                    reasons.append("RES wurde verschiedenen Platten zugeordnet.")
-                if res_files[manual] not in matching_res:
-                    matching_res.append(res_files[manual])
+        manual_selected, matching_res = effective_res[key]
+        if any(len(res_owners[path_key(item.path)]) > 1 for item in matching_res):
+            reasons.append("RES wurde verschiedenen Platten zugeordnet.")
         archived_res = []
         if target and plate:
             res_dir = Path(target) / "res"

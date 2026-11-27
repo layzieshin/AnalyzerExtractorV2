@@ -136,6 +136,67 @@ def test_manual_res_mapping_is_confirmed_not_automatic_fuzzy_matching(tmp_path):
     assert not late.exists() and (archive / "2026/11_November/res/Different_Name.res").is_file()
 
 
+@pytest.mark.parametrize("manual_first", [True, False])
+@pytest.mark.parametrize("selected_plates", [("20261125_A",), ("20261125_B",), ("20261125_B", "20261125_A")])
+def test_shared_manual_and_automatic_res_blocks_every_owner_before_any_removal(tmp_path, monkeypatch, manual_first, selected_plates):
+    from src.ingestion.monthly_files import PlainHandle
+    incoming, archive, proof, pdf, reader, preview, commit = _fixture(tmp_path)
+    first = pdf("01-a.pdf" if manual_first else "02-a.pdf", plate="20261125_A")
+    second = pdf("02-b.pdf" if manual_first else "01-b.pdf", plate="20261125_B")
+    shared = incoming / "20261125_B.RES"
+    shared.write_bytes(b"one RES cannot belong to two physical plates")
+    mapping = {str(first): str(shared)}
+    before = {path: path.read_bytes() for path in incoming.iterdir()}
+    plan = preview(res_assignments=mapping)
+    groups = {group.plate: group for group in plan.groups}
+    assert set(groups) == {"20261125_A", "20261125_B"}
+    assert all(not group.eligible for group in groups.values())
+    assert all("RES wurde verschiedenen Platten zugeordnet." in group.reasons for group in groups.values())
+    assert not archive.exists() and not (tmp_path / "storage").exists()
+    monkeypatch.setattr(PlainHandle, "remove", lambda *_args: pytest.fail("A conflicting RES must never grant source removal rights"))
+    with pytest.raises(MonthlyArchiveError, match="unvollständigen|unvollständige"):
+        commit(plan, selected_group_ids=tuple(groups[plate].group_id for plate in selected_plates),
+               res_assignments=mapping, operator_initials="MK")
+    assert commit(plan, res_assignments=mapping, operator_initials="MK") == ()
+    assert first.exists() and second.exists() and not archive.exists()
+    assert {path: path.read_bytes() for path in incoming.iterdir()} == before
+
+
+def test_one_res_can_serve_multiple_pdfs_of_the_same_casefold_plate(tmp_path):
+    incoming, archive, proof, pdf, reader, preview, commit = _fixture(tmp_path)
+    first = pdf("one.pdf", plate="20261125_Test")
+    second = pdf("two.pdf", plate="20261125_tEsT")
+    for path in (first, second):
+        proof[str(path)]["origin_context"] = ("DEVICE", str(incoming))
+    shared = incoming / "20261125_TEST.res"
+    shared.write_bytes(b"one physical plate, multiple assay printouts")
+    mapping = {str(first): str(shared)}
+    plan = preview(res_assignments=mapping)
+    assert len(plan.groups) == 1 and plan.groups[0].eligible
+    assert {source.path for source in plan.groups[0].sources} == {str(first), str(second), str(shared)}
+    assert commit(plan, res_assignments=mapping, operator_initials="MK")[0]["status"] == "complete"
+    assert not list(incoming.iterdir())
+
+
+def test_res_owners_use_manual_precedence_for_the_whole_plate(tmp_path):
+    incoming, archive, proof, pdf, reader, preview, commit = _fixture(tmp_path)
+    first = pdf("a.pdf", plate="20261125_A")
+    second = pdf("b.pdf", plate="20261125_B")
+    second_assay = pdf("b-extra.pdf", plate="20261125_B")
+    matching_b = incoming / "20261125_B.res"
+    chosen_b = incoming / "Explicit_B.res"
+    matching_b.write_bytes(b"explicitly used by A")
+    chosen_b.write_bytes(b"B explicitly chooses this instead of its automatic stem")
+    mapping = {str(first): str(matching_b), str(second): str(chosen_b)}
+    plan = preview(res_assignments=mapping)
+    groups = {group.plate: group for group in plan.groups}
+    assert len(groups) == 2 and all(group.eligible for group in groups.values())
+    assert {source.path for source in groups["20261125_A"].sources} == {str(first), str(matching_b)}
+    assert {source.path for source in groups["20261125_B"].sources} == {str(second), str(second_assay), str(chosen_b)}
+    assert len(commit(plan, res_assignments=mapping, operator_initials="MK")) == 2
+    assert not list(incoming.iterdir())
+
+
 def test_res_only_late_files_and_existing_unique_month_variant_are_supported(tmp_path):
     incoming, archive, proof, pdf, reader, preview, commit = _fixture(tmp_path)
     month = archive / "2026/11 November"
