@@ -1492,6 +1492,7 @@ class AnalyzerDesktopApp(tk.Tk):
     VIEW_KEYS = (
         "dashboard",
         "results",
+        "changes",
         "statistics",
         "validation",
         "rules",
@@ -1516,12 +1517,14 @@ class AnalyzerDesktopApp(tk.Tk):
             DEFAULT_WIDTH,
             MIN_HEIGHT,
             MIN_WIDTH,
+            NAV_WIDTH,
             configure_desktop_theme,
         )
         from interfaces.tk.task_runner import TkTaskRunner
         from interfaces.tk.view_models import DASHBOARD_REPORT_JOIN_LIMIT, NAV_LABELS, PRIMARY_NAV_KEYS, SECONDARY_NAV_KEYS
         from interfaces.tk.views import (
             DashboardView,
+            ChangesView,
             DiagnosticsView,
             ResultsView,
             StatisticsView,
@@ -1574,6 +1577,7 @@ class AnalyzerDesktopApp(tk.Tk):
         self._qc_source_generation = 0
         self._qc_source_latest = None
         self._device_label_map: dict[str, str] = {}
+        self._device_inventory = None
         self._bootstrapped = False
         self._create_desktop_services = create_desktop_services
         self._task_runner = TkTaskRunner(self)
@@ -1587,45 +1591,73 @@ class AnalyzerDesktopApp(tk.Tk):
         self._settings_save_latest_edit_generation = 0
         self._settings_save_inflight_id: int | None = None
         self._current_view = "dashboard"
-        self._validation_report_scope = None
-        self._validation_store_scope = None
         self._validation_window_restore: tuple[str, str] | None = None
         self._validation_pdf_pending: tuple[int, str, int, int, float] | None = None
+        self._navigation_generation = 0
+        self._validation_navigation_generation = 0
+        self._validation_direct_target = None
+        self._validation_direct_request = None
+        self._report_detail_generation = 0
+        self._report_detail_request = None
+        self._store_generation = 0
+        self._validation_write_epoch = 0
+        self._validation_write_key = None
+        self._validation_refresh_pending = None
+        self._identity_write_epoch = 0
+        self._view_store_paths: dict[str, str] = {}
+        self._validation_pdf_binding = None
         self._nav_buttons: dict[str, ttk.Button] = {}
         self._validation_badge: StatusBadge | None = None
+        self._changes_badge: StatusBadge | None = None
         self._views: dict[str, ttk.Frame] = {}
 
-        self._build_header()
         shell = ttk.Frame(self, style="Content.TFrame")
         shell.pack(fill="both", expand=True)
         shell.columnconfigure(1, weight=1)
-        shell.rowconfigure(0, weight=1)
+        shell.rowconfigure(1, weight=1)
 
-        nav = ttk.Frame(shell, style="Nav.TFrame", padding=8, width=200)
-        nav.grid(row=0, column=0, sticky="ns")
-        nav.grid_propagate(False)
+        nav = ttk.Frame(shell, style="Nav.TFrame", padding=(12, 18), width=NAV_WIDTH)
+        self._shell_nav = nav
+        nav.grid(row=0, column=0, rowspan=2, sticky="ns")
+        nav.pack_propagate(False)
+        brand = ttk.Frame(nav, style="Nav.TFrame", padding=(7, 4, 0, 22))
+        brand.pack(fill="x")
+        from interfaces.tk.desktop_theme import COLOR_CARD, COLOR_PRIMARY, FONT_FAMILY
+
+        tk.Label(brand, text="∿", font=(FONT_FAMILY, 20), background=COLOR_PRIMARY, foreground=COLOR_CARD, padx=8, pady=1).pack(side="left", padx=(0, 9))
+        brand_copy = ttk.Frame(brand, style="Nav.TFrame")
+        brand_copy.pack(side="left")
+        ttk.Label(brand_copy, text="Analyzer", style="NavBrand.TLabel").pack(anchor="w")
+        ttk.Label(brand_copy, text="Result Extractor", style="NavBrandDetail.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(nav, text="A R B E I T S P L A T Z", style="NavGroup.TLabel").pack(anchor="w", padx=9, pady=(8, 7))
         for key in PRIMARY_NAV_KEYS:
             label = NAV_LABELS[key]
-            if key == "validation":
+            if key in {"validation", "changes"}:
                 row = ttk.Frame(nav, style="Nav.TFrame")
                 row.pack(fill="x", pady=(0, 4))
-                btn = ttk.Button(row, text=label, style="Nav.TButton", command=self._open_validation_queue)
+                btn = ttk.Button(row, text=label, style="Nav.TButton", command=lambda k=key: self.show_view(k))
                 btn.pack(side="left", fill="x", expand=True)
-                self._validation_badge = StatusBadge(row, "0", kind="good")
-                self._validation_badge.pack(side="right", padx=(6, 2))
+                badge = StatusBadge(row, "–")
+                badge.pack(side="right", padx=(6, 2))
+                if key == "validation":
+                    self._validation_badge = badge
+                else:
+                    self._changes_badge = badge
             else:
                 btn = ttk.Button(nav, text=label, style="Nav.TButton", command=lambda k=key: self.show_view(k))
                 btn.pack(fill="x", pady=(0, 4))
             self._nav_buttons[key] = btn
-        ttk.Separator(nav).pack(fill="x", pady=8)
+        ttk.Label(nav, text="W E I T E R E", style="NavGroup.TLabel").pack(anchor="w", padx=9, pady=(20, 7))
         for key in SECONDARY_NAV_KEYS:
             label = NAV_LABELS[key]
             btn = ttk.Button(nav, text=label, style="Nav.TButton", command=lambda k=key: self.show_view(k))
             btn.pack(fill="x", pady=(0, 4))
             self._nav_buttons[key] = btn
 
-        content = ttk.Frame(shell, style="Content.TFrame", padding=(12, 8))
-        content.grid(row=0, column=1, sticky="nsew")
+        self._build_header(shell)
+        content = ttk.Frame(shell, style="Content.TFrame", padding=(24, 22, 24, 18))
+        self._shell_content = content
+        content.grid(row=1, column=1, sticky="nsew")
         content.rowconfigure(0, weight=1)
         content.columnconfigure(0, weight=1)
 
@@ -1636,6 +1668,8 @@ class AnalyzerDesktopApp(tk.Tk):
             on_refresh=self.refresh_current_view,
             on_open_report=self._open_report_from_dashboard,
             on_open_selected_report=self._open_selected_dashboard_report,
+            on_open_results=lambda: self.show_view("results"),
+            on_open_validation=lambda: self.show_view("validation"),
         )
         self._views["results"] = ResultsView(
             content,
@@ -1645,8 +1679,7 @@ class AnalyzerDesktopApp(tk.Tk):
             on_open_output_folder=self._open_output_folder,
             on_back=self._show_results_list,
             on_occurrence_selected=lambda _occ_id: None,
-            on_save_validation=self._save_selected_validation,
-            on_correct_validation=self._correct_selected_validation,
+            on_open_validation=self._open_selected_validation,
         )
         self._views["statistics"] = StatisticsView(
             content,
@@ -1658,6 +1691,9 @@ class AnalyzerDesktopApp(tk.Tk):
             on_qc_report_selected=self._load_qc_report_version,
             on_export_qc=self._export_qc_report,
         )
+        self._views["changes"] = ChangesView(content, on_refresh=self.refresh_current_view,
+            on_confirm=self._confirm_identity_case, on_open_editor=self._open_identity_editor,
+            on_open_pdf=self._open_identity_pdf, on_retry=self._retry_identity_case)
         self._views["validation"] = ValidationView(
             content,
             on_refresh=self.refresh_current_view,
@@ -1667,13 +1703,15 @@ class AnalyzerDesktopApp(tk.Tk):
             on_reanalyze=self._reanalyze_validation_cases,
             on_choose=self._choose_validation_result,
             on_edit_rules=self.open_rule_editor,
-            on_add_device=self._add_validation_device,
+            on_case_selected=self._validation_queue_selected,
         )
         self._views["rules"] = RulesView(
             content,
             on_open_rule_editor=self.open_rule_editor,
             on_refresh=self.refresh_current_view,
             on_validate=self._validate_rules,
+            on_focus=self._set_rule_editor_focus,
+            on_return_identity=lambda: self.show_view("changes"),
         )
         self._views["settings"] = SettingsView(
             content,
@@ -1686,8 +1724,6 @@ class AnalyzerDesktopApp(tk.Tk):
             on_manage_devices=lambda: self._open_qc_configuration("devices"),
             on_migrate_devices=lambda: self._open_qc_configuration("migrate"),
             on_manage_profiles=lambda: self._open_qc_configuration("profiles"),
-            on_new_qc_profile=lambda: self._open_qc_configuration("profiles", new_profile=True),
-            on_refresh_qc=self.refresh_current_view,
         )
         self._views["diagnostics"] = DiagnosticsView(
             content,
@@ -1739,6 +1775,21 @@ class AnalyzerDesktopApp(tk.Tk):
         self._schedule_watch()
         self.refresh_current_view()
 
+    def _set_rule_editor_focus(self, active: bool) -> None:
+        """Only the direct rule workplace borrows the shell's full client area."""
+        if active and self._current_view != "rules":
+            return
+        if active:
+            self._shell_nav.grid_remove()
+            self._shell_header.grid_remove()
+            self._shell_content.configure(padding=0)
+            self._shell_content.grid_configure(row=0, column=0, rowspan=2, columnspan=2)
+        else:
+            self._shell_nav.grid()
+            self._shell_header.grid()
+            self._shell_content.configure(padding=(24, 22, 24, 18))
+            self._shell_content.grid_configure(row=1, column=1, rowspan=1, columnspan=1)
+
     def _require_services(self) -> bool:
         return self._bootstrapped and self._services is not None
 
@@ -1746,11 +1797,21 @@ class AnalyzerDesktopApp(tk.Tk):
         if key not in self.VIEW_KEYS:
             return
         previous = self._current_view
+        if previous == "rules" and key != previous:
+            if not self._views["rules"].prepare_leave():
+                return
+            self._views["rules"].invalidate_context()
+        if key != previous:
+            self._navigation_generation = self.__dict__.get("_navigation_generation", 0) + 1
+        if previous == "results" and key != "results":
+            self._report_detail_request = None
+            self._report_detail_generation = self.__dict__.get("_report_detail_generation", 0) + 1
         if previous == "validation" and key != "validation":
-            self._validation_report_scope = None
-            self._validation_store_scope = None
             self._views["validation"].suspend_pdf_preview()
             self._validation_pdf_pending = None
+            self._validation_pdf_binding = None
+            self._validation_direct_target = None
+            self._validation_direct_request = None
             self._restore_validation_window()
         self._current_view = key
         for view_key, frame in self._views.items():
@@ -1761,7 +1822,13 @@ class AnalyzerDesktopApp(tk.Tk):
         for view_key, button in self._nav_buttons.items():
             style = "NavActive.TButton" if view_key == key else "Nav.TButton"
             button.configure(style=style)
+        from interfaces.tk.view_models import NAV_LABELS, SECONDARY_NAV_KEYS
+
+        if self.__dict__.get("_header_group") is not None:
+            self._header_group.configure(text="Weitere  /" if key in SECONDARY_NAV_KEYS else "Arbeitsplatz  /")
+            self._header_section.configure(text=NAV_LABELS[key])
         if key == "validation" and previous != "validation":
+            self._views["validation"].set_focus_mode(False)
             self._maximize_validation_window()
             self._views["validation"].resume_pdf_preview()
         if refresh:
@@ -1802,6 +1869,9 @@ class AnalyzerDesktopApp(tk.Tk):
 
     def _request_validation_pdf(self, request: tuple[int, str, int, int, float]) -> None:
         self._validation_pdf_pending = request
+        view = self._views["validation"]
+        item = view.selected_item()
+        self._validation_pdf_binding = (request, getattr(view, "selection_context", lambda: None)(), item.store_path if item is not None else "")
         self._submit_validation_pdf_preview()
 
     def _submit_validation_pdf_preview(self) -> None:
@@ -1813,15 +1883,24 @@ class AnalyzerDesktopApp(tk.Tk):
         if request != self._views["validation"].pdf_request():
             return
         _generation, report_id, _run_id, page_index, zoom = request
+        selected = self._views["validation"].selected_item()
+        store_path = selected.store_path if selected is not None else ""
+        context = getattr(self._views["validation"], "selection_context", lambda: None)()
+        descriptor = (request, context, store_path)
+        if descriptor != self.__dict__.get("_validation_pdf_binding") or not self._ui_store_matches(store_path):
+            return
+        binding = {"store_path": store_path} if store_path else {}
 
         def work() -> object:
             assert self._services is not None
-            return self._services.results.render_report_pdf_page(report_id, page_index=page_index, zoom=zoom)
+            return self._services.results.render_report_pdf_page(report_id, page_index=page_index, zoom=zoom, **binding)
 
         def finish(page: object = None, error: BaseException | None = None) -> None:
             from src.application.api import PdfPreviewError
 
-            if self._current_view == "validation":
+            current_view = self._views["validation"]
+            current_descriptor = (current_view.pdf_request(), getattr(current_view, "selection_context", lambda: None)(), store_path)
+            if self._current_view == "validation" and self._ui_store_matches(store_path) and descriptor == current_descriptor and descriptor == self.__dict__.get("_validation_pdf_binding"):
                 view = self._views["validation"]
                 if error is None:
                     view.render_pdf_page(request, page)
@@ -1844,14 +1923,21 @@ class AnalyzerDesktopApp(tk.Tk):
         return user_error_dialog_parts(error)
 
     def _submit_refresh_task(self, generation: int, view_key: str) -> bool:
+        scope = self._refresh_scope()
+        write_key = self.__dict__.get("_validation_write_key")
+        if write_key is not None and self._task_runner.is_active(write_key):
+            self._validation_refresh_pending = (generation, view_key, scope)
+            return False
+        validation_epoch = self.__dict__.get("_validation_write_epoch", 0)
+        identity_epoch = self.__dict__.get("_identity_write_epoch", 0)
         def work() -> dict[str, object]:
             return self._load_view_payload(view_key)
 
         def on_success(payload: dict[str, object]) -> None:
-            self._complete_refresh(generation, view_key, payload=payload)
+            self._complete_refresh(generation, view_key, payload=payload, scope=scope, validation_epoch=validation_epoch, identity_epoch=identity_epoch)
 
         def on_error(exc: BaseException) -> None:
-            self._complete_refresh(generation, view_key, error=exc)
+            self._complete_refresh(generation, view_key, error=exc, scope=scope, validation_epoch=validation_epoch, identity_epoch=identity_epoch)
 
         return self._task_runner.submit(
             self.TASK_REFRESH,
@@ -1867,7 +1953,14 @@ class AnalyzerDesktopApp(tk.Tk):
             return
         if not self._require_services():
             return
+        if self._current_view == "validation" and (self.__dict__.get("_validation_direct_target") is not None or self.__dict__.get("_validation_direct_request") is not None):
+            return
         self._submit_refresh_task(self._refresh_generation, self._current_view)
+
+    def _refresh_scope(self) -> tuple:
+        settings = self.__dict__.get("_settings")
+        return (self.__dict__.get("_store_generation", 0), self.__dict__.get("_navigation_generation", 0),
+                self._store_key(str(getattr(settings, "sqlite_path", "") or "")))
 
     def _complete_refresh(
         self,
@@ -1876,12 +1969,26 @@ class AnalyzerDesktopApp(tk.Tk):
         *,
         payload: dict[str, object] | None = None,
         error: BaseException | None = None,
+        scope: tuple | None = None,
+        validation_epoch: int | None = None,
+        identity_epoch: int | None = None,
     ) -> None:
-        if view_key != self._current_view:
-            self.refresh_current_view()
+        if identity_epoch is not None and identity_epoch != self.__dict__.get("_identity_write_epoch", 0):
+            self._maybe_submit_latest_refresh()
+            return
+        if validation_epoch is not None and validation_epoch != self.__dict__.get("_validation_write_epoch", 0):
+            # A write reconciles its own fresh queue; an earlier read must not
+            # reinstall it. Only a newer navigation/manual refresh is coalesced.
+            if generation != self._refresh_generation or view_key != self._current_view or (scope is not None and scope != self._refresh_scope()):
+                self._maybe_submit_latest_refresh()
+            return
+        if view_key != self._current_view or (scope is not None and scope != self._refresh_scope()):
+            self._maybe_submit_latest_refresh()
             return
         if generation != self._refresh_generation:
             self._maybe_submit_latest_refresh()
+            return
+        if view_key == "validation" and (self.__dict__.get("_validation_direct_target") is not None or self.__dict__.get("_validation_direct_request") is not None):
             return
         if error is not None:
             message, details = self._friendly_error_parts(error)
@@ -1896,6 +2003,9 @@ class AnalyzerDesktopApp(tk.Tk):
         if self._current_view == "statistics":
             self._open_qc_lots()
             return
+        if self._current_view == "validation" and self.__dict__.get("_validation_direct_target") is not None:
+            self._begin_direct_validation(self._validation_direct_target, focus=False)
+            return
         self._refresh_generation += 1
         generation = self._refresh_generation
         view_key = self._current_view
@@ -1907,58 +2017,104 @@ class AnalyzerDesktopApp(tk.Tk):
 
         assert self._services is not None
         settings = self._services.settings.load()
-        payload: dict[str, object] = {"view": view_key, "settings": settings}
+        store_path = str(Path(settings.sqlite_path).resolve())
+        payload: dict[str, object] = {"view": view_key, "settings": settings, "store_path": store_path}
         payload["build_info"] = self._services.settings.get_build_info()
-        validation_cases = self._services.results.list_open_validation_cases()
+        payload["devices"] = self._services.settings.get_device_inventory()
+        validation_cases = self._services.results.list_open_validation_cases(store_path=store_path)
         payload["validation_open_count"] = len(validation_cases)
         if view_key == "dashboard":
+            try:
+                payload["identity_open_count"] = self._services.rules.get_identity_case_count(store_path=store_path)
+            except Exception:
+                payload["identity_open_count"] = None
+                payload["identity_count_error"] = "Kennungsfälle derzeit nicht lesbar. Bitte unter Änderungen prüfen."
             ingestions = self._services.extraction.list_ingestion_instances()
-            reports = self._services.results.list_recent_reports(limit=self._dashboard_report_join_limit)
+            reports = self._services.results.list_recent_reports(limit=self._dashboard_report_join_limit, store_path=store_path)
             payload["recent"] = build_dashboard_recent_rows(ingestions, reports)
             payload["watch_summary"] = self._last_watch_summary
             payload["watch_error"] = self._last_watch_error
         elif view_key == "results":
-            payload["reports"] = self._services.results.list_recent_reports()
+            payload["reports"] = self._services.results.list_recent_reports(store_path=store_path)
         elif view_key == "validation":
-            scope = getattr(self, "_validation_report_scope", None)
-            payload["validation_cases"] = (self._services.results.list_open_validation_cases(report_id=scope, include_validated=True, store_path=self._validation_store_scope)
-                if scope else validation_cases)
+            payload["validation_cases"] = validation_cases
+        elif view_key == "changes":
+            identity_cases = self._services.rules.list_identity_case_items(store_path=store_path)
+            payload["identity_cases"] = identity_cases
+            payload["identity_open_count"] = sum(not item.completed for item in identity_cases)
         elif view_key == "rules":
             payload["inventory"] = self._services.rules.list_inventory()
         elif view_key == "settings":
-            payload["devices"] = self._services.settings.get_device_inventory()
             payload["timing"] = self._services.settings.get_watch_timing()
-            payload["qc_configuration"] = self._services.settings.get_qc_assay_configuration()
+            payload.update(self._load_settings_configuration(store_path))
         elif view_key == "diagnostics":
             payload["diagnoses"] = self._services.extraction.list_job_diagnoses()
-            payload["duplicates"] = self._services.results.list_duplicate_candidates(status="pending")
+            payload["duplicates"] = self._services.results.list_duplicate_candidates(status="pending", store_path=store_path)
         return payload
+
+    def _load_settings_configuration(self, store_path: str) -> dict[str, object]:
+        result = {"qc_configuration": None, "qc_assay_names": {}, "qc_configuration_error": ""}
+        try:
+            state = self._services.settings.get_qc_configuration()
+            if self._store_key(state.store_path) != self._store_key(store_path):
+                result["qc_configuration_error"] = "Ergebnisspeicher gewechselt. Bitte neu laden."
+                return result
+            result["qc_configuration"] = state
+        except Exception:
+            result["qc_configuration_error"] = "Geräte und Prüfprofile konnten nicht geladen werden. Bitte neu laden."
+            return result
+        try:
+            names = {}
+            for item in self._services.rules.list_inventory(kind="active"):
+                key = str(getattr(item, "assay_key", "") or "")
+                name = str(getattr(item, "assay_name", "") or "").strip()
+                if key and name:
+                    names.setdefault(key, set()).add(name)
+            result["qc_assay_names"] = {key: next(iter(values)) for key, values in names.items() if len(values) == 1}
+        except Exception:
+            result["qc_configuration_error"] = "Assaynamen konnten nicht geladen werden. Prüfprofile bleiben an ihre Kennungen gebunden."
+        return result
 
     def _apply_view_payload(self, view_key: str, payload: dict[str, object]) -> None:
         from interfaces.tk.desktop_theme import APP_TITLE
 
         settings = payload["settings"]
-        self._settings = settings
+        self._accept_settings_snapshot(settings)
+        store_path = str(payload.get("store_path") or getattr(settings, "sqlite_path", "") or "")
+        if "_view_store_paths" not in self.__dict__:
+            self._view_store_paths = {}
+        self._view_store_paths[view_key] = store_path
+        self._device_inventory = payload["devices"]
+        self._render_import_device_context(settings, self._device_inventory)
         if isinstance(payload.get("build_info"), dict):
             version = str(payload["build_info"].get("version") or "UNKNOWN")
             self.title(f"{APP_TITLE} · Version {version if version != 'UNKNOWN' else 'unbekannt'}")
         self._set_validation_badge(int(payload.get("validation_open_count") or 0))
+        if "identity_open_count" in payload:
+            self._set_changes_badge(payload["identity_open_count"])
         if view_key == "dashboard":
             dashboard = self._views["dashboard"]
+            dashboard.render_open_case_count(int(payload.get("validation_open_count") or 0))
             dashboard.render_watch_settings(settings)
             dashboard.render_recent_rows(payload.get("recent", ()))
             summary = payload.get("watch_summary")
             error = str(payload.get("watch_error") or "")
             if isinstance(summary, self._WatchCycleSummary) or summary is None:
                 dashboard.render_watch_session_summary(summary, error=error)
+            if payload.get("identity_count_error"):
+                dashboard.set_activity_message(payload["identity_count_error"])
         elif view_key == "results":
-            self._views["results"].render_report_list(payload.get("reports", ()))
+            self._views["results"].render_report_list(payload.get("reports", ()), store_path=store_path)
         elif view_key == "validation":
             validation = self._views["validation"]
             validation.set_default_operator_initials(str(getattr(settings, "operator_initials", "") or ""))
             validation.render_cases(payload.get("validation_cases", ()))
+        elif view_key == "changes":
+            self._views["changes"].render_cases(payload.get("identity_cases", ()), store_path=store_path)
         elif view_key == "rules":
-            self._views["rules"].render_inventory(payload.get("inventory", ()))
+            rules_view = self._views["rules"]
+            rules_view.bind_editor(self._services.rules, self.project_root)
+            rules_view.render_inventory(payload.get("inventory", ()))
         elif view_key == "settings":
             devices = getattr(payload["devices"], "devices", ())
             self._device_label_map = {
@@ -1969,13 +2125,20 @@ class AnalyzerDesktopApp(tk.Tk):
                 devices=devices,
                 timing=payload["timing"],
             )
-            state = payload.get("qc_configuration")
-            if state is not None and self._qc_store_is_displayed(state.store_path):
-                self._views["settings"].render_qc_configuration(state)
+            self._views["settings"].render_qc_configuration(payload.get("qc_configuration"),
+                assay_names=payload.get("qc_assay_names", {}), error=str(payload.get("qc_configuration_error") or ""))
         elif view_key == "diagnostics":
             self._views["diagnostics"].render_diagnoses(payload.get("diagnoses", ()))
-            self._views["diagnostics"].render_duplicates(payload.get("duplicates", ()))
+            self._views["diagnostics"].render_duplicates(payload.get("duplicates", ()), store_path=store_path)
             self._views["diagnostics"].render_candidates(())
+
+    def _render_import_device_context(self, settings: object, inventory: object) -> None:
+        from interfaces.tk.view_models import import_device_label
+
+        label = import_device_label(settings, inventory)
+        if self.__dict__.get("_header_device") is not None:
+            self._header_device.configure(text=f"Importgerät: {label}")
+        self._views["dashboard"].render_import_device(label)
 
     def _drain_processing_queue(self) -> tuple[ProcessingOutcome, ...]:
         assert self._services is not None
@@ -2003,6 +2166,7 @@ class AnalyzerDesktopApp(tk.Tk):
         def wrapped_success(result: object) -> None:
             dashboard.set_processing_busy(False)
             dashboard.set_activity_message("Bereit.")
+            self._refresh_changes_count()
             on_success(result)
 
         def wrapped_error(exc: BaseException) -> None:
@@ -2063,67 +2227,383 @@ class AnalyzerDesktopApp(tk.Tk):
     def _open_report_from_dashboard(self, report_id: str) -> None:
         if not self._require_services():
             return
+        store = self.__dict__.get("_view_store_paths", {}).get("dashboard", "")
+        if not store or not self._ui_store_matches(store):
+            self._show_info_dialog(self, "Ergebnisse", "Der angezeigte Ergebnisspeicher ist nicht mehr aktuell. Bitte aktualisieren.")
+            return
         self.show_view("results", refresh=False)
-
-        def work() -> object:
-            return self._services.results.get_report_detail(report_id)
-
-        def on_success(detail: object) -> None:
-            if detail is None:
-                self._show_error_dialog(self, "Ergebnisse", "Bericht nicht gefunden.")
-                return
-            results = self._views["results"]
-            self._apply_report_detail(results, detail)
-
-        self._task_runner.submit(
-            f"report-detail-{report_id}",
-            work,
-            on_success=on_success,
-            on_error=self._show_task_error,
-        )
+        self._start_report_detail(report_id, store, selected_guard=False)
 
     def _open_selected_report(self) -> None:
         if not self._require_services():
             return
         results = self._views["results"]
-        report_id = results.selected_report_id()
+        report_id, store = results.selected_report_descriptor()
         if not report_id:
             self._show_info_dialog(self, "Ergebnisse", "Bitte einen Bericht auswählen.")
             return
+        if not store or not self._ui_store_matches(store):
+            self._show_info_dialog(self, "Ergebnisse", "Der angezeigte Ergebnisspeicher ist nicht mehr aktuell. Bitte aktualisieren.")
+            return
+        self._start_report_detail(report_id, store, selected_guard=True)
+
+    def _start_report_detail(self, report_id: str, store_path: str, *, selected_guard: bool) -> None:
+        self._report_detail_generation = self.__dict__.get("_report_detail_generation", 0) + 1
+        self._report_detail_request = (self._report_detail_generation, self._refresh_scope(), report_id, store_path, selected_guard)
+        self._submit_report_detail()
+
+    def _report_request_current(self, request: tuple) -> bool:
+        _generation, scope, report_id, store_path, selected_guard = request
+        if self._current_view != "results" or scope != self._refresh_scope() or not self._ui_store_matches(store_path):
+            return False
+        return not selected_guard or self._views["results"].selected_report_descriptor() == (report_id, store_path)
+
+    def _submit_report_detail(self) -> None:
+        request = self.__dict__.get("_report_detail_request")
+        if request is None or not self._report_request_current(request):
+            return
+        _generation, _scope, report_id, store_path, _selected_guard = request
+        key = f"report-detail-{report_id}"
+        if self._task_runner.is_active(key):
+            return
 
         def work() -> object:
-            return self._services.results.get_report_detail(report_id)
+            if request != self.__dict__.get("_report_detail_request") or not self._ui_store_matches(store_path):
+                return None
+            return self._services.results.get_report_detail(report_id, store_path=store_path)
 
-        def on_success(detail: object) -> None:
-            if detail is None:
-                self._show_error_dialog(self, "Ergebnisse", "Bericht nicht gefunden.")
-                return
-            self._apply_report_detail(results, detail)
+        def finish(detail=None, error=None):
+            if request == self.__dict__.get("_report_detail_request"):
+                self._report_detail_request = None
+                if self._report_request_current(request):
+                    if error is not None:
+                        self._show_task_error(error)
+                    elif detail is None:
+                        self._show_error_dialog(self, "Ergebnisse", "Bericht nicht gefunden.")
+                    elif detail.report_id != report_id or self._store_key(detail.store_path) != self._store_key(store_path):
+                        self._show_error_dialog(self, "Ergebnisse", "Der geladene Bericht passt nicht zur Auswahl. Bitte aktualisieren.")
+                    else:
+                        self._apply_report_detail(self._views["results"], detail)
+            if self.__dict__.get("_report_detail_request") is not None:
+                self._submit_report_detail()
 
         self._task_runner.submit(
-            f"report-detail-{report_id}",
+            key,
             work,
-            on_success=on_success,
-            on_error=self._show_task_error,
+            on_success=lambda detail: finish(detail=detail),
+            on_error=lambda error: finish(error=error),
         )
 
     def _apply_report_detail(self, results: object, detail: object) -> None:
-        results.set_default_operator_initials(str(getattr(self._settings, "operator_initials", "") or ""))
         results.render_report_detail(detail)
         results.show_detail()
 
-    def _save_selected_validation(self) -> None:
-        self._start_validation(correct=False)
+    def _ui_store_matches(self, store_path: str) -> bool:
+        if not store_path:
+            return True
+        settings = self.__dict__.get("_settings")
+        current = str(getattr(settings, "sqlite_path", "") or "")
+        return bool(current) and self._store_key(current) == self._store_key(store_path)
 
-    def _set_validation_badge(self, count: int) -> None:
+    @staticmethod
+    def _store_key(path: str) -> str:
+        return os.path.normcase(str(Path(path).resolve())) if path else ""
+
+    def _accept_settings_snapshot(self, settings: object) -> bool:
+        previous = self._store_key(str(getattr(self.__dict__.get("_settings"), "sqlite_path", "") or ""))
+        current = self._store_key(str(getattr(settings, "sqlite_path", "") or ""))
+        self._settings = settings
+        changed = bool(previous and current and previous != current)
+        if changed:
+            self._store_generation = self.__dict__.get("_store_generation", 0) + 1
+            self._refresh_generation += 1
+            self._report_detail_generation = self.__dict__.get("_report_detail_generation", 0) + 1
+            self._report_detail_request = None
+            self._validation_direct_target = None
+            self._validation_direct_request = None
+            self._validation_pdf_pending = None
+            self._validation_pdf_binding = None
+            self._validation_refresh_pending = None
+            self._view_store_paths = {}
+            self._device_inventory = None
+            self._qc_configuration_generation = self.__dict__.get("_qc_configuration_generation", 0) + 1
+            settings_view = self._views["settings"]
+            if hasattr(settings_view, "invalidate_qc_configuration"):
+                settings_view.invalidate_qc_configuration()
+            self._views["results"].invalidate_store_context()
+            self._views["validation"].invalidate_store_context()
+            diagnostics = self._views["diagnostics"]
+            if hasattr(diagnostics, "invalidate_store_context"):
+                diagnostics.invalidate_store_context()
+            rules_view = self._views["rules"]
+            if hasattr(rules_view, "invalidate_context"):
+                rules_view.invalidate_context()
+            dashboard = self._views["dashboard"]
+            dashboard.render_recent_rows(())
+            dashboard.render_open_case_count(None)
+            dashboard.render_import_device("Wird neu geladen …")
+            dashboard.set_activity_message("Ergebnisspeicher gewechselt. Bitte aktualisieren.")
+            if self.__dict__.get("_header_device") is not None:
+                self._header_device.configure(text="Importgerät wird neu geladen …")
+            self._set_validation_badge(None)
+            self._set_changes_badge(None)
+            if "changes" in self._views:
+                self._views["changes"].invalidate_store_context()
+        return changed
+
+    def _capture_validation_context(self, view: object, item: object) -> tuple:
+        return (self.__dict__.get("_navigation_generation", 0),
+                getattr(view, "selection_context", lambda: None)(), item.store_path,
+                self.__dict__.get("_store_generation", 0))
+
+    def _validation_context_current(self, view: object, context: tuple) -> bool:
+        navigation, selection, store, store_generation = context
+        return (self._current_view == "validation" and navigation == self.__dict__.get("_navigation_generation", 0)
+                and store_generation == self.__dict__.get("_store_generation", 0)
+                and self._ui_store_matches(store) and selection == getattr(view, "selection_context", lambda: None)())
+
+    def _validation_write_store_current(self, context: tuple) -> bool:
+        return context[3] == self.__dict__.get("_store_generation", 0) and self._ui_store_matches(context[2])
+
+    def _begin_validation_write(self, view: object, key: str) -> bool:
+        pending = self.__dict__.get("_validation_write_key")
+        if pending is not None and self._task_runner.is_active(pending):
+            self._show_info_dialog(self, "Prüfplatz", "Eine Änderung wird bereits gespeichert. Bitte kurz warten.")
+            return False
+        self._validation_write_key = key
+        self._validation_write_epoch = self.__dict__.get("_validation_write_epoch", 0) + 1
+        getattr(view, "set_reanalysis_busy", lambda _busy: None)(True)
+        return True
+
+    def _finish_validation_write(self, view: object) -> None:
+        self._validation_write_key = None
+        self._validation_write_epoch = self.__dict__.get("_validation_write_epoch", 0) + 1
+        getattr(view, "set_reanalysis_busy", lambda _busy: None)(False)
+        self._submit_direct_validation()
+        pending = self.__dict__.get("_validation_refresh_pending")
+        self._validation_refresh_pending = None
+        if pending == (self._refresh_generation, self._current_view, self._refresh_scope()):
+            self._maybe_submit_latest_refresh()
+
+    def _open_selected_validation(self) -> None:
+        if not self._require_services():
+            return
+        target = self._views["results"].selected_validation_target()
+        if target is None or not target[2]:
+            self._show_info_dialog(self, "Prüfplatz", "Bitte eine Messung mit bekanntem Ergebnisspeicher auswählen und gegebenenfalls aktualisieren.")
+            return
+        self.show_view("validation", refresh=False)
+        self._begin_direct_validation(target)
+
+    def _validation_queue_selected(self) -> None:
+        self._validation_direct_target = None
+        self._validation_direct_request = None
+        self._validation_navigation_generation = self.__dict__.get("_validation_navigation_generation", 0) + 1
+
+    def _begin_direct_validation(self, target: tuple, *, focus: bool = True) -> None:
+        self._validation_navigation_generation = self.__dict__.get("_validation_navigation_generation", 0) + 1
+        self._refresh_generation += 1
+        self._validation_direct_target = target
+        self._validation_direct_request = (self._validation_navigation_generation, target)
+        view = self._views["validation"]
+        view.begin_direct_loading(focus=focus)
+        view.set_default_operator_initials(str(getattr(self._settings, "operator_initials", "") or ""))
+        self._submit_direct_validation()
+
+    def _submit_direct_validation(self) -> None:
+        request = self.__dict__.get("_validation_direct_request")
+        if request is None or self._current_view != "validation" or self._task_runner.is_active("validation-direct"):
+            return
+        write_key = self.__dict__.get("_validation_write_key")
+        if write_key is not None and self._task_runner.is_active(write_key):
+            return
+        validation_epoch = self.__dict__.get("_validation_write_epoch", 0)
+        _generation, target = request
+        report_id, run_id, store_path, token = target
+
+        def work():
+            from src.application.api import ValidationConflictError
+
+            case = self._services.results.get_validation_case(report_id, run_id, store_path=store_path)
+            if case.report_id != report_id or case.run_id != run_id or self._store_key(case.store_path) != self._store_key(store_path) or (token and case.selection_token != token):
+                raise ValidationConflictError("Das Ergebnis wurde geändert. Bitte die Ergebnisse aktualisieren.")
+            return case, self._services.results.list_open_validation_cases(store_path=store_path)
+
+        def finish(result=None, error=None):
+            if request == self.__dict__.get("_validation_direct_request") and self._current_view == "validation":
+                if validation_epoch != self.__dict__.get("_validation_write_epoch", 0):
+                    self._submit_direct_validation()
+                    return
+                if error is None and self._ui_store_matches(store_path):
+                    case, items = result
+                    self._validation_direct_target = (case.report_id, case.run_id, case.store_path, case.selection_token)
+                    self._validation_direct_request = None
+                    self._views["validation"].render_cases(items, direct_case=case)
+                    self._set_validation_badge(len(items))
+                else:
+                    self._validation_direct_request = None
+                    self._validation_direct_target = None
+                    self._validation_pdf_pending = None
+                    self._validation_pdf_binding = None
+                    self._views["validation"].end_direct_loading("Die Messung konnte nicht geladen werden. Bitte aktualisieren.")
+                    if error is not None:
+                        self._show_task_error(error)
+            if request != self.__dict__.get("_validation_direct_request"):
+                self._submit_direct_validation()
+
+        self._task_runner.submit("validation-direct", work, on_success=lambda result: finish(result=result), on_error=lambda error: finish(error=error))
+
+    def _set_validation_badge(self, count: int | None) -> None:
         badge = getattr(self, "_validation_badge", None)
         if badge is not None:
-            badge.set_status(str(max(0, int(count))), kind="warning" if count else "good")
+            badge.set_status("–" if count is None else str(max(0, int(count))), kind="warning" if count else "neutral" if count is None else "good")
 
-    def _open_validation_queue(self) -> None:
-        self._validation_report_scope = None
-        self._validation_store_scope = None
-        self.show_view("validation")
+    def _set_changes_badge(self, count: int | None) -> None:
+        badge = self.__dict__.get("_changes_badge")
+        if badge is not None:
+            badge.set_status("–" if count is None else str(max(0, count)), kind="warning" if count else "neutral")
+
+    def _refresh_changes_count(self) -> None:
+        if not self._require_services():
+            return
+        store_path = str(getattr(self.__dict__.get("_settings"), "sqlite_path", "") or "")
+        generation = self.__dict__.get("_store_generation", 0)
+        def finish(count):
+            if generation == self.__dict__.get("_store_generation", 0) and self._ui_store_matches(store_path):
+                self._set_changes_badge(count)
+        self._task_runner.submit("changes-count", lambda: self._services.rules.get_identity_case_count(store_path=store_path),
+            on_success=finish, on_error=lambda _error: finish(None))
+
+    def _identity_selection_current(self, scope, descriptor) -> bool:
+        return (self._current_view == "changes" and scope == self._refresh_scope()
+                and descriptor == self._views["changes"].selection_context())
+
+    def _confirm_identity_case(self, initialization: str) -> None:
+        self._open_identity_editor(initialization)
+
+    def _open_identity_editor(self, initialization=None) -> None:
+        if not self._require_services() or self._task_runner.is_active("identity-case-editor"):
+            return
+        view = self._views["changes"]
+        item, candidate, source = view.selected_case(), view.selected_candidate(), view.selected_source()
+        if item is None or not self._ui_store_matches(item.store_path):
+            return
+        scope, descriptor = self._refresh_scope(), view.selection_context()
+        if initialization is not None:
+            if candidate is None:
+                view.set_feedback("Bitte den bisherigen Assay ausdrücklich auswählen.")
+                return
+            if not self._show_confirm_dialog(self, "Herstellerkennung zuordnen",
+                f"Neue Kennung {item.assay_key} zu {candidate.assay_name} ({candidate.assay_key}) zuordnen?\n\n"
+                + ("Ein eigenes Regelwerk als Kopie anlegen." if initialization == "copy" else "Ein eigenes, leeres Regelwerk beginnen.")
+                + "\nDie bisherige Regel und historische Ergebnisse bleiben unverändert. Prüfung und Aktivierung erfolgen danach ausdrücklich."):
+                return
+        if not self._identity_selection_current(scope, descriptor):
+            return
+        self._identity_write_epoch = self.__dict__.get("_identity_write_epoch", 0) + 1
+        view.set_busy(True)
+        context = {"case_id": item.case_id, "store_path": item.store_path, "identity_token": item.identity_token,
+                   "assay_key": item.assay_key, "store_generation": self.__dict__.get("_store_generation", 0)}
+
+        def work():
+            if not self._identity_selection_current(scope, descriptor):
+                return None
+            if initialization is not None:
+                self._services.rules.confirm_identity_case(item.case_id, store_path=item.store_path,
+                    expected_identity_token=item.identity_token, source_assay_key=candidate.assay_key,
+                    expected_rule_sha256=candidate.rule_sha256, initialization=initialization, assay_name=candidate.assay_name)
+            payload = self._services.rules.get_identity_editor_context(item.case_id, store_path=item.store_path,
+                expected_identity_token=item.identity_token, source_id=source.source_id if source else "")
+            payload["identity_cases"] = self._services.rules.list_identity_case_items(store_path=item.store_path)
+            return payload
+
+        def finish(payload=None, error=None):
+            view.set_busy(False)
+            self._identity_write_epoch = self.__dict__.get("_identity_write_epoch", 0) + 1
+            if context["store_generation"] != self.__dict__.get("_store_generation", 0) or not self._ui_store_matches(item.store_path):
+                return
+            current = self._identity_selection_current(scope, descriptor)
+            if payload is not None:
+                view.render_cases(payload["identity_cases"], store_path=item.store_path)
+                self._set_changes_badge(sum(not case.completed for case in payload["identity_cases"]))
+            if not current:
+                return
+            if error is not None:
+                self._show_task_error(error)
+                return
+            rules_view = self._views["rules"]
+            rules_view.bind_editor(self._services.rules, self.project_root)
+            self.show_view("rules", refresh=False)
+            rules_view.open_identity_draft(payload, context=context, on_activated=self._identity_rule_activated)
+
+        if not self._task_runner.submit("identity-case-editor", work,
+            on_success=lambda payload: finish(payload=payload), on_error=lambda error: finish(error=error)):
+            view.set_busy(False)
+
+    def _open_identity_pdf(self) -> None:
+        view = self._views["changes"]
+        item, source = view.selected_case(), view.selected_source()
+        if not self._require_services() or item is None or source is None or not self._ui_store_matches(item.store_path):
+            return
+        scope, descriptor = self._refresh_scope(), view.selection_context()
+        def work():
+            if not self._identity_selection_current(scope, descriptor):
+                return ""
+            return self._services.rules.open_identity_pdf(item.case_id, source.source_id, store_path=item.store_path)
+        self._task_runner.submit("identity-case-pdf", work, on_success=lambda _path: None,
+            on_error=lambda error: self._show_task_error(error) if self._identity_selection_current(scope, descriptor) else None)
+
+    def _identity_rule_activated(self, context) -> None:
+        current = self._views["rules"]._identity_context
+        if (self._current_view == "rules" and current is not None and all(context.get(key) == value for key, value in current.items())
+                and context["store_generation"] == self.__dict__.get("_store_generation", 0)
+                and self._ui_store_matches(context["store_path"])):
+            self._start_identity_retry(context)
+
+    def _retry_identity_case(self) -> None:
+        view = self._views["changes"]
+        item = view.selected_case()
+        if item is None or not item.can_retry or not self._ui_store_matches(item.store_path):
+            return
+        self._start_identity_retry({"case_id": item.case_id, "store_path": item.store_path,
+            "identity_token": item.identity_token, "store_generation": self.__dict__.get("_store_generation", 0)})
+
+    def _start_identity_retry(self, context) -> None:
+        if not self._require_services() or self._task_runner.is_active("identity-case-retry"):
+            return
+        view = self._views["changes"]
+        navigation, previous = self.__dict__.get("_navigation_generation", 0), self._current_view
+        self._identity_write_epoch = self.__dict__.get("_identity_write_epoch", 0) + 1
+        view.set_busy(True)
+
+        def work():
+            if context["store_generation"] != self.__dict__.get("_store_generation", 0) or not self._ui_store_matches(context["store_path"]):
+                return None
+            return self._services.rules.retry_identity_case(context["case_id"], store_path=context["store_path"],
+                expected_identity_token=context["identity_token"])
+
+        def finish(result=None, error=None):
+            from src.application.api import friendly_processing_message
+
+            view.set_busy(False)
+            self._identity_write_epoch = self.__dict__.get("_identity_write_epoch", 0) + 1
+            if context["store_generation"] != self.__dict__.get("_store_generation", 0) or not self._ui_store_matches(context["store_path"]):
+                return
+            current = navigation == self.__dict__.get("_navigation_generation", 0) and previous == self._current_view
+            if result is not None:
+                view.render_cases(result.cases, store_path=context["store_path"])
+                self._set_changes_badge(sum(not case.completed for case in result.cases))
+                notes = [friendly_processing_message(message) for _job_id, message in result.errors]
+                notes.extend(friendly_processing_message(item.message) for item in result.outcomes if item.queue_status == "FAILED")
+                view.set_feedback("\n".join(dict.fromkeys(notes)) if notes else "Betroffene Importaufträge wurden geprüft; der Fallstatus zeigt das tatsächliche Ergebnis.")
+            elif current:
+                self._show_task_error(error)
+            if current and previous == "rules" and result is not None:
+                self.show_view("changes", refresh=False)
+
+        if not self._task_runner.submit("identity-case-retry", work,
+            on_success=lambda result: finish(result=result), on_error=lambda error: finish(error=error)):
+            view.set_busy(False)
 
     def _save_pending_validation(self) -> None:
         if not self._require_services():
@@ -2133,10 +2613,13 @@ class AnalyzerDesktopApp(tk.Tk):
         if item is None:
             self._show_info_dialog(self, "Validierung", "Bitte eine offene Messung auswaehlen.")
             return
+        if not item.store_path or not self._ui_store_matches(item.store_path):
+            self._show_info_dialog(self, "Validierung", "Der Ergebnisspeicher passt nicht zur angezeigten Messung. Bitte aktualisieren.")
+            return
         if item.validation_ambiguous:
             self._show_info_dialog(self, "Validierung", "Die Validierungshistorie ist nicht eindeutig.")
             return
-        if item.comparison or item.missing_fields or item.revision_error:
+        if item.comparison or item.missing_fields or item.revision_error or item.activation_blocked_reason:
             self._show_info_dialog(self, "Validierung", "Bitte zuerst den Vergleich oder die Nacharbeit abschliessen.")
             return
         initials = str(validation.validation_initials() or "").strip()
@@ -2144,86 +2627,56 @@ class AnalyzerDesktopApp(tk.Tk):
             self._show_info_dialog(self, "Validierung", "Bitte Initialen fuer die Validierung angeben.")
             return
         comment = str(validation.validation_comment() or "").strip()
-        device_id = getattr(validation, "validation_device", lambda: "")()
-        if item.device_context_token and (not device_id or not validation.validation_device_confirmed()):
-            self._show_info_dialog(self, "Gerät dieses Berichts", "Bitte das konkrete Gerät auswählen und für diesen Quellbericht bestätigen. Ein Importvorschlag allein genügt nicht.")
+        correct = item.current_validation is not None
+        if correct and not self._show_confirm_dialog(self, "Validierung korrigieren",
+                "Die bisherige Validierung bleibt erhalten. Eine neue Korrektur wird mit Verweis auf den bisherigen Stand gespeichert. Jetzt ausdrücklich korrigieren?"):
             return
-        device_reason = getattr(validation, "validation_device_reason", lambda: "")()
+        context = self._capture_validation_context(validation, item)
+        next_id = getattr(validation, "next_visible_run_id", lambda: None)() if not correct else None
         binding = {}
-        if item.selection_token:
-            binding = {"expected_selection_token": item.selection_token, "store_path": item.store_path, "request_id": uuid.uuid4().hex}
+        if item.selection_token or item.store_path:
+            binding = {"expected_selection_token": item.selection_token or None, "store_path": item.store_path or None, "request_id": uuid.uuid4().hex}
         key = f"validation-{item.report_id}-{item.run_id}"
-        if self._task_runner.is_active(key):
-            self._show_info_dialog(self, "Validierung", "Die Validierung wird bereits gespeichert.")
+        if not self._begin_validation_write(validation, key):
             return
 
-        def work() -> tuple[object, object]:
+        def work() -> tuple[object, object, object]:
             assert self._services is not None
-            run_id = item.run_id
-            current_binding = dict(binding)
-            if item.device_context_token:
-                request_id = current_binding.get("request_id") or uuid.uuid4().hex
-                context = self._services.results.confirm_report_device(item.report_id, device_id,
-                    expected_context_token=item.device_context_token, operator_initials=initials, request_id=request_id + ":device",
-                    reason=device_reason, store_path=item.store_path)
-                if item.candidate_id:
-                    materialized = [row for row in context["runs"] if row.get("source_provenance", {}).get("device_materialization", {}).get("candidate_id") == item.candidate_id]
-                    if len(materialized) != 1:
-                        from src.application.api import ValidationConflictError
-                        raise ValidationConflictError("Dieser Quellkandidat bleibt ein Duplikat-/Klärfall: gleiches oder noch ungeklärtes Vergleichsgerät. Kein zusätzlicher Messwert wurde validiert.")
-                    run_id = int(materialized[0]["id"])
-                    current_binding["expected_selection_token"] = materialized[0]["selection_token"]
-                current_binding.update(expected_device_assignment_id=context["assignment_id"], store_path=item.store_path, request_id=request_id + ":validation")
-            operation = (self._services.results.correct_report_run if item.validation_current and device_id == item.device_id
-                else self._services.results.validate_report_run)
-            saved = operation(item.report_id, run_id, initials, comment, **current_binding)
-            scope = getattr(self, "_validation_report_scope", None)
-            pending = self._services.results.list_open_validation_cases()
-            items = self._services.results.list_open_validation_cases(report_id=scope, include_validated=True, store_path=self._validation_store_scope) if scope else pending
-            return saved, items, len(pending)
+            if not self._validation_write_store_current(context):
+                from src.application.api import ValidationConflictError
+                raise ValidationConflictError("result_store_changed")
+            action = self._services.results.correct_report_run if correct else self._services.results.validate_report_run
+            saved = action(item.report_id, item.run_id, initials, comment, **binding)
+            store_binding = {"store_path": item.store_path} if item.store_path else {}
+            items = self._services.results.list_open_validation_cases(**store_binding)
+            case = self._services.results.get_validation_case(item.report_id, item.run_id, store_path=item.store_path) if correct else None
+            return saved, items, case
 
-        def on_success(result) -> None:
-            saved, items, pending_count = result
-            validation.clear_comment()
-            validation.render_cases(items)
-            self._set_validation_badge(pending_count)
-
-        def on_error(exc):
-            self._show_task_error(exc)
-            self.refresh_current_view()
-        self._task_runner.submit(key, work, on_success=on_success, on_error=on_error)
-
-    def _add_validation_device(self) -> None:
-        from uuid import uuid4
-        from interfaces.tk.widgets.dialogs import show_qc_inventory_dialog
-        if not self._require_services():
-            return
-        validation = self._views["validation"]
-        selected = validation.selected_item()
-        if selected is None:
-            return
-        def loaded(state):
-            if not self._qc_store_is_displayed(state.store_path):
+        def on_success(result: tuple[object, object, object]) -> None:
+            saved, items, *cases = result
+            self._finish_validation_write(validation)
+            if not self._validation_write_store_current(context):
                 return
-            old_ids = {row["device_id"] for row in state.inventory["snapshot"]["devices"]}
-            def submit(snapshot, _initials, dialog):
-                request = uuid4().hex
-                added = [row["device_id"] for row in snapshot["devices"] if row["device_id"] not in old_ids]
-                def work():
-                    self._services.settings.save_qc_inventory(state, snapshot, "", request)
-                    scope = getattr(self, "_validation_report_scope", None)
-                    pending = self._services.results.list_open_validation_cases()
-                    cases = self._services.results.list_open_validation_cases(report_id=scope, include_validated=True, store_path=self._validation_store_scope) if scope else pending
-                    return cases, added[-1] if added else snapshot["default_device_id"], len(pending)
-                def saved(result):
-                    cases, chosen, pending_count = result
-                    validation.render_cases(cases)
-                    validation.select_report_device(chosen)
-                    self._set_validation_badge(pending_count)
-                self._submit_qc_write(work, dialog, state.store_path, refresh=False, on_success=saved)
-            show_qc_inventory_dialog(self, state, initials="", on_submit=submit, new_device=True)
-        self._task_runner.submit("validation-device-list", self._services.settings.get_qc_configuration,
-            on_success=loaded, on_error=self._show_qc_error)
+            self._set_validation_badge(len(items))
+            if not self._validation_context_current(validation, context):
+                validation.reconcile_cases(items)
+                return
+            validation.clear_comment()
+            case = cases[0] if cases else None
+            if correct and case is not None:
+                validation.render_cases(items, direct_case=case)
+                self._validation_direct_target = (case.report_id, case.run_id, case.store_path, case.selection_token)
+            else:
+                self._validation_direct_target = None
+                self._validation_direct_request = None
+                validation.render_cases(items, preferred_run_id=next_id, advance=True)
+
+        def on_error(exc: BaseException) -> None:
+            self._finish_validation_write(validation)
+            if self._validation_context_current(validation, context):
+                self._show_task_error(exc)
+
+        self._task_runner.submit(key, work, on_success=on_success, on_error=on_error)
 
     def _reanalyze_validation_cases(self) -> None:
         if not self._require_services():
@@ -2235,28 +2688,49 @@ class AnalyzerDesktopApp(tk.Tk):
             self._show_info_dialog(self, "Neuanalyse", "Bitte Messungen auswaehlen und Initialen angeben.")
             return
         key = "validation-reanalysis"
-        if self._task_runner.is_active(key):
-            return
         request_id = uuid.uuid4().hex
-        view.set_reanalysis_busy(True)
+        focused = view.selected_item()
+        if focused is None or any(not item.store_path or not self._ui_store_matches(item.store_path) for item in cases):
+            self._show_info_dialog(self, "Neuanalyse", "Der Ergebnisspeicher passt nicht zur Auswahl. Bitte aktualisieren.")
+            return
+        context = self._capture_validation_context(view, focused)
+        direct = getattr(view, "is_direct_case", lambda: False)()
+        store_binding = {"store_path": focused.store_path} if focused.store_path else {}
+        if not self._begin_validation_write(view, key):
+            return
 
         def work():
+            if not self._validation_write_store_current(context):
+                from src.application.api import ValidationConflictError
+                raise ValidationConflictError("result_store_changed")
             result = self._services.results.reanalyze_selected_cases(cases, initials, request_id=request_id)
-            return result, self._services.results.list_open_validation_cases()
+            items = self._services.results.list_open_validation_cases(**store_binding)
+            case = self._services.results.get_validation_case(focused.report_id, focused.run_id, store_path=focused.store_path) if direct else None
+            return result, items, case
 
         def success(result):
-            batch, items = result
-            view.set_reanalysis_busy(False)
-            if self._current_view == "validation":
-                view.render_cases(items)
+            batch, items, *direct_cases = result
+            self._finish_validation_write(view)
+            if not self._validation_write_store_current(context):
+                return
             self._set_validation_badge(len(items))
+            if not self._validation_context_current(view, context):
+                view.reconcile_cases(items)
+                return
+            case = direct_cases[0] if direct_cases else None
+            if case is not None:
+                view.render_cases(items, direct_case=case)
+                self._validation_direct_target = (case.report_id, case.run_id, case.store_path, case.selection_token)
+            else:
+                view.render_cases(items)
             failed = [f"Messung {item.run_id}: {item.error}" for item in batch.items if item.error]
             if failed:
                 self._show_info_dialog(self, "Nacharbeit erforderlich", "\n\n".join(failed))
 
         def error(exc):
-            view.set_reanalysis_busy(False)
-            self._show_task_error(exc)
+            self._finish_validation_write(view)
+            if self._validation_context_current(view, context):
+                self._show_task_error(exc)
 
         self._task_runner.submit(key, work, on_success=success, on_error=error)
 
@@ -2269,27 +2743,47 @@ class AnalyzerDesktopApp(tk.Tk):
         if case is None or case.comparison is None or not initials:
             self._show_info_dialog(self, "Ergebnis auswaehlen", "Bitte einen aktuellen Vergleich auswaehlen und Initialen angeben.")
             return
-        key = f"validation-choice-{case.run_id}"
-        if self._task_runner.is_active(key) or self._task_runner.is_active("validation-reanalysis"):
+        if not case.store_path or not self._ui_store_matches(case.store_path):
+            self._show_info_dialog(self, "Ergebnis auswaehlen", "Der Ergebnisspeicher passt nicht zur Messung. Bitte aktualisieren.")
             return
+        key = f"validation-choice-{case.run_id}"
         request_id = uuid.uuid4().hex
         comment = str(view.validation_comment() or "").strip()
-        view.set_reanalysis_busy(True)
+        context = self._capture_validation_context(view, case)
+        direct = getattr(view, "is_direct_case", lambda: False)()
+        store_binding = {"store_path": case.store_path} if case.store_path else {}
+        if not self._begin_validation_write(view, key):
+            return
 
         def work():
+            if not self._validation_write_store_current(context):
+                from src.application.api import ValidationConflictError
+                raise ValidationConflictError("result_store_changed")
             self._services.results.choose_reanalysis_result(case, action, initials, request_id=request_id, note=comment)
-            return self._services.results.list_open_validation_cases()
+            items = self._services.results.list_open_validation_cases(**store_binding)
+            current = self._services.results.get_validation_case(case.report_id, case.run_id, store_path=case.store_path) if direct else None
+            return items, current
 
-        def success(items):
-            view.set_reanalysis_busy(False)
-            if self._current_view == "validation":
-                view.render_cases(items)
-                view.clear_comment()
+        def success(result):
+            items, current = result
+            self._finish_validation_write(view)
+            if not self._validation_write_store_current(context):
+                return
             self._set_validation_badge(len(items))
+            if not self._validation_context_current(view, context):
+                view.reconcile_cases(items)
+                return
+            if current is not None:
+                view.render_cases(items, direct_case=current)
+                self._validation_direct_target = (current.report_id, current.run_id, current.store_path, current.selection_token)
+            else:
+                view.render_cases(items)
+            view.clear_comment()
 
         def error(exc):
-            view.set_reanalysis_busy(False)
-            self._show_task_error(exc)
+            self._finish_validation_write(view)
+            if self._validation_context_current(view, context):
+                self._show_task_error(exc)
 
         self._task_runner.submit(key, work, on_success=success, on_error=error)
 
@@ -2300,63 +2794,56 @@ class AnalyzerDesktopApp(tk.Tk):
         if item is None:
             self._show_info_dialog(self, "PDF", "Bitte eine offene Messung auswaehlen.")
             return
+        if not item.store_path or not self._ui_store_matches(item.store_path):
+            self._show_info_dialog(self, "PDF", "Der Ergebnisspeicher passt nicht zur Messung. Bitte aktualisieren.")
+            return
+        view = self._views["validation"]
+        context = self._capture_validation_context(view, item)
 
         def work() -> str:
             assert self._services is not None
-            return self._services.results.open_report_pdf(item.report_id)
+            if not self._validation_context_current(view, context):
+                return ""
+            return self._services.results.open_report_pdf(item.report_id, store_path=item.store_path)
 
         self._task_runner.submit(
             f"open-pdf-{item.report_id}",
             work,
             on_success=lambda _path: None,
-            on_error=self._show_task_error,
+            on_error=lambda exc: self._show_task_error(exc) if self._validation_context_current(view, context) else None,
         )
 
-    def _correct_selected_validation(self) -> None:
-        self._open_results_validation()
-
-    def _start_validation(self, *, correct: bool) -> None:
-        self._open_results_validation()
-
-    def _open_results_validation(self) -> None:
-        if not self._require_services():
-            return
-        results = self._views["results"]
-        report_id = str(results.current_detail_report_id() or "")
-        if not report_id:
-            self._show_info_dialog(self, "Validierung", "Bitte einen Bericht auswählen.")
-            return
-        selected_run = results.validation_run_id()
-        _token, displayed_store = getattr(results, "validation_result_binding", lambda: ("", ""))()
-        self._validation_report_scope = report_id
-        self._validation_store_scope = displayed_store or None
-        self.show_view("validation", refresh=False)
-        def loaded(items):
-            view = self._views["validation"]
-            view.render_cases(items)
-            if selected_run is not None:
-                view.select_run(selected_run)
-        self._task_runner.submit("report-validation", lambda: self._services.results.list_open_validation_cases(
-            report_id=report_id, include_validated=True, store_path=displayed_store or None), on_success=loaded, on_error=self._show_task_error)
-
     def _show_results_list(self) -> None:
+        self._report_detail_request = None
+        self._report_detail_generation = self.__dict__.get("_report_detail_generation", 0) + 1
         self._views["results"].show_list()
 
     def _open_report_pdf(self) -> None:
         if not self._require_services():
             return
-        report_id = self._views["results"].current_detail_report_id()
-        if not report_id:
+        results = self._views["results"]
+        descriptor = results.current_detail_descriptor()
+        report_id, store = descriptor
+        if not report_id or not store:
             self._show_info_dialog(self, "PDF", "Kein Bericht ausgewählt.")
+            return
+        scope = self._refresh_scope()
+        if not self._ui_store_matches(store):
+            self._show_info_dialog(self, "PDF", "Der Ergebnisspeicher wurde gewechselt. Bitte aktualisieren.")
             return
 
         def work() -> str:
-            return self._services.results.open_report_pdf(report_id)
+            # This descriptor getter reads the immutable displayed DTO, not Tk.
+            if scope != self._refresh_scope() or not self._ui_store_matches(store) or results.current_detail_descriptor() != descriptor:
+                return ""
+            return self._services.results.open_report_pdf(report_id, store_path=store)
 
         def on_success(_path: str) -> None:
             return
 
         def on_error(exc: BaseException) -> None:
+            if scope != self._refresh_scope() or not self._ui_store_matches(store) or results.current_detail_descriptor() != descriptor:
+                return
             if isinstance(exc, self._ReportNotFoundError):
                 self._show_error_dialog(self, "PDF", "Bericht nicht gefunden.")
                 return
@@ -2411,14 +2898,22 @@ class AnalyzerDesktopApp(tk.Tk):
 
         def on_success(saved: object) -> None:
             self._settings_save_inflight_id = None
+            store_changed = self._accept_settings_snapshot(saved)
             if request_id < self._settings_save_latest_id:
+                self._views["dashboard"].render_watch_settings(saved)
+                self._reschedule_watch()
                 self._maybe_start_pending_settings_save()
+                if store_changed:
+                    self.refresh_current_view()
                 return
             settings_view.mark_saved_generation(edit_generation)
-            self._settings = saved
             settings_view.set_status_message("Einstellungen gespeichert.")
+            if self.__dict__.get("_device_inventory") is not None:
+                self._render_import_device_context(saved, self._device_inventory)
             self._views["dashboard"].render_watch_settings(saved)
             self._reschedule_watch()
+            if store_changed:
+                self.refresh_current_view()
 
         def on_error(exc: BaseException) -> None:
             from interfaces.tk.view_models import format_user_error_message
@@ -2468,23 +2963,22 @@ class AnalyzerDesktopApp(tk.Tk):
     def _reload_devices(self) -> None:
         if not self._require_services():
             return
+        if self._current_view == "settings":
+            self.refresh_current_view()
+            return
         settings_view = self._views["settings"]
 
         def work() -> object:
             inventory = self._services.settings.reload_device_inventory()
             timing = self._services.settings.get_watch_timing()
-            state = self._services.settings.get_qc_assay_configuration()
-            return inventory, timing, state
+            return inventory, timing
 
-        def on_success(result: tuple[object, object, object]) -> None:
-            inventory, timing, state = result
-            if not self._qc_store_is_displayed(state.store_path):
-                return
+        def on_success(result: tuple[object, object]) -> None:
+            inventory, timing = result
             self._device_label_map = {
                 item.choice_label: item.device_id for item in inventory.devices
             }
             settings_view.render_settings(self._settings, devices=inventory.devices, timing=timing)
-            settings_view.render_qc_configuration(state)
 
         self._task_runner.submit("devices-reload", work, on_success=on_success, on_error=self._show_task_error)
 
@@ -2503,118 +2997,99 @@ class AnalyzerDesktopApp(tk.Tk):
         else:
             self._show_task_error(exc)
 
-    def _submit_qc_write(self, work, dialog, store_path: str, *, results=False, on_success=None, refresh=True) -> None:
-        if not self._qc_store_is_displayed(store_path):
+    def _submit_qc_write(self, work, dialog, store_path: str, *, results=False, store_generation=None) -> None:
+        if (not self._qc_store_is_displayed(store_path) or (store_generation is not None
+                and store_generation != self.__dict__.get("_store_generation", 0))):
             self._show_error_dialog(self, "Qualitätskontrolle", "Der Ergebnisspeicher wurde gewechselt. Bitte den Dialog schließen und neu laden.")
             return
-        if self._task_runner.is_active("qc-write"):
-            return
-        set_busy = getattr(dialog, "set_busy", lambda value: dialog.save_button.configure(state="disabled" if value else "normal"))
-        set_busy(True)
+        dialog.save_button.configure(state="disabled")
 
         def success(_result):
             if dialog.winfo_exists():
                 dialog.destroy()
-            if on_success:
-                on_success(_result)
-            if refresh and self._qc_store_is_displayed(store_path):
+            if self._qc_store_is_displayed(store_path):
                 self._open_qc_lots() if results else self._reload_devices()
 
         def error(exc):
             if dialog.winfo_exists():
-                set_busy(False)
+                dialog.save_button.configure(state="normal")
             self._show_qc_error(exc)
 
         if not self._task_runner.submit("qc-write", work, on_success=success, on_error=error):
-            set_busy(False)
+            dialog.save_button.configure(state="normal")
 
-    def _open_qc_configuration(self, kind: str, *, new_profile: bool = False) -> None:
+    def _open_qc_configuration(self, kind: str) -> None:
         from uuid import uuid4
         from interfaces.tk.widgets.dialogs import show_qc_initials_dialog, show_qc_inventory_dialog, show_qc_profile_dialog
 
         if not self._require_services():
             return
+        settings_view = self._views["settings"]
+        take_intent = getattr(settings_view, "take_qc_editor_intent", None)
+        intent = take_intent(kind) if callable(take_intent) else None
+        store_generation = self.__dict__.get("_store_generation", 0)
+        navigation_generation = self.__dict__.get("_navigation_generation", 0)
         self._qc_configuration_generation += 1
         generation = self._qc_configuration_generation
-        selected = self._views["settings"].selected_qc_configuration() if kind == "profiles" else None
 
         def work():
+            state = self._services.settings.get_qc_configuration()
+            assays, fields = [], {}
             if kind == "profiles":
-                state = self._services.settings.get_qc_assay_configuration()
-                return state, state.assays, state.field_choices
-            return self._services.settings.get_qc_configuration(), (), {}
+                for item in self._services.rules.list_inventory(kind="active"):
+                    key = str(getattr(item, "assay_key", "") or "")
+                    if key:
+                        label = str(getattr(item, "assay_name", "") or "Assayname fehlt")
+                        assays.append((label, key))
+                        fields[key] = self._services.rules.list_fields(key)
+            return state, assays, fields
 
         def loaded(payload):
             state, assays, fields = payload
-            if generation != self._qc_configuration_generation or not self._qc_store_is_displayed(state.store_path):
+            if (generation != self._qc_configuration_generation or not self._qc_store_is_displayed(state.store_path)
+                    or store_generation != self.__dict__.get("_store_generation", 0)
+                    or navigation_generation != self.__dict__.get("_navigation_generation", 0)):
                 return
+            if intent is not None:
+                create, identifier, expected_store = intent
+                valid_store = self._store_key(expected_store) == self._store_key(state.store_path)
+                valid_target = create or (kind == "devices" and any(str(row["device_id"]) == identifier for row in state.inventory["snapshot"]["devices"]))
+                valid_target = valid_target or (not create and kind == "profiles" and any(str(row["version_id"]) == identifier for row in state.profiles))
+                if not valid_store or not valid_target:
+                    self._show_info_dialog(self, "Einstellungen", "Die ausgewählte Zeile ist nicht mehr aktuell. Bitte den Bestand neu laden.")
+                    return
             if kind == "devices":
                 def submit(snapshot, initials, dialog):
                     request = uuid4().hex
-                    self._submit_qc_write(lambda: self._services.settings.save_qc_inventory(state, snapshot, initials, request), dialog, state.store_path)
-                show_qc_inventory_dialog(self, state, initials=self._qc_initials(), on_submit=submit)
+                    self._submit_qc_write(lambda: self._services.settings.save_qc_inventory(state, snapshot, initials, request), dialog, state.store_path,
+                        store_generation=store_generation)
+                target = {"create_new": intent[0], "initial_device_id": intent[1]} if intent is not None else {}
+                show_qc_inventory_dialog(self, state, initials=self._qc_initials(), on_submit=submit, **target)
             elif kind == "profiles":
-                if state.catalog_error:
-                    self._show_error_dialog(self, "Assays & QK", state.catalog_error)
-                    return
                 def submit(snapshot, expected, initials, dialog):
                     request = uuid4().hex
-                    self._submit_qc_write(lambda: self._services.settings.save_qc_profile(getattr(dialog, "qc_state", state), snapshot,
-                        expected_version_id=expected, operator_initials=initials, request_id=request), dialog, state.store_path)
-                def changed(draft):
-                    self._services.settings.update_qc_profile_editor(state, draft, editor_key=draft["editor_key"])
-                def retain(draft, dialog):
-                    request = uuid4().hex
-                    self._submit_qc_write(lambda: self._services.settings.retain_qc_profile_editor(state, draft,
-                        editor_key=draft["editor_key"], request_id=request), dialog, state.store_path)
-                def discard(draft, dialog):
-                    request = uuid4().hex
-                    self._submit_qc_write(lambda: self._services.settings.discard_qc_profile_editor(state, draft,
-                        editor_key=draft["editor_key"], request_id=request), dialog, state.store_path)
-                def inline_device(profile_dialog, device_added):
-                    current_state = profile_dialog.qc_state
-                    existing = {row["device_id"] for row in current_state.inventory["snapshot"]["devices"]}
-                    def save_device(snapshot, _initials, device_dialog):
-                        request = uuid4().hex
-                        added = [row["device_id"] for row in snapshot["devices"] if row["device_id"] not in existing]
-                        def work():
-                            self._services.settings.save_qc_inventory(current_state, snapshot, "", request)
-                            return self._services.settings.get_qc_assay_configuration(), added[-1] if added else snapshot["default_device_id"]
-                        self._submit_qc_write(work, device_dialog, state.store_path, refresh=False,
-                            on_success=lambda result: device_added(*result))
-                    device_dialog = show_qc_inventory_dialog(profile_dialog, current_state, initials="", on_submit=save_device, new_device=True)
-                    device_dialog.on_cancel = lambda: (profile_dialog.grab_set(), True)[1]
-                assay_key = selected.assay_key if selected else (assays[0][1] if len(assays) == 1 else "")
-                profile_id = selected.profile_id if selected and not new_profile and selected.profile_version_id else ""
-                get_editor = getattr(self._services.settings, "get_qc_profile_editor", lambda *_args, **_kwargs: None)
-                draft_id = getattr(selected, "draft_id", "") if selected and not new_profile else ""
-                editor = get_editor(state, assay_key=assay_key, profile_id=profile_id, draft_id=draft_id)
-                if new_profile and selected and selected.profile_id and editor is None:
-                    import copy
-                    original = next((row for row in state.profiles if row["profile_id"] == selected.profile_id), None)
-                    if original:
-                        snapshot = copy.deepcopy(original["snapshot"])
-                        snapshot.update(profile_schema_version=2, profile_id="profile-" + uuid4().hex,
-                            name=snapshot["name"] + " – Kopie", device_id="", enabled_rules=[])
-                        for control in snapshot["controls"]:
-                            control["sd_reference"] = None
-                        editor = {"editor_key": "new:" + assay_key, "draft_id": "draft-" + uuid4().hex,
-                            "profile_id": snapshot["profile_id"], "base_version_id": 0, "draft_version_id": 0, "snapshot": snapshot}
-                show_qc_profile_dialog(self, state, initials=self._qc_initials(), assays=assays, field_choices=fields, on_submit=submit,
-                    selected_assay_key=assay_key, selected_profile_id=profile_id, editor=editor,
-                    on_draft_change=changed, on_retain=retain, on_discard=discard, on_add_device=inline_device)
+                    self._submit_qc_write(lambda: self._services.settings.save_qc_profile(state, snapshot,
+                        expected_version_id=expected, operator_initials=initials, request_id=request), dialog, state.store_path,
+                        store_generation=store_generation)
+                target = {"initial_version_id": None if intent[0] else int(intent[1])} if intent is not None else {}
+                show_qc_profile_dialog(self, state, initials=self._qc_initials(), assays=assays, field_choices=fields, on_submit=submit, **target)
             elif kind == "migrate":
                 if not state.legacy_source_sha256:
                     self._show_error_dialog(self, "Geräte übernehmen", state.legacy_message)
                     return
                 def submit(initials, _reason, dialog):
                     request = uuid4().hex
-                    self._submit_qc_write(lambda: self._services.settings.migrate_qc_devices(state, initials, request), dialog, state.store_path)
+                    self._submit_qc_write(lambda: self._services.settings.migrate_qc_devices(state, initials, request), dialog, state.store_path,
+                        store_generation=store_generation)
                 show_qc_initials_dialog(self, title="Geräte übernehmen",
                     message="Vorhandene Geräte und historische Kennungen in den ausgewählten Ergebnisspeicher übernehmen. Die Originaldatei bleibt als Nachweis erhalten.",
                     initials=self._qc_initials(), on_submit=submit)
 
-        self._task_runner.submit(f"qc-configuration-{generation}", work, on_success=loaded, on_error=self._show_qc_error)
+        def failed(exc):
+            if (generation == self._qc_configuration_generation and store_generation == self.__dict__.get("_store_generation", 0)
+                    and navigation_generation == self.__dict__.get("_navigation_generation", 0)):
+                self._show_qc_error(exc)
+        self._task_runner.submit(f"qc-configuration-{generation}", work, on_success=loaded, on_error=failed)
 
     def _open_qc_lots(self) -> None:
         if not self._require_services() or self._task_runner.is_active("qc-lots"):
@@ -2703,35 +3178,24 @@ class AnalyzerDesktopApp(tk.Tk):
 
         view = self._views["statistics"]
         detail, analysis = view.selected_qc_detail(), view.selected_qc_analysis()
-        if detail is None or analysis is None or analysis.evidence_lot_version_id is not None or detail.case.state == "closed":
+        if detail is None or analysis is None or analysis.evidence_lot_version_id is not None or detail.case.state != "open":
             return
         generation = self._qc_source_generation
-        self._qc_close_generation = self.__dict__.get("_qc_close_generation", 0) + 1
-        attempt = self._qc_close_generation
-        def current():
+        def loaded(witnesses):
             selected = view.selected_qc_case()
-            return (generation == self._qc_source_generation and attempt == self._qc_close_generation
-                and self._qc_store_is_displayed(detail.case.store_path) and selected is not None
-                and selected.lot_key == detail.case.lot_key and view.selected_qc_analysis() is analysis)
-        def cancel():
-            self._qc_close_generation += 1
-        def submit(preview, initials, dialog):
-            if not current():
-                dialog.render_error("Auswahl oder Ergebnisspeicher wurde geändert. Bitte den Abschluss neu prüfen.")
+            if (generation != self._qc_source_generation or not self._qc_store_is_displayed(detail.case.store_path)
+                    or selected is None or selected.lot_key != detail.case.lot_key or view.selected_qc_analysis() is not analysis):
                 return
-            request = uuid4().hex
-            self._submit_qc_write(lambda: self._services.results.close_qc_lot(preview,
-                operator_initials=initials, request_id=request), dialog, detail.case.store_path, results=True)
-        dialog = show_qc_close_dialog(self, detail, initials=self._qc_initials(), on_submit=submit, on_cancel=cancel)
-        def loaded(preview):
-            if current() and dialog.winfo_exists():
-                dialog.render_preview(preview)
-        def failed(exc):
-            if current() and dialog.winfo_exists():
-                dialog.render_error(str(exc))
-        if not self._task_runner.submit(f"qc-close-preview-{attempt}", lambda: self._services.results.prepare_qc_lot_close(detail),
-                on_success=loaded, on_error=failed):
-            dialog.render_error("Die Vorbereitung konnte nicht gestartet werden. Bitte erneut versuchen.")
+            if not witnesses:
+                self._show_error_dialog(self, "Chargenabschluss", "Keine passende neuere validierte Folgecharge mit neuerem Messdatum vorhanden.")
+                return
+            def submit(witness, initials, dialog):
+                request = uuid4().hex
+                self._submit_qc_write(lambda: self._services.results.close_qc_lot(detail, analysis, witness,
+                    operator_initials=initials, request_id=request), dialog, detail.case.store_path, results=True)
+            show_qc_close_dialog(self, detail, witnesses, initials=self._qc_initials(), on_submit=submit)
+        self._task_runner.submit("qc-witnesses", lambda: self._services.results.list_qc_close_witnesses(detail),
+            on_success=loaded, on_error=self._show_qc_error)
 
     def _export_qc_report(self) -> None:
         view = self._views["statistics"]
@@ -2746,7 +3210,6 @@ class AnalyzerDesktopApp(tk.Tk):
         include_explanations = view._qc_include_explanations.get()
         def saved(result):
             if generation == self._qc_source_generation and self._qc_store_is_displayed(analysis.case.store_path):
-                view._qc_include_explanations.set(False)
                 self._show_info_dialog(self, "PDF-Nachweis", "Die erweiterte Druckfassung wurde gespeichert." if include_explanations else "Der gespeicherte PDF-Nachweis wurde unverändert exportiert.")
         self._task_runner.submit("qc-export", lambda: self._services.results.export_qc_report(analysis.case,
             evidence_lot_version_id=analysis.evidence_lot_version_id, destination=destination, include_explanations=include_explanations), on_success=saved, on_error=self._show_qc_error)
@@ -2807,17 +3270,7 @@ class AnalyzerDesktopApp(tk.Tk):
         self._task_runner.submit("rules-validate", work, on_success=on_success, on_error=self._show_task_error)
 
     def open_rule_editor(self) -> None:
-        if getattr(sys, "frozen", False):
-            env = os.environ.copy()
-            env["ARE_HOME"] = str(self.project_root)
-            env["ARE_START_RULE_EDITOR"] = "1"
-            subprocess.Popen([sys.executable], cwd=str(self.project_root), env=env)
-            return
-        script = self.project_root / "rule_editor_main.py"
-        if not script.exists():
-            messagebox.showerror("Rule Editor", f"Nicht gefunden:\n{script}")
-            return
-        subprocess.Popen([sys.executable, str(script)], cwd=str(self.project_root))
+        self.show_view("rules")
 
     def _show_diagnosis_details(self) -> None:
         if not self._require_services():
@@ -2827,6 +3280,12 @@ class AnalyzerDesktopApp(tk.Tk):
         if not job_id:
             self._show_info_dialog(self, "Diagnose", "Bitte einen Eintrag auswählen.")
             return
+        scope, generation = self._refresh_scope(), self._refresh_generation
+        selection_context = diagnostics.diagnosis_selection_context()
+        def is_current():
+            return (self._current_view == "diagnostics" and self._refresh_scope() == scope
+                    and self._refresh_generation == generation and diagnostics.selected_job_id() == job_id
+                    and diagnostics.diagnosis_selection_context() == selection_context)
 
         def work() -> tuple[object, object]:
             item = self._services.extraction.get_job_diagnosis(job_id)
@@ -2834,6 +3293,8 @@ class AnalyzerDesktopApp(tk.Tk):
             return item, candidates
 
         def on_success(result: tuple[object, object]) -> None:
+            if not is_current():
+                return
             item, candidates = result
             if item is None:
                 self._show_error_dialog(self, "Diagnose", "Diagnose nicht verfügbar.")
@@ -2844,7 +3305,8 @@ class AnalyzerDesktopApp(tk.Tk):
                 details = f"{details}\n\n{item.context_text}"
             self._show_details_dialog(self, item.error_label or "Diagnose", item.friendly_message or item.file_name, details)
 
-        self._task_runner.submit(f"diagnosis-{job_id}", work, on_success=on_success, on_error=self._show_task_error)
+        self._task_runner.submit(f"diagnosis-{job_id}", work, on_success=on_success,
+            on_error=lambda exc: self._show_task_error(exc) if is_current() else None)
 
     def _create_draft_from_candidate(self) -> None:
         if not self._require_services():
@@ -2904,38 +3366,50 @@ class AnalyzerDesktopApp(tk.Tk):
     def _show_duplicate_details(self) -> None:
         if not self._require_services():
             return
-        candidate_id = self._views["diagnostics"].selected_duplicate_id()
-        if candidate_id is None:
+        diagnostics = self._views["diagnostics"]
+        descriptor = diagnostics.selected_duplicate_descriptor()
+        if descriptor is None:
             return
+        candidate_id, store_path, _selection_generation = descriptor
+        scope, generation = self._refresh_scope(), self._refresh_generation
+        def is_current():
+            return self._diagnostic_duplicate_is_current(descriptor, scope, generation)
 
         def work() -> object:
-            return self._services.results.get_duplicate_candidate_detail(candidate_id)
+            if not is_current():
+                return None
+            return self._services.results.get_duplicate_candidate_detail(candidate_id, store_path=store_path)
 
         def on_success(detail: object) -> None:
+            if not is_current():
+                return
             from interfaces.tk.view_models import format_duplicate_detail_lines
+            from interfaces.tk.widgets.dialogs import show_duplicate_comparison_dialog
 
             if detail is None:
                 self._show_error_dialog(self, "Klärfall", "Kandidat nicht gefunden.")
                 return
-            self._show_details_dialog(
-                self,
-                "Klärfall",
-                f"Kandidat {candidate_id}",
-                format_duplicate_detail_lines(detail),
-            )
+            show_duplicate_comparison_dialog(self, detail, technical_details=format_duplicate_detail_lines(detail))
 
         self._task_runner.submit(
             f"duplicate-detail-{candidate_id}",
             work,
             on_success=on_success,
-            on_error=self._show_task_error,
+            on_error=lambda exc: self._show_task_error(exc) if is_current() else None,
         )
 
     def _discard_selected_duplicate(self) -> None:
         if not self._require_services():
             return
-        candidate_id = self._views["diagnostics"].selected_duplicate_id()
-        if candidate_id is None:
+        diagnostics = self._views["diagnostics"]
+        descriptor = diagnostics.selected_duplicate_descriptor()
+        if descriptor is None:
+            return
+        candidate_id, store_path, _selection_generation = descriptor
+        scope, generation = self._refresh_scope(), self._refresh_generation
+        def is_current():
+            return self._diagnostic_duplicate_is_current(descriptor, scope, generation)
+        if not is_current():
             return
         if not self._show_confirm_dialog(
             self,
@@ -2943,34 +3417,47 @@ class AnalyzerDesktopApp(tk.Tk):
             f"Duplikat-Kandidat {candidate_id} wirklich verwerfen?",
         ):
             return
+        if not is_current():
+            self._show_info_dialog(self, "Klärfall verwerfen", "Die Auswahl ist nicht mehr aktuell. Bitte neu laden.")
+            return
 
-        def work() -> object:
-            return self._services.results.discard_duplicate_candidate(candidate_id)
+        def work() -> bool:
+            if not is_current():
+                return False
+            self._services.results.discard_duplicate_candidate(candidate_id, store_path=store_path)
+            return True
 
-        def on_success(_result: object) -> None:
-            self.refresh_current_view()
+        def on_success(applied: bool) -> None:
+            if applied and is_current():
+                self.refresh_current_view()
 
         self._task_runner.submit(
             f"discard-dup-{candidate_id}",
             work,
             on_success=on_success,
-            on_error=self._show_task_error,
+            on_error=lambda exc: self._show_task_error(exc) if is_current() else None,
         )
+
+    def _diagnostic_duplicate_is_current(self, descriptor: tuple[int, str, int], scope: tuple, generation: int) -> bool:
+        return (self._current_view == "diagnostics" and self._refresh_scope() == scope and self._refresh_generation == generation
+                and self._ui_store_matches(descriptor[1]) and self._views["diagnostics"].duplicate_selection_context() == descriptor)
 
     def _show_task_error(self, exc: BaseException) -> None:
         message, details = self._friendly_error_parts(exc)
         self._show_error_dialog(self, "Aktion", message, details=details)
 
-    def _build_header(self) -> None:
-        from interfaces.tk.desktop_theme import APP_SUBTITLE, APP_TITLE
-
-        header = ttk.Frame(self, style="Header.TFrame", padding=(12, 10))
-        header.pack(fill="x")
+    def _build_header(self, master: tk.Misc) -> None:
+        header = ttk.Frame(master, style="Header.TFrame", padding=(24, 19))
+        self._shell_header = header
+        header.grid(row=0, column=1, sticky="ew")
         title_col = ttk.Frame(header, style="Header.TFrame")
         title_col.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_col, text=APP_TITLE, style="AppTitle.TLabel").pack(anchor="w")
-        ttk.Label(title_col, text=APP_SUBTITLE, style="AppSubtitle.TLabel").pack(anchor="w")
-        ttk.Button(header, text="Einstellungen", command=lambda: self.show_view("settings")).pack(side="right")
+        self._header_group = ttk.Label(title_col, text="Arbeitsplatz  /", style="HeaderPath.TLabel")
+        self._header_group.pack(side="left", padx=(0, 8))
+        self._header_section = ttk.Label(title_col, text="Arbeitsübersicht", style="HeaderSection.TLabel")
+        self._header_section.pack(side="left")
+        self._header_device = ttk.Label(header, text="Gerät wird geladen …", style="HeaderDevice.TLabel", wraplength=230, justify="right")
+        self._header_device.pack(side="right", padx=(12, 0))
 
     def _schedule_watch(self) -> None:
         if not self._require_services():
@@ -3031,6 +3518,7 @@ class AnalyzerDesktopApp(tk.Tk):
 
         def on_success(result: tuple[object, tuple[ProcessingOutcome, ...]]) -> None:
             summary, processing_outcomes = result
+            self._refresh_changes_count()
             self._last_watch_error = ""
             if summary is not None:
                 self._last_watch_summary = summary
@@ -3068,6 +3556,8 @@ class AnalyzerDesktopApp(tk.Tk):
                 "Eine Verarbeitung läuft noch. Das Fenster bleibt geöffnet, bis die Verarbeitung abgeschlossen ist.",
                 parent=self,
             )
+            return
+        if not self._views["rules"].prepare_leave(closing=True):
             return
         self._cancel_watch_schedule()
         self._task_runner.shutdown_runner()

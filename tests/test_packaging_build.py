@@ -118,6 +118,7 @@ def _synthetic_project(tmp_path):
         "test_app_main.py": b"# synthetic entry\r\n", "src/owner/api.py": b"# synthetic code\r\n",
         "packaging/build_onedir.py": b"# synthetic builder\r\n", "rules/index.json": b'{"assays":[]}',
         "rules/runtime.json": b"{}", "rules/drafts/private.json": b"{}", "jobs/private.json": b"{}",
+        "rules/trash/old.json": b"{}", "rules/inactive/old.json": b"{}",
     }.items():
         destination = tmp_path / path
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +138,7 @@ def test_fingerprint_covers_raw_code_and_runtime_rules_not_private_data(tmp_path
     paths = {item["path"] for item in before}
     assert {"src/owner/api.py", "packaging/build_onedir.py", "pyproject.toml", "rules/runtime.json"}.issubset(paths)
     assert "jobs/private.json" not in paths and "rules/drafts/private.json" not in paths
+    assert not {"rules/trash/old.json", "rules/inactive/old.json"} & paths
     entry = next(item for item in before if item["path"] == "src/owner/api.py")
     assert entry["sha256"] == hashlib.sha256(b"# synthetic code\r\n").hexdigest()
     assert entry["sha256"] != hashlib.sha256(b"# synthetic code\n").hexdigest()

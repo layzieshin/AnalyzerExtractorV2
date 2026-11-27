@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import pytest
 
 import rule_editor.marking_actions as marking_actions
 from rule_editor.field_actions import FieldsMixin
@@ -243,7 +244,8 @@ def test_regex_builder_popup_acceptance_updates_field_form(monkeypatch) -> None:
     markings._rules = object()
 
     class _FakePopup:
-        def __init__(self, _master, *, rules, assay_text, selection, on_accept):
+        def __init__(self, _master, *, rules, assay_text, selection, on_accept, field_key):
+            assert field_key == markings.var_field_key.get()
             assert rules is markings._rules
             assert assay_text == "Block"
             assert selection["text"] == "0,722"
@@ -267,7 +269,8 @@ def test_regex_builder_popup_acceptance_updates_after_search_from(monkeypatch) -
     markings._rules = object()
 
     class _FakePopup:
-        def __init__(self, _master, *, rules, assay_text, selection, on_accept):
+        def __init__(self, _master, *, rules, assay_text, selection, on_accept, field_key):
+            assert field_key == markings.var_field_key.get()
             assert rules is markings._rules
             assert assay_text == "Block"
             assert selection["text"] == "0,722"
@@ -284,6 +287,30 @@ def test_regex_builder_popup_acceptance_updates_after_search_from(monkeypatch) -
     assert markings.var_search_line.get() == ""
     assert markings.ent_search_after.state == tk.NORMAL
     assert markings.ent_search_line.state == tk.DISABLED
+
+
+@pytest.mark.parametrize("change", ["field", "edit", "closed"])
+def test_regex_builder_acceptance_rejects_changed_or_closed_form(monkeypatch, change):
+    markings = _SelectionMarkings()
+    markings._rules = object()
+    markings.var_field_key.set("A")
+    markings.var_field_regex.set("unsaved-A")
+    accepted = []
+    class Popup:
+        def __init__(self, _master, *, rules, assay_text, selection, on_accept, field_key):
+            assert field_key == "A"
+            accepted.append(on_accept)
+    monkeypatch.setattr(marking_actions, "RegexBuilderPopup", Popup)
+    markings.on_open_regex_builder()
+    if change == "field":
+        markings.var_field_key.set("B")
+    elif change == "edit":
+        markings.var_field_regex.set("new-unsaved-A")
+    else:
+        markings._closed = True
+    previous = markings.var_field_regex.get(), markings.var_search_mode.get()
+    accepted[0]("must-not-overwrite", {"line": 8})
+    assert (markings.var_field_regex.get(), markings.var_search_mode.get()) == previous
 
 
 def test_search_after_marker_from_selection_sets_escaped_literal_marker() -> None:

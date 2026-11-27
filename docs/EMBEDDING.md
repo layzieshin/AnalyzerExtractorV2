@@ -124,6 +124,21 @@ Neither raw SQLite connections nor arbitrary source file readers enter views.
 - `src.jobqueue.api.list_jobs`
 - DTO: `src.jobqueue.api.QueueJob`
 
+Case-bound attempts add `QueueJob.identity_binding` and an exact `attempt_id`.
+`process_next_pending` retains the kernel-held attempt until its final status;
+general retry/recovery never releases a held case into generic PENDING. Processing
+opts into `claim_next_job(managed_attempt=True)`; a case always enforces this
+ownership even when the caller omits that option. Explicit
+claims bind full SHA, original path, store and device. Ordinary legacy/narrow
+submit callbacks and same-worker unbound legacy claim/mark calls stay compatible,
+including separate threads or processes. Legacy unbound claims do not acquire a
+managed attempt. They cannot be used to downgrade an already case-bound job.
+`src.jobcontroller.api.verify_completed_job(..., expected_sha256=...,
+expected_pdf_path=..., store_path=..., device_id=...)` is read-only and returns
+`complete`, `reason`, and (on success) the receipt `kind`. The queue's
+`reconcile_completed_job` only reconciles a genuine complete persisted outcome;
+it never imports, validates, repairs a result, or invents a missing legacy queue.
+
 ### Assay-Kandidaten (read-only)
 
 - `src.assaycandidate.api.find_assay_candidates`
@@ -136,42 +151,6 @@ Read-only Erkennung aus normalisierten Dumps fuer Nacharbeit; keine Schreibpfade
 ### Rules / Rule Authoring
 
 Der Rule-Editor (`rule_editor/`, `rule_editor_main.py`) spricht Authoring nur ueber `RuleSuiteController` aus `src.application.api`. Direkte `src.rulesuite`-, `src.parser`- oder `src.normalizer`-Imports sind dort nicht zulaessig. `required_header_field_keys` ist der read-only Pflichtfeldvertrag. `load_normalized_pdf_text` ist der PDF-Volltext-Fallback und darf intern `src.parser.api` sowie `src.normalizer.api` nutzen. `activate_draft` eines bestehenden Regelwerks veroeffentlicht vorher einen byte-genauen Snapshot unter `rules/history/`; Fehler sind fail-closed. `activate_new_draft` erzeugt keinen Snapshot. History/Trash-Inventar ist read-only; `open_history_as_draft` und `open_inactive_as_draft` publizieren ausschliesslich neue, nicht ueberschreibende Drafts. Die privaten View-Module exportieren keine neue Fach-API. Gate 7 ist nach isolierter sichtbarer Lifecycle-Abnahme `GATE_PASSED`.
-
-R1 keeps one embedded release area in the loaded Rule Editor workspace:
-`Mit PDFs prüfen` checks the current draft directly; successful proof says it is
-not yet activated. Structure-only validation and the single extraction preview
-remain technical helpers. The wizard may return a checked draft to the editor;
-it never invokes final activation. Dirty meta/field state, PDF selection changes,
-draft/root changes and external byte changes require another check. Pure diff,
-structure inspection and activation do not reserialize a clean proven draft. The
-existing details/log area becomes visible for diff inspection. Proof completion
-uses the existing TkTaskRunner queue and main-thread poller; workers never call Tk.
-
-`RuleSuiteController.create_authoring_proof` uses the existing readiness owner.
-Proof version 2 captures original draft, index, active rule and PDF bytes under
-short lifecycle→draft locks, then runs the real parser/splitter/extractor on
-private exact snapshots. The private selected index binding is relocated to the
-private active copy, including absolute in-root and symlink-alias inputs; original
-bindings/hashes remain frozen in the proof. Update requires a different PDF path
-and content, and equality of every previous data field plus `lot_id` on the
-reference. Every configured field needs a nonempty real extraction, regardless
-of its `required` flag. Proof-only success writes no active/index/history file.
-Before ready, the complete current mode/binding/hash context is checked again.
-Attempt IDs under short locks prevent an old slow success overwriting a newer
-pending/failed attempt; a TTL lock is not held across PDF work. Old proof-version-1
-sidecars require a new check; archived QC models/PDFs are unrelated and unchanged.
-
-Both existing lower activation APIs accept optional keyword
-`require_authoring_proof=False` for compatibility. Product controller calls always
-set it true. Within lifecycle→draft locks, the owner rechecks current mode,
-active/index binding and exact verified draft bytes, then publishes that captured
-snapshot without rereading unchecked draft data. Proof-required create rejects a
-supplied effective assay name differing from the tested draft. The editor issues
-exactly one final confirmation per explicit activation attempt; structure errors,
-stale UI selection and absent proof never reach it. Backend recheck follows user
-confirmation. Existing update history remains exact old bytes and fail-closed.
-Central draft-key handling rejects path-like keys under Windows and POSIX semantics
-without silently renaming them; existing legitimate technical key mapping stays.
 
 Kern:
 
@@ -259,28 +238,9 @@ configuration, all exclusion reasons and a source token. Separate read APIs are
 not claimed to form one atomic latest snapshot. A publication rechecks the manifest
 under `BEGIN IMMEDIATE`. A closed lot remains frozen; later arrivals need explicit
 `reopen_lot`. `close_lot` accepts a supplied frozen analysis model/PDF, hashes and
-algorithm/renderer identities. It requires at least one eligible target value
-and a proven later use of another lot, independent of that witness's statistical
-eligibility or earliest date. `get_lot_chronology(store_spec, *, profile_version_id)`
-returns immutable `QCUsageSnapshot(snapshot_json, snapshot_sha256)` with all
-projected runs, exact lot identities, selected/pending variants, source/validation
-bindings, profile heads/mappings, inventory, lot bindings and pairwise witnesses.
-Dates/times are half-open precision intervals; only contiguous explicit H→M→S
-components narrow them. Missing/invalid separate time permits at most a whole
-day when its date is valid, while remaining statistically excluded. Unknown
-revision identity requires group-wide clarification. Equal or overlapping
-intervals have no import/run-ID tie-breaker; a proven pair never implies a global
-newest lot. Offers and chronology reads never mutate lot state.
-
-New callers pass `expected_chronology_token` and `profile_version_id` to
-`close_lot`. The full usage snapshot, current sources/configuration, expected lot
-head or expected absence, reference binding and model/PDF checks are verified
-under `BEGIN IMMEDIATE`. Legacy direct callers may omit the chronology token;
-its current state is captured before the transaction and checked again inside.
-`expected_version_id=0` permits a direct first closed revision using empty stored
-SD references; no preliminary open revision or incidental reference confirmation
-occurs. Closure and exact PDF/model evidence are one atomic write. Analysis and
-rendering happen before the transaction; idempotent request intent stays checked.
+algorithm/renderer identities; it requires a newer validated successor lot/date
+and atomically appends closure/evidence. The write owner retains that supplied-
+evidence contract; analysis/rendering happen before the transaction.
 
 P5 adds these APIs without changing the five-table schema:
 
@@ -336,34 +296,10 @@ ID hashing, so the same numeric SD can be deliberately redeclared under a new
 unit. Existing by-ID references are copied exactly, never retrospectively
 modified. Supported archived v1 models retain their exact JSON/hash and PDF;
 no default context is injected into historical evidence. `QCAnalysis.is_supported`
-bounds display/render support to the four prior model-version-1 combinations of
-v1/v2 analysis and v1/v2 renderer, plus exactly model version 2 / analysis v3 /
-renderer v3, and exactly model version 3 / analysis v4 / renderer v4. New models freeze independent manufacturer/single-value percentage
-limits, point findings and exact `chart.reference_lines`; UI/PDF draw those values
-without recomputation. Percentage exceedance never changes statistical inclusion
-or Westgard run status. The current renderer can print supported archived v1
-models without changing their JSON/hash or retrofitting percentage lines.
+bounds display/render support to model version 1, known v1/v2 analysis IDs and
+known v1/v2 renderers. New models identify `arev2-qc-pdf-v2`; the current renderer
+can print supported archived v1 models without changing their JSON/hash.
 Export of original evidence remains independent.
-
-P4 (2026-11-13) adds frozen schema-3 fields without new public calls or database
-tables: per-level `descriptive` with availability/value/reason for mean,
-`sample_sd` (n-1), `cv_percent`, plus n and a fixed descriptive version; `period`
-with readable start/end dates and unknown-date count; per-point `position`,
-`measurement` (actual contiguous clock precision and raw counterpart), and
-`deviation.absolute` / `deviation.relative_percent`. Only already eligible
-values enter statistics; SD needs n>=2, CV positive mean, relative deviation
-positive SOLL. These empirical statistics never create a Westgard SD reference.
-Mean reference lines and findings summaries are frozen by QC, not calculated by
-UI/PDF. Literal schema-2/v3/v3 compatibility remains intact; old archive models
-are not enriched. The compact A4 standard renderer includes the primary right
-legend, measurements and important position-bound findings/exclusion reasons.
-Complete raw/source/validator evidence remains in the unchanged frozen model;
-the footer identifies that digital model. No JSON/raw-data attachment is added.
-`include_explanations=True` additionally prints the point-bound technical evidence,
-methods, references and full rule details; that optional print may use more pages.
-Explicit configured source grouping is the sole analytical-run label; technical
-result IDs remain labeled evidence identities. Missing source metadata is not
-inferred from the layout reference or other people fields.
 
 Use existing Application controllers for UI work:
 `SettingsController.get_qc_configuration`, `migrate_qc_devices`,
@@ -371,29 +307,24 @@ Use existing Application controllers for UI work:
 `get_qc_lot_detail`, `save_qc_lot`, `reopen_qc_lot`,
 `get_qc_analysis(detail, evidence_lot_version_id=None)`,
 `list_qc_report_versions(case)`, `list_qc_close_witnesses(detail)`,
-`prepare_qc_lot_close(detail) -> QCLotClosePreview`,
-`close_qc_lot(preview, operator_initials=..., request_id=...)`
+`close_qc_lot(detail, analysis_view, witness, operator_initials=..., request_id=...)`
 and `export_qc_report(case, evidence_lot_version_id=..., destination=..., include_explanations=False)`.
 `QCAnalysisView` carries canonical model/hash and optional archived evidence
 version/hash; `QCReportVersion` identifies a stored report revision. Current open
 analysis recaptures/rechecks sources. Closed or historical analysis loads only
 the stored model and checks lot ownership; unknown historical model versions
-fail explicitly rather than being silently recalculated. `QCLotCase` adds last-use
-and offer/clarification presentation; `QCLotDetail` adds the captured usage context
-and a live-source-change flag. Preparation is strictly read-only, binds the frozen
-analysis and actual verified PDF bytes/hash, and rechecks the complete context
-after rendering. Cancellation or late callbacks cannot publish. Final confirmation
-publishes only that preview through the existing atomic API; it performs no new
-PDF rendering. During the write, cancel/window-close are disabled. Closed lots
-retain an independent live-change notice beside their archived model view.
+fail explicitly rather than being silently recalculated. Close renders before
+the write lock, then uses the existing atomic closure API with captured tokens.
 The public DTOs `QCConfigurationState`, `QCLotCase`, `QCLotDetail` carry their inspected effective
 store. A store switch rejects mutations even when database-local IDs coincide.
-Errors are `QualityControlApplicationError`. Four controllers/services and seven
+Errors are `QualityControlApplicationError`. Four controllers/services and eight
 views remain; no new entrypoint or cross-repository dependency is required.
 The explicit Statistics navigation owns the single existing QC presentation in
 `StatisticsView`, still using ResultsController. ResultsView retains report
 lists/details and report validation. The existing TaskRunner callbacks/store
 guards, chart model, history and PDF options are moved rather than duplicated.
+
+Manufacturer-ID cases use the existing `RuleSuiteController`: `list_identity_case_items(store_path=...)`, explicit `confirm_identity_case(...)`, the unchanged one-Test-PDF proof/activation methods, and `retry_identity_case(case_id, store_path=..., expected_identity_token=...)`. The latter invokes the bound existing ExtractionController, never FIFO work. The existing processing/queue claim accepts optional exact `job_id`, `retry_failed`, `expected_sha256` and `expected_pdf_path`; legacy calls remain unchanged. Case records/provenance are private runtime data, not result rows or distributable rules. Known names are hints, never aliases; completed historical results are not reopened. A failed/missing source remains open even after rule activation.
 
 Assay-name fields are additive DTO defaults at the end of existing records.
 `ReportAssayGroup.assay_display_label` remains the group display field; identities
@@ -499,11 +430,3 @@ from src.assaycandidate.api import find_assay_candidates
 
 - Das QMTool soll AREV2 spaeter nur als Konsument der hier dokumentierten Public APIs verwenden.
 - Modulvertrag, PyQt-Integration, Navigation oder QM-spezifische Settings liegen bewusst ausserhalb dieses Repos.
-
-## 2.2 configuration and report-device binding
-
-`src.qualitycontrol.api.ConfigurationContext(request_id, operator_initials='', reason='')` identifies reversible configuration writes without requiring a clinical actor. `MutationContext` remains strict for lot publication and clinical actions. New profile editor saves use `profile_schema_version=2`: a named IST level is required; device scope and feature-specific settings are optional. Old immutable snapshots remain unchanged. Session drafts belong to SettingsController; explicit retained versions use the same QC SQLite owner.
-
-`src.resultstore.api.get_report_device_context` and `list_pending_report_candidates` are read-only. `src.dbwriter.api.confirm_report_device` owns whole-report assignment, source verification, qualified identity claims and candidate materialization under its writer transaction. It does not validate results or alter frozen DONE jobs. The import/raw identity and confirmed effective device remain separate fields. `ResultsController.list_open_validation_cases(report_id=..., include_validated=True, store_path=...)` supports the existing Results correction entry through the same validation view.
-
-`validate_run` and `correct_validation` accept `expected_device_assignment_id` together with the displayed result selection. New proven-source runs require an explicit confirmed assignment. A changed report assignment invalidates old effective human bindings until each run is explicitly revalidated. Versioned assignments, validations and historical QK/PDF evidence are append-only. Neutral profiles require the actual `device_id` when capturing QC sources/chronology; consumers must not pool devices or infer a physical device from an import default.

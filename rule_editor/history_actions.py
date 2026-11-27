@@ -40,7 +40,6 @@ class HistoryMixin:
             self.var_lot_regex,
             self.var_excel_filename,
             self.var_sheet_template,
-            self.var_dedupe_fields,
         ):
             var.trace_add("write", self._on_form_changed)
         for var in (
@@ -51,7 +50,6 @@ class HistoryMixin:
             self.var_search_line,
             self.var_field_excel_column,
             self.var_field_dedupe,
-            self.var_field_required,
         ):
             var.trace_add("write", self._on_field_form_changed)
         self.var_search_mode_label.trace_add("write", self.on_search_mode_label_changed)
@@ -61,7 +59,7 @@ class HistoryMixin:
             return
         if self.current_draft_path:
             self._dirty = True
-            invalidate = getattr(self, "_invalidate_authoring_proof", None)
+            invalidate = getattr(self, "_invalidate_authoring_test", None)
             if callable(invalidate):
                 invalidate()
 
@@ -69,12 +67,16 @@ class HistoryMixin:
         if self._suspend_dirty_tracking or self._field_form_loading:
             return
         self._field_form_dirty = True
-        invalidate = getattr(self, "_invalidate_authoring_proof", None)
+        updater = getattr(self, "_update_field_commit_button", None)
+        if callable(updater):
+            updater()
+        invalidate = getattr(self, "_invalidate_authoring_test", None)
         if callable(invalidate):
             invalidate()
 
     def _schedule_autosave(self) -> None:
-        self.after(self._autosave_ms, self._autosave_tick)
+        if not getattr(self, "_closed", False):
+            self._autosave_after_id = self.after(self._autosave_ms, self._autosave_tick)
 
     def _autosave_tick(self) -> None:
         try:
@@ -119,8 +121,14 @@ class HistoryMixin:
         if len(self._undo_stack) > 50:
             self._undo_stack = self._undo_stack[-50:]
         self._redo_stack.clear()
+        sync = getattr(self, "_sync_authoring_controls", None)
+        if callable(sync):
+            sync()
 
     def _apply_restored_widgets(self, snap: dict) -> None:
+        invalidate = getattr(self, "_invalidate_authoring_test", None)
+        if callable(invalidate):
+            invalidate()
         self._suspend_dirty_tracking = True
         try:
             self._apply_data_to_widgets(snap)
@@ -200,7 +208,13 @@ class HistoryMixin:
             self._field_mutation_guard = False
 
     def on_undo(self) -> None:
+        if getattr(self, "_busy", False):
+            self._set_hint("Bitte zuerst den laufenden Prüflauf abschließen.")
+            return
         self._guarded_history_step(undo=True)
 
     def on_redo(self) -> None:
+        if getattr(self, "_busy", False):
+            self._set_hint("Bitte zuerst den laufenden Prüflauf abschließen.")
+            return
         self._guarded_history_step(undo=False)

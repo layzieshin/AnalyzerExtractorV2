@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -192,8 +193,8 @@ class ExtractionController:
         record = ingestion_retry_archive(self._project_root, ingestion_id)
         return _to_import_record_item(record)
 
-    def list_processing_items(self) -> list[ProcessingItem]:
-        return [_to_processing_item(job) for job in list_processing_jobs(self._project_root)]
+    def list_processing_items(self, *, create_missing: bool = True) -> list[ProcessingItem]:
+        return [_to_processing_item(job) for job in list_processing_jobs(self._project_root, create_missing=create_missing)]
 
     def retry_failed(self, job_id: str) -> ProcessingItem:
         job = retry_failed(self._project_root, job_id)
@@ -220,6 +221,33 @@ class ExtractionController:
             self._processing_config(),
             submit_func=self._submit_func,
         )
+        return _to_processing_outcome(result)
+
+    def retry_identity_job(self, job_id: str, *, pdf_path: str, expected_sha256: str,
+                           store_path: str, device_id: str) -> ProcessingOutcome:
+        """Claim only this failed/pending source, directly into PROCESSING.
+
+        There is no globally claimable retry-PENDING interval. SQLite/device
+        context is frozen from the selected case, not a later UI setting.
+        """
+        settings = self._settings_provider()
+        if not store_path or Path(store_path).resolve() != Path(settings.sqlite_path).resolve():
+            raise ValueError("identity_case_store_changed")
+        if len(expected_sha256) != 64 or job_id != expected_sha256[:16] or not device_id:
+            raise ValueError("identity_case_source_identity_invalid")
+        evidence = get_job_evidence(self._project_root, job_id, expected_pdf_sha256=expected_sha256, expected_pdf_path=pdf_path)
+        if evidence is None or not evidence.state_available or evidence.retry_kind == "retired":
+            raise ValueError("identity_case_source_evidence_missing")
+        if evidence.store_path and Path(evidence.store_path).resolve() != Path(store_path).resolve():
+            raise ValueError("identity_case_source_store_changed")
+        if evidence.device_id != device_id:
+            raise ValueError("identity_case_source_device_changed")
+        jobs = {item.job_id: item for item in list_processing_jobs(self._project_root)}
+        if job_id not in jobs:
+            raise ValueError("identity_case_queue_job_missing")
+        config = replace(self._processing_config(settings), sqlite_path=str(Path(store_path).resolve()), device_id=device_id)
+        result = process_next_pending(self._project_root, config, submit_func=self._submit_func,
+            job_id=job_id, retry_failed=True, expected_sha256=expected_sha256, expected_pdf_path=pdf_path)
         return _to_processing_outcome(result)
 
     def list_ingestion_instances(self) -> list[IngestionInstanceItem]:
@@ -313,9 +341,9 @@ class ExtractionController:
 
         return enqueue
 
-    def _processing_config(self) -> ProcessingConfig:
+    def _processing_config(self, desktop: DesktopSettings | None = None) -> ProcessingConfig:
         runtime_defaults = config_from_runtime_defaults(self._project_root)
-        desktop = self._settings_provider()
+        desktop = desktop if desktop is not None else self._settings_provider()
         return ProcessingConfig(
             output_mode=desktop.output_mode,
             sqlite_path=desktop.sqlite_path,
@@ -392,6 +420,7 @@ def _to_ingestion_instance_item(record: object, queue_job: object | None) -> Ing
             ledger_processing_status,
             archive_status,
             queue_status=queue_status,
+            technical_detail=technical,
         ),
         friendly_message=friendly_processing_message(technical),
         technical_detail=technical,
@@ -425,6 +454,7 @@ def _queue_only_ingestion_instance(job: object) -> IngestionInstanceItem:
             processing_status,
             "NOT_REQUIRED",
             queue_status=status,
+            technical_detail=technical,
         ),
         friendly_message=friendly_processing_message(technical),
         technical_detail=technical,

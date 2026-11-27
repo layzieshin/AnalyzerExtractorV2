@@ -8,6 +8,8 @@ from interfaces.tk.desktop_theme import configure_desktop_theme
 from interfaces.tk.scroll_helpers import create_scrollable_listbox
 
 from .regex_library import RegexLibraryPopup
+from .report_panel import build_authoring_result
+from .toolbar import _configure_button_styles
 
 _REQUIRED_STATUS_LABELS = {
     "confirmed": "Treffer",
@@ -36,6 +38,7 @@ _STEP_TITLES = {
 class WizardUiMixin:
     def _build_ui(self) -> None:
         configure_desktop_theme(self)
+        _configure_button_styles(self)
         self.lbl_title = tk.Label(self, text="", font=("Segoe UI", 11, "bold"), anchor="w")
         self.lbl_title.pack(fill="x", padx=12, pady=(12, 2))
         tk.Label(self, textvariable=self.var_status, anchor="w", fg="#555", wraplength=1050).pack(
@@ -65,15 +68,18 @@ class WizardUiMixin:
 
         nav = tk.Frame(self)
         nav.pack(fill="x", padx=12, pady=(0, 12))
-        tk.Button(nav, text="Abbrechen", command=self._on_cancel).pack(side="left")
-        self.btn_continue_draft = tk.Button(
+        ttk.Button(nav, text="Abbrechen", command=self._on_cancel, style="RuleSuite.Ghost.TButton").pack(side="left")
+        self.btn_continue_draft = ttk.Button(
             nav,
-            text="Entwurf speichern / später weiterbearbeiten",
+            text="Später weiterbearbeiten",
             command=self._on_continue_draft,
+            style="RuleSuite.Secondary.TButton",
         )
-        self.btn_next = tk.Button(nav, text="Weiter", width=42, command=self._on_next)
+        self.btn_finish_later = ttk.Button(nav, text="Später weiterbearbeiten", command=self._finish_later,
+                                           style="RuleSuite.Secondary.TButton")
+        self.btn_next = ttk.Button(nav, text="Weiter", command=self._on_next, style="RuleSuite.Primary.TButton")
         self.btn_next.pack(side="right")
-        self.btn_back = tk.Button(nav, text="Zurück", width=10, command=self._on_back)
+        self.btn_back = ttk.Button(nav, text="Zurück", command=self._on_back, style="RuleSuite.Ghost.TButton")
         self.btn_back.pack(side="right", padx=(0, 8))
 
     def _build_target_card(self, card: tk.Frame) -> None:
@@ -231,36 +237,12 @@ class WizardUiMixin:
         form.pack(fill="x")
         self.list_summary, summary_frame = create_scrollable_listbox(form, height=6)
         summary_frame.pack(fill="both", expand=True, padx=6, pady=(8, 6))
-        self.frm_reference = tk.Frame(form)
-        tk.Label(
-            self.frm_reference,
-            text=(
-                "Zum Prüfen einer geänderten aktiven Regel: Die Problem-PDF muss mit diesem Entwurf bestehen. "
-                "Zusätzlich eine andere Referenz-PDF wählen, mit der die bisherige Regel funktioniert hat. "
-                "Alte und neue Regel müssen auf dieser Referenz dieselben Werte liefern."
-            ),
-            anchor="w",
-            justify="left",
-            wraplength=1000,
-            fg="#444",
-        ).pack(fill="x", padx=6, pady=(0, 4))
-        ref_row = tk.Frame(self.frm_reference)
-        ref_row.pack(fill="x", padx=6, pady=(0, 8))
-        tk.Label(ref_row, text="Referenz-PDF").pack(side="left")
-        tk.Entry(ref_row, textvariable=self.var_reference_pdf).pack(side="left", fill="x", expand=True, padx=(6, 0))
-        tk.Button(ref_row, text="PDF auswählen …", command=self._on_pick_reference_pdf).pack(side="left", padx=(6, 0))
-        tk.Radiobutton(
-            form,
-            text="Entwurf im Editor weiterbearbeiten (auch unvollständig, ohne Aktivierung)",
-            variable=self.var_finish_action,
-            value="editor",
-        ).pack(anchor="w", padx=6)
-        tk.Radiobutton(
-            form,
-            text="Mit PDFs prüfen und zum Editor zurückkehren (ohne Aktivierung)",
-            variable=self.var_finish_action,
-            value="activate",
-        ).pack(anchor="w", padx=6, pady=(0, 4))
+        test_frame = ttk.Frame(form, style="CardInner.TFrame", padding=6)
+        test_frame.pack(fill="both", expand=True)
+        self.btn_rule_test = ttk.Button(test_frame, text="Extraktion testen", command=self._on_rule_test,
+                                        style="RuleSuite.Secondary.TButton")
+        self.btn_rule_test.pack(anchor="w")
+        build_authoring_result(self, test_frame)
         self.lbl_required_summary = tk.Label(form, text="", anchor="w", fg="#666", wraplength=1000)
         self.lbl_required_summary.pack(fill="x", padx=6, pady=(0, 8))
         self.lbl_mode_summary = tk.Label(form, text="", anchor="w", fg="#444", wraplength=1000)

@@ -1,8 +1,9 @@
 ﻿from __future__ import annotations
 
 from typing import Any, Dict, List
+from collections.abc import Callable, Iterable
 
-from .rulesuite import RuleSuite
+from .rulesuite import RuleSuite, RuleSuiteError
 from .templates import HEADER_FIELD_KEYS, REQUIRED_HEADER_FIELD_KEYS
 from .required_fields import check_required_fields as _check_required_fields
 from .authoring_readiness import (
@@ -17,6 +18,7 @@ from .regex_builder import suggest_builder_spec_from_selection as _suggest_build
 from .regex_suggest import suggest_regex_from_selection as _suggest_regex_from_selection
 
 __all__ = [
+    "RuleSuiteError",
     "HEADER_FIELD_KEYS",
     "AuthoringReadinessError",
     "LEGACY_HEADER_ALIASES",
@@ -49,6 +51,10 @@ __all__ = [
     "get_assay_text",
     "list_fields",
     "list_rulesets",
+    "list_assay_identity_cases",
+    "list_assay_identity_job_bindings",
+    "confirm_assay_identity_case",
+    "observe_assay_identity_changes",
     "list_rulesuite_inventory",
     "load_draft",
     "locate_fields",
@@ -74,6 +80,41 @@ __all__ = [
     "validate_draft",
     "verify_authoring_proof",
 ]
+
+
+def list_assay_identity_cases(project_root: str, *, store_path: str) -> List[Dict[str, Any]]:
+    from .identity_cases import list_assay_identity_cases as _list
+
+    return _list(project_root, store_path=store_path)
+
+
+def list_assay_identity_job_bindings(project_root: str) -> Dict[str, Dict[str, Any]]:
+    from .identity_cases import list_assay_identity_job_bindings as _list
+    return _list(project_root)
+
+
+def confirm_assay_identity_case(
+    project_root: str, case_id: str, *, store_path: str, expected_identity_token: str,
+    source_assay_key: str, expected_rule_sha256: str, initialization: str,
+    assay_name: str | None = None,
+) -> Dict[str, Any]:
+    from .identity_authoring import confirm_assay_identity_case as _confirm
+
+    return _confirm(project_root, case_id, store_path=store_path, expected_identity_token=expected_identity_token,
+                    source_assay_key=source_assay_key, expected_rule_sha256=expected_rule_sha256,
+                    initialization=initialization, assay_name=assay_name)
+
+
+def observe_assay_identity_changes(
+    project_root: str, *, store_path: str, pdf_path: str, pdf_sha256: str,
+    job_id: str, device_id: str, normalized_text: str, sections: Iterable[Any],
+    expected_index_sha256: str | None = None,
+) -> List[Dict[str, Any]]:
+    from .identity_cases import observe_assay_identity_changes as _observe
+
+    return _observe(project_root, store_path=store_path, pdf_path=pdf_path, pdf_sha256=pdf_sha256,
+                    job_id=job_id, device_id=device_id, normalized_text=normalized_text, sections=sections,
+                    expected_index_sha256=expected_index_sha256)
 
 
 def create_draft(project_root: str, assay_key: str) -> str:
@@ -239,8 +280,11 @@ def get_assay_text(
     assay_key: str,
     assay_name: str,
     draft_path: str | None = None,
+    *,
+    strict: bool = False,
 ) -> Dict[str, Any]:
-    return RuleSuite().get_assay_text(project_root, pdf_path, assay_key, assay_name, draft_path=draft_path)
+    return RuleSuite().get_assay_text(project_root, pdf_path, assay_key, assay_name, draft_path=draft_path,
+                                     **({"strict": True} if strict else {}))
 
 
 def validate_draft(draft_path: str) -> Dict[str, Any]:
@@ -274,6 +318,9 @@ def create_authoring_proof(
     draft_path: str,
     failing_pdf_path: str,
     reference_pdf_path: str | None = None,
+    *,
+    automatic_sources: Callable[[], Iterable[Dict[str, Any]]] | None = None,
+    identity_store_path: str | None = None,
 ) -> Dict[str, Any]:
     return _create_authoring_proof(
         project_root,
@@ -281,6 +328,8 @@ def create_authoring_proof(
         draft_path,
         failing_pdf_path,
         reference_pdf_path,
+        **({"automatic_sources": automatic_sources} if automatic_sources is not None else {}),
+        **({"identity_store_path": identity_store_path} if identity_store_path is not None else {}),
     )
 
 
@@ -299,16 +348,19 @@ def diff_draft_vs_active(project_root: str, assay_key: str, draft_path: str) -> 
     return RuleSuite().diff_draft_vs_active(project_root, assay_key, draft_path)
 
 
-def preview_extract(project_root: str, pdf_path: str, assay_key: str, draft_path: str | None = None) -> Dict[str, Any]:
-    return RuleSuite().preview_extract(project_root, pdf_path, assay_key, draft_path=draft_path)
+def preview_extract(project_root: str, pdf_path: str, assay_key: str, draft_path: str | None = None, *, strict: bool = False) -> Dict[str, Any]:
+    return RuleSuite().preview_extract(project_root, pdf_path, assay_key, draft_path=draft_path,
+                                     **({"strict": True} if strict else {}))
 
 
-def activate_draft(project_root: str, assay_key: str, draft_path: str, *, require_authoring_proof: bool = False) -> str:
-    return str(RuleSuite().activate_draft(project_root, assay_key, draft_path, require_authoring_proof=require_authoring_proof))
+def activate_draft(project_root: str, assay_key: str, draft_path: str, *, authoring_proof: Dict[str, Any] | None = None) -> str:
+    return str(RuleSuite().activate_draft(project_root, assay_key, draft_path,
+               **({"authoring_proof": authoring_proof} if authoring_proof is not None else {})))
 
 
-def activate_new_draft(project_root: str, assay_key: str, assay_name: str, draft_path: str, *, require_authoring_proof: bool = False) -> str:
-    return str(RuleSuite().activate_new_draft(project_root, assay_key, assay_name, draft_path, require_authoring_proof=require_authoring_proof))
+def activate_new_draft(project_root: str, assay_key: str, assay_name: str, draft_path: str, *, authoring_proof: Dict[str, Any] | None = None) -> str:
+    return str(RuleSuite().activate_new_draft(project_root, assay_key, assay_name, draft_path,
+               **({"authoring_proof": authoring_proof} if authoring_proof is not None else {})))
 
 
 def list_fields(project_root: str, assay_key: str) -> List[str]:
@@ -442,6 +494,19 @@ def delete_never_active_ruleset(project_root: str, draft_path: str) -> Dict[str,
     from .lifecycle import delete_never_active_ruleset as _impl
 
     return _impl(project_root, draft_path)
+
+
+def prepare_draft_discard(project_root: str, draft_path: str, *, expected_revision: str | None = None) -> Dict[str, Any]:
+    from .lifecycle import prepare_draft_discard as _impl
+
+    return _impl(project_root, draft_path, expected_revision=expected_revision)
+
+
+def discard_draft(project_root: str, draft_path: str, *, expected_revision: str,
+                  expected_readiness_revision: str | None) -> Dict[str, Any]:
+    from .lifecycle import discard_draft as _impl
+
+    return _impl(project_root, draft_path, expected_revision=expected_revision, expected_readiness_revision=expected_readiness_revision)
 
 
 def open_active_as_draft(project_root: str, assay_key: str) -> Dict[str, Any]:

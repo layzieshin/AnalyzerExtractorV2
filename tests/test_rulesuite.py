@@ -25,6 +25,7 @@ from src.rulesuite.api import (
     delete_inventory_item,
     delete_never_active_ruleset,
     delete_ruleset,
+    discard_draft,
     diff_draft_vs_active,
     draft_content_revision,
     draft_path_for_assay,
@@ -41,6 +42,7 @@ from src.rulesuite.api import (
     open_inactive_as_draft,
     move_field,
     preview_extract,
+    prepare_draft_discard,
     read_candidate_fields,
     remove_field,
     rename_field,
@@ -1559,6 +1561,326 @@ def test_new_rule_authoring_proof_needs_only_example_pdf(
     assert verify_authoring_proof(str(root), "(9000)", draft)["ok"] is True
 
 
+def _v2_draft(root):
+    draft = create_draft(str(root), "(1111)")
+    set_lot_rule(draft, r"Lot:\s*(\w+)")
+    set_field_regex(draft, "test", r"Test:\s*(\w+)")
+    set_field_regex(draft, "date", r"Date:\s*([\d-]+)")
+    return draft
+
+
+def _v2_pdf(path, *, header="Instrument Alpha (1111)", value="RAW_ONLY_932742", date="2026-01-01"):
+    import fitz
+
+    lines = [header, "Lot: RAW_LOT_491725", f"Test: {value}"]
+    if date:
+        lines.append(f"Date: {date}")
+    with fitz.open() as document:
+        page = document.new_page()
+        page.insert_text((72, 72), "\n".join(lines))
+        document.save(path)
+    return path
+
+
+def _v2_source(path):
+    import hashlib
+
+    return {"local": True, "path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "kind": "import", "ingestion_id": "synthetic-import"}
+
+
+def test_authoring_v2_shows_distinct_actual_values_without_persisting_values_or_comparing_pdfs(tmp_path):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "chosen.pdf")
+    secondary = _v2_pdf(root / "known.pdf", value="OTHER_RAW_ONLY_482917", date="2026-02-02")
+    before = {path: path.read_bytes() for path in (primary, secondary, root / "rules" / "AssayA.json", root / "rules" / "index.json")}
+    proof = create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=lambda: (_v2_source(secondary),))
+    assert proof["version"] == 2 and proof["status"] == "ready"
+    assert proof["primary"]["data"]["test"] == "RAW_ONLY_932742"
+    assert proof["secondary"]["data"] == {"test": "OTHER_RAW_ONLY_482917", "date": "2026-02-02"}
+    assert proof["primary"]["assay_header"] == {"assay_key": "(1111)", "assay_name": "Instrument Alpha"}
+    assert proof["assay_name"] == "Assay A"  # Actual header is not the editable friendly name.
+    receipt_text = Path(draft + ".readiness").read_text(encoding="utf-8")
+    assert all(value not in receipt_text for value in ("RAW_ONLY_932742", "OTHER_RAW_ONLY_482917", "RAW_LOT_491725", "2026-02-02", "Instrument Alpha"))
+    receipt = json.loads(receipt_text)
+    assert "data" not in receipt["primary"] and "lot_id" not in receipt["primary"]
+    assert receipt["secondary"]["field_states"] == {"test": "extracted", "date": "extracted"}
+    assert len(receipt["primary"]["assay_header"]["header_sha256"]) == 64
+    assert verify_authoring_proof(str(root), "(1111)", draft)["ok"]
+    assert {path: path.read_bytes() for path in before} == before
+    assert not (root / "jobs").exists() and not (root / "storage").exists()
+
+
+def test_authoring_v2_no_compatible_distinct_hash_is_yellow_but_explicit_activation_ready(tmp_path):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "chosen.pdf")
+    duplicate = root / "renamed.pdf"
+    duplicate.write_bytes(primary.read_bytes())
+    incompatible = _v2_pdf(root / "other.pdf", header="Different Instrument (1111)")
+    proof = create_authoring_proof(str(root), "(1111)", draft, str(primary),
+        automatic_sources=lambda: (_v2_source(duplicate), _v2_source(incompatible)))
+    assert proof["status"] == "ready" and proof["secondary"]["status"] == "not_available"
+    assert proof["secondary"]["message"] == "Einmal geprüft – Zweitprüfung noch offen"
+    assert verify_authoring_proof(str(root), "(1111)", draft)["ok"]
+
+
+@pytest.mark.parametrize("engine_failure", [False, True])
+def test_authoring_v2_first_secondary_extraction_or_engine_failure_blocks_without_green_search(tmp_path, monkeypatch, engine_failure):
+    from src.rulesuite.rulesuite import RuleSuite
+
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "chosen.pdf")
+    incomplete = _v2_pdf(root / "first.pdf", value="PARTIAL_RAW_92814", date="")
+    later_good = _v2_pdf(root / "later.pdf")
+    visited = []
+    original = RuleSuite.preview_extract
+
+    def preview(self, *args, **kwargs):
+        if engine_failure and Path(args[1]).name == "secondary.pdf":
+            raise RuntimeError("ENGINE_RAW_PRIVATE_93724")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RuleSuite, "preview_extract", preview)
+
+    def sources():
+        for path in (incomplete, later_good):
+            visited.append(path)
+            yield _v2_source(path)
+
+    proof = create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=sources)
+    assert visited == [incomplete] and proof["status"] == "blocked"
+    assert proof["secondary"]["status"] == "failed" and "authoring_proof_secondary_failed" in proof["errors"]
+    assert not verify_authoring_proof(str(root), "(1111)", draft)["ok"]
+    text = Path(draft + ".readiness").read_text(encoding="utf-8")
+    assert "PARTIAL_RAW_92814" not in text and "ENGINE_RAW_PRIVATE_93724" not in text
+    if not engine_failure:
+        assert proof["secondary"]["data"] == {"test": "PARTIAL_RAW_92814", "date": None}
+        assert proof["secondary"]["missing_fields"] == ["date"]
+
+
+def test_authoring_v2_new_attempt_failure_revokes_old_proof_and_keeps_partial_values_transient(tmp_path):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "chosen.pdf")
+    assert create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=lambda: ())["status"] == "ready"
+    failed = _v2_pdf(root / "failed.pdf", date="")
+    proof = create_authoring_proof(str(root), "(1111)", draft, str(failed), automatic_sources=lambda: pytest.fail("primary failed"))
+    assert proof["status"] == "blocked" and proof["primary"]["data"]["date"] is None
+    assert not verify_authoring_proof(str(root), "(1111)", draft)["ok"]
+    assert "RAW_ONLY_932742" not in Path(draft + ".readiness").read_text(encoding="utf-8")
+
+
+def test_authoring_v2_freezes_exact_draft_for_both_pdfs_and_refuses_changed_original(tmp_path, monkeypatch):
+    from src.rulesuite.rulesuite import RuleSuite
+
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "chosen.pdf")
+    secondary = _v2_pdf(root / "known.pdf", value="OTHER")
+    original_bytes, tested = Path(draft).read_bytes(), []
+    preview = RuleSuite.preview_extract
+
+    def capture(self, *args, **kwargs):
+        tested.append(Path(kwargs["draft_path"]).read_bytes())
+        result = preview(self, *args, **kwargs)
+        if len(tested) == 1:
+            Path(draft).write_bytes(original_bytes + b"\n")
+        return result
+
+    monkeypatch.setattr(RuleSuite, "preview_extract", capture)
+    proof = create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=lambda: (_v2_source(secondary),))
+    assert tested == [original_bytes, original_bytes]
+    assert proof["primary"]["status"] == proof["secondary"]["status"] == "passed"
+    assert proof["status"] == "blocked" and "authoring_proof_draft_changed" in proof["errors"]
+
+
+def test_authoring_v2_unrelated_index_edit_is_audit_only_but_selected_mapping_change_revokes(tmp_path):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "chosen.pdf")
+    create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=lambda: ())
+    index_path = root / "rules" / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["assays"].append({"assay_key": "(8888)", "ruleset_file": "Other.json"})
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    assert verify_authoring_proof(str(root), "(1111)", draft)["ok"]
+    (root / "rules" / "Replacement.json").write_bytes((root / "rules" / "AssayA.json").read_bytes())
+    index["assays"][0]["ruleset_file"] = "Replacement.json"
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    assert "authoring_proof_active_mapping_changed" in verify_authoring_proof(str(root), "(1111)", draft)["errors"]
+
+
+def test_authoring_v2_older_attempt_cannot_overwrite_newer_attempt(tmp_path):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "chosen.pdf")
+    latest = []
+
+    def sources():
+        latest.append(create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=lambda: ()))
+        return ()
+
+    with pytest.raises(AuthoringReadinessError, match="attempt_superseded"):
+        create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=sources)
+    assert json.loads(Path(draft + ".readiness").read_text(encoding="utf-8"))["attempt_id"] == latest[0]["attempt_id"]
+    assert verify_authoring_proof(str(root), "(1111)", draft)["ok"]
+
+
+@pytest.mark.parametrize("missing_target_date", [False, True])
+def test_authoring_v2_real_manufacturer_title_metadata_test_path_and_raw_key_are_one_bounded_occurrence(tmp_path, missing_target_date):
+    import fitz
+
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    data = load_draft(draft)
+    data["assay_key"] = "(1c9e)"
+    data["assay_name"] = "User friendly label"
+    save_draft(draft, data)
+    set_field_regex(draft, "test", r"Test:\s*([^\n]+\.asy\s+\(1C9E\))")
+    add_field(draft, "plate", r"Plate:\s*(\w+)", excel_column="PLATTE")
+
+    def pdf(path, *, date):
+        lines = ["Instrument Alpha", "Plate: ALPHA", "Lot: BEFORE_TEST"]
+        if date:
+            lines.append("Date: 2026-03-03")
+        lines += [r"Test: C:\Tests\Instrument Alpha.asy (1C9E)",
+                  "Other Beta", "Plate: BETA", "Lot: FOREIGN", "Date: 2099-12-31",
+                  r"Test: C:\Tests\Other Beta.asy (2222)"]
+        with fitz.open() as document:
+            page = document.new_page()
+            page.insert_text((72, 72), "\n".join(lines))
+            document.save(path)
+        return path
+
+    primary = pdf(root / "chosen.pdf", date=True)
+    secondary = pdf(root / "known.pdf", date=not missing_target_date)
+    proof = create_authoring_proof(str(root), "(1c9e)", draft, str(primary), automatic_sources=lambda: (_v2_source(secondary),))
+    assert proof["primary"]["status"] == "passed" and proof["primary"]["lot_id"] == "BEFORE_TEST"
+    assert proof["primary"]["data"] == {
+        "test": r"C:\Tests\Instrument Alpha.asy (1C9E)", "date": "2026-03-03", "plate": "ALPHA"}
+    assert proof["primary"]["assay_header"] == {"assay_key": "(1c9e)", "assay_name": "Instrument Alpha"}
+    if missing_target_date:
+        assert proof["status"] == "blocked" and proof["secondary"]["data"]["date"] is None
+    else:
+        assert proof["status"] == "ready" and proof["secondary"]["status"] == "passed"
+    assert "2099-12-31" not in str(proof["primary"]["data"])
+
+
+def test_authoring_v2_conflicting_keys_at_one_title_start_cannot_register_readiness(tmp_path):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "conflict.pdf", header="Instrument Alpha\n(1111)\n" + r"Test: C:\Assays\Instrument Alpha.asy (2222)")
+    proof = create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=lambda: ())
+    assert proof["status"] == "blocked" and proof["primary"]["status"] == "failed"
+    assert "ambiguous" in proof["primary"]["error"]
+    assert not verify_authoring_proof(str(root), "(1111)", draft)["ok"]
+
+
+@pytest.mark.parametrize("change_under_lock", ["none", "draft", "active", "mapping"])
+def test_authoring_v2_activation_rechecks_lock_and_publishes_exact_tested_bytes(tmp_path, monkeypatch, change_under_lock):
+    from contextlib import contextmanager
+    import src.rulesuite.rulesuite as owner
+
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    Path(draft).write_bytes(Path(draft).read_bytes() + b"\r\n \n")
+    expected = Path(draft).read_bytes()
+    primary = _v2_pdf(root / "chosen.pdf")
+    create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=lambda: ())
+    proof = verify_authoring_proof(str(root), "(1111)", draft)["proof"]
+    active = root / "rules" / "AssayA.json"
+    previous = active.read_bytes()
+    lock = owner.rulesuite_lifecycle_lock
+
+    @contextmanager
+    def enter(project):
+        with lock(project):
+            if change_under_lock == "draft":
+                Path(draft).write_bytes(expected + b"\n")
+            elif change_under_lock == "active":
+                active.write_bytes(previous + b"\n")
+            elif change_under_lock == "mapping":
+                (root / "rules" / "Changed.json").write_bytes(previous)
+                index = json.loads((root / "rules" / "index.json").read_text(encoding="utf-8"))
+                index["assays"][0]["ruleset_file"] = "Changed.json"
+                (root / "rules" / "index.json").write_text(json.dumps(index), encoding="utf-8")
+            yield
+
+    monkeypatch.setattr(owner, "rulesuite_lifecycle_lock", enter)
+    monkeypatch.setattr(owner, "parse", lambda *_a: pytest.fail("activation lock must not parse a PDF"))
+    if change_under_lock == "none":
+        assert Path(activate_draft(str(root), "(1111)", draft, authoring_proof=proof)).read_bytes() == expected
+        assert next((root / "rules" / "history").glob("*.json")).read_bytes() == previous
+    else:
+        with pytest.raises(AuthoringReadinessError):
+            activate_draft(str(root), "(1111)", draft, authoring_proof=proof)
+        assert active.read_bytes() == (previous + b"\n" if change_under_lock == "active" else previous)
+        assert not (root / "rules" / "history").exists()
+
+
+@pytest.mark.parametrize("mismatch", ["none", "key", "name"])
+def test_authoring_v2_new_activation_never_changes_the_tested_identity_or_bytes(tmp_path, mismatch):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    data = load_draft(draft)
+    data.update(assay_key="(9000)", assay_name="Fresh Assay")
+    save_draft(draft, data)
+    Path(draft).write_bytes(Path(draft).read_bytes() + b"\n \n")
+    expected = Path(draft).read_bytes()
+    primary = _v2_pdf(root / "chosen.pdf", header="Manufacturer Name (9000)")
+    create_authoring_proof(str(root), "(9000)", draft, str(primary), automatic_sources=lambda: ())
+    proof = verify_authoring_proof(str(root), "(9000)", draft)["proof"]
+    index_before = (root / "rules" / "index.json").read_bytes()
+    key = "(9999)" if mismatch == "key" else "(9000)"
+    name = "Untested Name" if mismatch == "name" else "Fresh Assay"
+    if mismatch == "none":
+        target = activate_new_draft(str(root), key, name, draft, authoring_proof=proof)
+        assert Path(target).read_bytes() == expected
+    else:
+        with pytest.raises(RuntimeError):
+            activate_new_draft(str(root), key, name, draft, authoring_proof=proof)
+        assert (root / "rules" / "index.json").read_bytes() == index_before
+        assert not (root / "rules" / "Fresh Assay.json").exists() and not (root / "rules" / "Untested Name.json").exists()
+
+
+def test_authoring_proof_mixed_version_attempts_share_one_publication_cas(tmp_path, monkeypatch):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    primary = _v2_pdf(root / "chosen.pdf")
+    failing = _v2_pdf(root / "failing.pdf")
+    reference = _v2_pdf(root / "reference.pdf", value="OTHER")
+
+    def newer_legacy_attempt():
+        with monkeypatch.context() as patch:
+            patch.setattr("src.rulesuite.rulesuite.RuleSuite.preview_extract", _fake_authoring_preview)
+            create_authoring_proof(str(root), "(1111)", draft, str(failing), str(reference))
+        return ()
+
+    with pytest.raises(AuthoringReadinessError, match="attempt_superseded"):
+        create_authoring_proof(str(root), "(1111)", draft, str(primary), automatic_sources=newer_legacy_attempt)
+    report = verify_authoring_proof(str(root), "(1111)", draft)
+    assert report["ok"] and report["proof"]["version"] == 1
+
+
+def test_authoring_proof_old_v1_receipt_without_attempt_id_is_still_readable_and_guarded(tmp_path, monkeypatch):
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    failing = _v2_pdf(root / "failing.pdf")
+    reference = _v2_pdf(root / "reference.pdf", value="OTHER")
+    monkeypatch.setattr("src.rulesuite.rulesuite.RuleSuite.preview_extract", _fake_authoring_preview)
+    create_authoring_proof(str(root), "(1111)", draft, str(failing), str(reference))
+    sidecar = Path(draft + ".readiness")
+    legacy = json.loads(sidecar.read_text(encoding="utf-8"))
+    legacy.pop("attempt_id")
+    sidecar.write_text(json.dumps(legacy), encoding="utf-8")
+    report = verify_authoring_proof(str(root), "(1111)", draft)
+    assert report["ok"] and "attempt_id" not in report["proof"]
+    assert Path(activate_draft(str(root), "(1111)", draft, authoring_proof=report["proof"])).is_file()
+
+
 def _page_document(lines: list[str]):
     class _Page:
         def __init__(self) -> None:
@@ -1633,6 +1955,50 @@ def test_new_authoring_proof_with_empty_index_uses_real_extract(
     assert proof["reference_pdf_path"] == ""
     assert proof["status"] == "ready"
     assert verify_authoring_proof(str(root), "(9000)", draft)["ok"] is True
+
+
+@pytest.mark.parametrize("ambiguous", ["missing", "duplicate", "different_header_same_key"])
+def test_authoring_strict_preview_rejects_unanchored_or_ambiguous_headers(tmp_path, monkeypatch, ambiguous):
+    from src.rulesuite.rulesuite import RuleSuite
+
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    lines = ["Assay A (1111)", "Lot: LOT", "Test: A", "Date: 2026-01-01"]
+    if ambiguous == "missing":
+        lines[0] = "Context: Assay A notes containing (1111) inside prose."
+    elif ambiguous == "duplicate":
+        lines += ["Assay A (1111)", "Lot: OTHER"]
+    else:
+        lines += ["Assay (1111)"]
+    monkeypatch.setattr("src.rulesuite.rulesuite.parse", lambda _path: _page_document(lines))
+    with pytest.raises(RuntimeError, match="authoring_pdf_assay_header"):
+        RuleSuite().preview_extract(str(root), "synthetic.pdf", "(1111)", draft_path=draft, strict=True)
+
+
+def test_authoring_strict_context_uses_positions_not_prefix_or_earlier_name_mentions(tmp_path, monkeypatch):
+    from src.rulesuite.rulesuite import RuleSuite
+
+    root = _setup_project(tmp_path)
+    draft = _v2_draft(root)
+    lines = ["Earlier context mentions Assay A", "Date: 1999-01-01", "Assay A (1111)",
+             "Lot: LOT", "Test: TARGET", "Date: 2026-01-01", "Assay (2222)", "Test: FOREIGN"]
+    monkeypatch.setattr("src.rulesuite.rulesuite.parse", lambda _path: _page_document(lines))
+    result = RuleSuite().preview_extract(str(root), "synthetic.pdf", "(1111)", draft_path=draft, strict=True)
+    assert result["data"] == {"test": "TARGET", "date": "2026-01-01"}
+
+
+def test_authoring_strict_preview_uses_existing_splitter_without_values_from_following_assay(tmp_path, monkeypatch):
+    from src.rulesuite.rulesuite import RuleSuite
+
+    root = _setup_project(tmp_path)
+    draft = create_draft(str(root), "(1111)")
+    set_lot_rule(draft, r"Lot:\s*(\w+)")
+    set_field_regex(draft, "test", r"Test:\s*(\w+)")
+    set_field_regex(draft, "date", r"Date:\s*([\d-]+)")
+    lines = ["Assay A (1111)", "Lot: LOT", "Test: A", "Other Assay (2222)", "Date: 2026-01-01"]
+    monkeypatch.setattr("src.rulesuite.rulesuite.parse", lambda _path: _page_document(lines))
+    with pytest.raises(RuntimeError, match="configured_fields_empty: date"):
+        RuleSuite().preview_extract(str(root), "synthetic.pdf", "(1111)", draft_path=draft, strict=True)
 
 
 def test_preview_extract_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -3167,18 +3533,150 @@ def test_lifecycle_lock_blocks_activate_and_permanent_delete_without_file_change
     assert not lock_path.exists()
 
 
-@pytest.mark.parametrize("key", [r"..\..\outside", "../outside", r"C:\outside", "C:outside", r"\\host\share\outside",
-    "//host/share/outside", "/outside", r"\outside", "a\x00b", "..", "."])
-def test_r1_all_draft_creators_reject_path_like_keys_without_publishing(tmp_path, key):
+def test_discard_draft_same_active_id_removes_only_confirmed_pair(tmp_path: Path) -> None:
     root = _setup_project(tmp_path)
-    before = {str(path.relative_to(root)): path.read_bytes() for path in (root / "rules").rglob("*.json")}
-    with pytest.raises(RuleSuiteError, match="invalid_assay_key|outside_allowed"):
-        create_blank_draft(str(root), key, "Synthetic")
-    after = {str(path.relative_to(root)): path.read_bytes() for path in (root / "rules").rglob("*.json")}
-    assert after == before
+    draft = _never_active_draft(root, "(1111)")
+    other = _never_active_draft(root, "OTHER")
+    for kind in ("history", "inactive", "trash"):
+        directory = root / "rules" / kind
+        directory.mkdir()
+        (directory / "old.json").write_text('{"assay_key":"(1111)"}', encoding="utf-8")
+    protected = {path: path.read_bytes() for path in (root / "rules").rglob("*") if path.is_file() and path not in (draft, draft.with_name(draft.name + ".readiness"))}
+    receipt = prepare_draft_discard(str(root), str(draft))
+    result = discard_draft(str(root), str(draft), expected_revision=receipt["revision"], expected_readiness_revision=receipt["readiness_revision"])
+    assert result["status"] == "discarded" and result["readiness_removed"]
+    assert not draft.exists() and not draft.with_name(draft.name + ".readiness").exists()
+    assert other.exists()
+    assert {path: path.read_bytes() for path in (root / "rules").rglob("*") if path.is_file()} == protected
 
 
-@pytest.mark.parametrize("key,filename", [("(abcd)", "abcd.draft.json"), ("FRESH", "FRESH.draft.json"), ("NEVER-1", "NEVER-1.draft.json")])
-def test_r1_legitimate_technical_keys_keep_existing_path_mapping(tmp_path, key, filename):
+@pytest.mark.parametrize("changed", ["draft", "proof", "new-proof"])
+def test_discard_draft_rejects_changed_confirmation_without_writes(tmp_path, changed):
     root = _setup_project(tmp_path)
-    assert Path(create_blank_draft(str(root), key, "Synthetic")).name == filename
+    draft = _never_active_draft(root)
+    proof = draft.with_name(draft.name + ".readiness")
+    if changed == "new-proof":
+        proof.unlink()
+    receipt = prepare_draft_discard(str(root), str(draft))
+    target = draft if changed == "draft" else proof
+    target.write_bytes(b'{"assay_key":"new-revision"}')
+    before = {path: path.read_bytes() for path in (root / "rules").rglob("*") if path.is_file()}
+    with pytest.raises(RuleSuiteError, match="draft_discard_revision_conflict"):
+        discard_draft(str(root), str(draft), expected_revision=receipt["revision"], expected_readiness_revision=receipt["readiness_revision"])
+    assert {path: path.read_bytes() for path in (root / "rules").rglob("*") if path.is_file()} == before
+
+
+def test_discard_draft_rejects_index_target_and_stale_inventory_hash(tmp_path):
+    root = _setup_project(tmp_path)
+    draft = _never_active_draft(root)
+    with pytest.raises(RuleSuiteError, match="draft_revision_conflict"):
+        prepare_draft_discard(str(root), str(draft), expected_revision="0" * 64)
+    (root / "rules" / "index.json").write_text(json.dumps({"assays": [{"assay_key": "NEVER-1", "ruleset_file": "drafts/" + draft.name}]}), encoding="utf-8")
+    with pytest.raises(RuleSuiteError, match="draft_discard_active_path"):
+        prepare_draft_discard(str(root), str(draft))
+    assert draft.exists()
+
+
+@pytest.mark.parametrize("redirected", ["rules", "drafts"])
+def test_discard_draft_rejects_redirected_parent_before_lock(tmp_path, monkeypatch, redirected):
+    import src.rulesuite.lifecycle as lifecycle
+    root = _setup_project(tmp_path)
+    draft = _never_active_draft(root)
+    base = root / "rules" if redirected == "rules" else draft.parent
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    original_resolve = Path.resolve
+    monkeypatch.setattr(Path, "resolve", lambda path, *args, **kwargs: foreign if path == base else original_resolve(path, *args, **kwargs))
+    monkeypatch.setattr(lifecycle, "rulesuite_lifecycle_lock", lambda _root: pytest.fail("redirect must be rejected before a lock write"))
+    with pytest.raises(RuleSuiteError, match="draft_discard_redirected_directory"):
+        prepare_draft_discard(str(root), str(draft))
+    with pytest.raises(RuleSuiteError, match="draft_discard_redirected_directory"):
+        discard_draft(str(root), str(draft), expected_revision="x", expected_readiness_revision=None)
+    assert draft.exists() and list(foreign.iterdir()) == []
+
+
+def test_discard_draft_restores_pair_on_partial_delete_failure(tmp_path, monkeypatch):
+    import src.rulesuite.lifecycle as lifecycle
+    root = _setup_project(tmp_path)
+    draft = _never_active_draft(root)
+    proof = draft.with_name(draft.name + ".readiness")
+    before = {draft: draft.read_bytes(), proof: proof.read_bytes()}
+    receipt = prepare_draft_discard(str(root), str(draft))
+    real_delete = lifecycle._discard_quarantine
+    calls = []
+    def fail_second(path):
+        calls.append(path)
+        real_delete(path)
+        if len(calls) == 2:
+            raise OSError("synthetic final unlink failure")
+    monkeypatch.setattr(lifecycle, "_discard_quarantine", fail_second)
+    with pytest.raises(RuleSuiteError, match="draft_discard_failed"):
+        discard_draft(str(root), str(draft), expected_revision=receipt["revision"], expected_readiness_revision=receipt["readiness_revision"])
+    assert {path: path.read_bytes() for path in before} == before
+    assert list(draft.parent.glob("*.discarding")) == []
+
+
+def test_discard_draft_supersedes_inflight_proof_and_missing_test_start(tmp_path):
+    from src.rulesuite.authoring_readiness import _publish_attempt
+    root = _setup_project(tmp_path)
+    draft = _never_active_draft(root)
+    proof = draft.with_name(draft.name + ".readiness")
+    proof.write_text('{"version":2,"status":"pending","attempt_id":"held"}', encoding="utf-8")
+    receipt = prepare_draft_discard(str(root), str(draft))
+    discard_draft(str(root), str(draft), expected_revision=receipt["revision"], expected_readiness_revision=receipt["readiness_revision"])
+    with pytest.raises(AuthoringReadinessError, match="superseded"):
+        _publish_attempt(root, proof, "held", {"version": 2, "status": "ready"})
+    for sources in (None, lambda: []):
+        with pytest.raises(AuthoringReadinessError):
+            create_authoring_proof(str(root), "NEVER-1", str(draft), str(tmp_path / "test.pdf"), automatic_sources=sources)
+    assert not draft.exists() and not proof.exists()
+
+
+def test_discard_draft_rejects_parent_junction_or_symlink_without_touching_target(tmp_path, monkeypatch):
+    import os
+    root = _setup_project(tmp_path)
+    draft = _never_active_draft(root)
+    drafts = draft.parent
+    foreign = tmp_path / "redirected-drafts"
+    drafts.rename(foreign)
+    try:
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(foreign), str(drafts))
+        else:
+            drafts.symlink_to(foreign, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        # No new platform skip: deterministically exercise the same resolved
+        # parent boundary when the test account cannot create a real redirect.
+        foreign.rename(drafts)
+        original = Path.resolve
+        monkeypatch.setattr(Path, "resolve", lambda path, *args, **kwargs: foreign if path == drafts else original(path, *args, **kwargs))
+        with pytest.raises(RuleSuiteError, match="draft_discard_redirected_directory"):
+            prepare_draft_discard(str(root), str(draft))
+        return
+    before = {path.name: path.read_bytes() for path in foreign.iterdir() if path.is_file()}
+    try:
+        with pytest.raises(RuleSuiteError, match="draft_discard_redirected_directory"):
+            prepare_draft_discard(str(root), str(draft))
+        assert {path.name: path.read_bytes() for path in foreign.iterdir() if path.is_file()} == before
+        assert not (root / "rules" / ".lifecycle.lock").exists()
+    finally:
+        # Only the explicit test redirect is removed, never its target tree.
+        drafts.rmdir() if os.name == "nt" else drafts.unlink()
+        foreign.rename(drafts)
+
+
+@pytest.mark.parametrize("identifier", ["()", " ", ".", "..", "/", "\\", ":", "\x00"])
+def test_draft_filename_key_rejects_non_identifiers(identifier):
+    from src.rulesuite.errors import RuleSuiteError
+    from src.rulesuite.json_io import _safe_key
+
+    with pytest.raises(RuleSuiteError, match="invalid_assay_key"):
+        _safe_key(identifier)
+
+
+def test_draft_filename_key_preserves_valid_assay_identity():
+    from src.rulesuite.json_io import _safe_key
+
+    assert _safe_key("(238a)") == "238a"
+    assert _safe_key("DEMO-1") == "DEMO-1"

@@ -17,13 +17,14 @@ class UiBuilderMixin:
 
         build_toolbar(self)
 
-        content = tk.Frame(self)
+        from tkinter import ttk
+        content = ttk.Frame(self, style="Content.TFrame")
         content.pack(fill="both", expand=True)
         content.rowconfigure(0, weight=1)
         content.columnconfigure(0, weight=1)
 
-        self.page_inventory = tk.Frame(content)
-        self.page_workspace = tk.Frame(content)
+        self.page_inventory = ttk.Frame(content, style="Content.TFrame")
+        self.page_workspace = ttk.Frame(content, style="Content.TFrame")
         self.page_inventory.grid(row=0, column=0, sticky="nsew")
         build_inventory_view(self, self.page_inventory)
         build_workspace(self, self.page_workspace)
@@ -36,16 +37,22 @@ class UiBuilderMixin:
             self.page_inventory.grid_remove()
             self.page_workspace.grid()
             self._active_page = "workspace"
+            self._render_editor_identity()
+            if getattr(self, "_on_focus", None):
+                self._on_focus(True)
             self.after_idle(self._place_workspace_sashes)
             return
         self.page_workspace.grid_remove()
         self.page_inventory.grid()
         self._active_page = "inventory"
         self._hide_advanced()
+        self._render_editor_identity()
+        if getattr(self, "_on_focus", None):
+            self._on_focus(False)
 
     def _show_advanced(self, section: str | None = None) -> None:
         self._show_page("workspace")
-        self.workspace_panes.grid_remove()
+        self.workspace_scrollable.grid_remove()
         self.frame_advanced.grid()
         self._advanced_visible = True
         if section:
@@ -67,9 +74,9 @@ class UiBuilderMixin:
             self._advanced_visible = False
             return
         frame.grid_remove()
-        panes = getattr(self, "workspace_panes", None)
-        if panes is not None:
-            panes.grid()
+        page = getattr(self, "workspace_scrollable", None)
+        if page is not None:
+            page.grid()
         self._advanced_visible = False
 
     def _toggle_advanced(self) -> None:
@@ -79,13 +86,15 @@ class UiBuilderMixin:
             self._show_advanced()
 
     def _place_workspace_sashes(self) -> None:
+        resize = getattr(self, "_layout_editor_workspace", None)
+        if callable(resize):
+            resize()
+            return
         panes = getattr(self, "workspace_panes", None)
         if panes is None or not panes.winfo_exists():
             return
-        if self.__dict__.get("_workspace_sashes_initialized", False):
-            return
         width = panes.winfo_width()
-        if not panes.winfo_ismapped() or width < 900:
+        if width < 900:
             return
         left = max(220, int(width * 0.22))
         middle_end = max(left + 360, int(width * 0.64))
@@ -94,7 +103,6 @@ class UiBuilderMixin:
         try:
             panes.sashpos(0, left)
             panes.sashpos(1, middle_end)
-            self._workspace_sashes_initialized = True
         except tk.TclError:
             return
 

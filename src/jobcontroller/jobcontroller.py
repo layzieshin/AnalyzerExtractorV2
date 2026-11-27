@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
-from src.runtime.api import release_exclusive, try_acquire_exclusive
+from src.runtime.api import try_acquire_scoped_exclusive
 from src.runtime.api import resolve_device_id
 
 from .model import JobResult
@@ -29,6 +29,48 @@ class JobController:
         sqlite_retry_count: int = 3,
         sqlite_retry_sleep_s: float = 0.2,
         device_id: str | None = None,
+        *,
+        expected_sha256: str | None = None,
+    ):
+        options = {"output_mode": output_mode, "sqlite_path": sqlite_path, "lock_ttl_s": lock_ttl_s,
+                   "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms, "sqlite_retry_count": sqlite_retry_count,
+                   "sqlite_retry_sleep_s": sqlite_retry_sleep_s, "device_id": device_id}
+        if expected_sha256 is None:
+            return self._submit_pipeline(pdf_path, project_root, **options)
+        if not isinstance(expected_sha256, str):
+            return self._result("FAILED", "", pdf_path, {"error": "expected_sha256_invalid"})
+        expected = expected_sha256.lower()
+        if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+            return self._result("FAILED", "", pdf_path, {"error": "expected_sha256_invalid"})
+        # Capture before even an already-DONE decision. The live pathname is
+        # never the parser source of a SHA-bound attempt, including A→B→A.
+        with tempfile.TemporaryDirectory(prefix="arev2-bound-processing-source-") as temporary:
+            snapshot = Path(temporary) / "source.pdf"
+            try:
+                shutil.copyfile(pdf_path, snapshot)
+            except FileNotFoundError:
+                return self._result("FAILED", expected[:16], pdf_path, {"error": "source_changed_since_ingest"})
+            except OSError as exc:
+                return self._result("FAILED", expected[:16], pdf_path, {"error": f"source_pdf_unreadable: {exc}"})
+            if not self._matches_source_sha(snapshot, expected):
+                return self._result("FAILED", expected[:16], pdf_path, {"error": "source_changed_since_ingest"})
+            return self._submit_pipeline(pdf_path, project_root, **options,
+                source_snapshot=snapshot, expected_sha256=expected)
+
+    def _submit_pipeline(
+        self,
+        pdf_path: str,
+        project_root: str,
+        output_mode: str = "sqlite",
+        sqlite_path: str | None = None,
+        lock_ttl_s: float | None = None,
+        sqlite_busy_timeout_ms: int = 5000,
+        sqlite_retry_count: int = 3,
+        sqlite_retry_sleep_s: float = 0.2,
+        device_id: str | None = None,
+        *,
+        source_snapshot: Path | None = None,
+        expected_sha256: str | None = None,
     ):
         root = Path(project_root)
         pdf = Path(pdf_path)
@@ -37,10 +79,13 @@ class JobController:
         except Exception as e:
             return self._result("FAILED", "", str(pdf), {"error": str(e)})
 
+        if source_snapshot is not None and (not self._matches_source_sha(source_snapshot, expected_sha256)
+                                            or not self._matches_source_sha(pdf, expected_sha256)):
+            return self._result("FAILED", expected_sha256[:16], str(pdf), {"error": "source_changed_since_ingest"})
         if not pdf.exists():
             return self._result("FAILED", "", str(pdf), {"error": "pdf_not_found"})
 
-        pdf_sha256 = self._sha256_file(pdf)
+        pdf_sha256 = expected_sha256 if source_snapshot is not None else self._sha256_file(pdf)
         job_id = pdf_sha256[:16]
         sqlite_target = sqlite_path or str(root / "output" / "final" / "results.sqlite3")
         locks_dir = root / "locks"
@@ -53,8 +98,35 @@ class JobController:
         existing = self._load_state(state_path)
         if state_path.exists() and existing is None:
             return self._result("FAILED", job_id, str(pdf), {"error": "job_state_unreadable"})
+        from src.rulesuite.api import list_assay_identity_job_bindings
+        try:
+            binding = list_assay_identity_job_bindings(str(root)).get(job_id)
+            stored_binding = (existing or {}).get("identity_binding")
+            if binding and binding.get("error"):
+                raise ValueError(binding["error"])
+            if stored_binding and not binding:
+                raise ValueError("identity_case_binding_evidence_missing")
+            if binding:
+                actual_device = resolve_device_id(root, device_id, store_spec={"driver": "sqlite", "path": sqlite_target})
+                if (binding["content_sha256"] != pdf_sha256
+                        or self._path_key(pdf) != binding["pdf_path"]
+                        or self._path_key(sqlite_target) != binding["store_path"]
+                        or actual_device != binding["device_id"]
+                        or (stored_binding and any(stored_binding.get(key) != binding[key] for key in
+                            ("job_id", "content_sha256", "pdf_path", "store_path", "device_id")))):
+                    raise ValueError("identity_case_bound_context_mismatch")
+                # The context comparison freezes the actual device/store.
+                # Never reread a mutable default between it and the commit.
+                device_id, sqlite_target = binding["device_id"], binding["store_path"]
+                if source_snapshot is None:
+                    return self.submit(pdf_path, project_root, output_mode=output_mode, sqlite_path=sqlite_target,
+                        lock_ttl_s=lock_ttl_s, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,
+                        sqlite_retry_count=sqlite_retry_count, sqlite_retry_sleep_s=sqlite_retry_sleep_s,
+                        device_id=device_id, expected_sha256=binding["content_sha256"])
+        except Exception as exc:
+            return self._result("FAILED", job_id, str(pdf), {"error": str(exc)})
         if existing is not None and existing.get("status") == "DONE":
-            return self._result("SKIPPED", job_id, str(pdf), {"reason": "already_done"})
+            return self._completed_result(root, existing, pdf, binding)
         if existing is not None and self._is_retired_output_state(existing):
             return self._result("FAILED", job_id, str(pdf), {"error": "historical_output_plan_read_only"})
 
@@ -69,17 +141,24 @@ class JobController:
         # Acquire lock
         try:
             effective_lock_ttl = lock_ttl_s if lock_ttl_s is not None else self._lock_ttl_from_env()
-            self._acquire_lock(lock_path, effective_lock_ttl)
+            lease = self._acquire_lock(lock_path, effective_lock_ttl, bound=bool(binding))
         except FileExistsError:
             return self._result("SKIPPED", job_id, str(pdf), {"reason": "locked"})
 
         try:
             # Recheck under the pipeline lock without migrating frozen evidence.
+            if source_snapshot is not None and not self._matches_source_sha(pdf, expected_sha256):
+                return self._result("FAILED", job_id, str(pdf), {"error": "source_changed_since_ingest"})
+            if binding:
+                current_binding = list_assay_identity_job_bindings(str(root)).get(job_id)
+                if (not current_binding or current_binding.get("error") or any(current_binding.get(key) != binding[key]
+                        for key in ("job_id", "content_sha256", "pdf_path", "store_path", "device_id"))):
+                    return self._result("FAILED", job_id, str(pdf), {"error": "identity_case_bound_context_mismatch"})
             existing = self._load_state(state_path)
             if state_path.exists() and existing is None:
                 return self._result("FAILED", job_id, str(pdf), {"error": "job_state_unreadable"})
             if existing is not None and existing.get("status") == "DONE":
-                return self._result("SKIPPED", job_id, str(pdf), {"reason": "already_done"})
+                return self._completed_result(root, existing, pdf, binding)
             if existing is not None and self._is_retired_output_state(existing):
                 return self._result("FAILED", job_id, str(pdf), {"error": "historical_output_plan_read_only"})
 
@@ -91,26 +170,34 @@ class JobController:
                 "status": "LOCKED",
                 "steps": [],
             }
+            if binding:
+                state["identity_binding"] = binding
             self._save_state(state_path, state)
 
             # PARSE
             from src.parser.api import parse
             from src.assaychooser.api import detect_assays
+            from src.assaycandidate.api import canonical_assay_key, load_known_assay_keys
             from src.normalizer.api import normalize_lines
             from src.ruleresolver.api import resolve_ruleset
-            from src.contentsplitter.api import AssayDescriptor, split_by_assay_name_and_key
+            from src.contentsplitter.api import AssayDescriptor, split_assay_sections
             from src.extractor.api import extract_record
             from src.dbwriter.api import write_record_sqlite
 
             # Parse exactly the bytes identified by this job. The live path may
             # be replaced while a worker is reading it; never attach its earlier
             # SHA to text from a different file.
-            with tempfile.TemporaryDirectory(prefix="arev2-processing-source-") as temporary:
-                snapshot_path = Path(temporary) / "source.pdf"
-                shutil.copyfile(pdf, snapshot_path)
-                if self._sha256_file(snapshot_path) != pdf_sha256:
+            if source_snapshot is not None:
+                if not self._matches_source_sha(source_snapshot, pdf_sha256):
                     raise RuntimeError("source_pdf_changed_during_processing")
-                doc = parse(str(snapshot_path))
+                doc = parse(str(source_snapshot))
+            else:
+                with tempfile.TemporaryDirectory(prefix="arev2-processing-source-") as temporary:
+                    snapshot_path = Path(temporary) / "source.pdf"
+                    shutil.copyfile(pdf, snapshot_path)
+                    if self._sha256_file(snapshot_path) != pdf_sha256:
+                        raise RuntimeError("source_pdf_changed_during_processing")
+                    doc = parse(str(snapshot_path))
             state["status"] = "PARSED"
             state["steps"].append({"step": "parser", "page_count": doc.meta.get("page_count")})
             self._save_state(state_path, state)
@@ -137,11 +224,39 @@ class JobController:
 
             # ASSAY DETECT
             index_path = str(rules_dir / "index.json")
-            matches = detect_assays(norm_text, index_path)
+            index_bytes = Path(index_path).read_bytes()
+            index_sha256 = hashlib.sha256(index_bytes).hexdigest()
+            sections = split_assay_sections(norm_text, known_keys=load_known_assay_keys(index_path, index_bytes=index_bytes) or ())
+            matches = detect_assays(norm_text, index_path, sections=sections, index_bytes=index_bytes)
             assay_keys = [m.assay_key for m in matches]
             state["status"] = "ASSAYS_DETECTED"
-            state["steps"].append({"step": "assaychooser", "assay_keys": assay_keys})
+            state["steps"].append({"step": "assaychooser", "assay_keys": assay_keys, "index_sha256": index_sha256})
             self._save_state(state_path, state)
+
+            # A familiar report title with a different manufacturer ID is not
+            # an alias. Persist the unresolved case before any assay is written,
+            # including PDFs containing other, already configured assays.
+            from src.rulesuite.api import observe_assay_identity_changes
+
+            identity_cases = []
+            if len(sections) > len(assay_keys):
+                identity_cases = observe_assay_identity_changes(
+                    str(root), store_path=sqlite_target, pdf_path=str(pdf), pdf_sha256=pdf_sha256,
+                    job_id=job_id, device_id=effective_device_id, normalized_text=norm_text, sections=sections,
+                    expected_index_sha256=index_sha256,
+                )
+            if Path(index_path).read_bytes() != index_bytes:
+                raise RuntimeError("rules_index_changed_during_processing")
+            if identity_cases:
+                case_ids = [case["case_id"] for case in identity_cases]
+                error = "assay_identity_change_pending"
+                state.update(status="FAILED", error=error, identity_case_ids=case_ids)
+                state["identity_binding"] = list_assay_identity_job_bindings(str(root))[job_id]
+                state["steps"].append({"step": "assay_identity_changes", "case_ids": case_ids,
+                                       "assay_keys": [case["assay_key"] for case in identity_cases],
+                                       "store_path": str(Path(sqlite_target).resolve())})
+                self._save_state(state_path, state)
+                return self._result("FAILED", job_id, str(pdf), {"error": error, "identity_case_ids": case_ids})
 
             if not assay_keys:
                 state["status"] = "FAILED"
@@ -149,24 +264,26 @@ class JobController:
                 self._save_state(state_path, state)
                 return self._result("FAILED", job_id, str(pdf), {"error": "no_assay_detected"})
 
-            # Resolve rulesets early (required for assay_name-based split)
+            # Identity and occurrence come from document headers, not the
+            # user-editable display name in an active ruleset.
             assay_rulesets: Dict[str, Any] = {}
             assay_descriptors: List[Any] = []
+            selected_sections = {}
             for k in assay_keys:
                 rs = resolve_ruleset(k, str(rules_dir), index_path)
                 assay_rulesets[k] = rs
-                assay_name = rs.data.get("assay_name")
-                if not assay_name:
+                if not rs.data.get("assay_name"):
                     raise RuntimeError(f"ruleset missing assay_name for {k}")
-                assay_descriptors.append(AssayDescriptor(assay_key=k, assay_name=assay_name))
+                section = next(row for row in sections if row.assay_key == canonical_assay_key(k))
+                selected_sections[k] = section
+                assay_descriptors.append(AssayDescriptor(assay_key=k, assay_name=section.assay_name))
 
-            # SPLIT (NEW): start at FIRST assay_name; valid only if assay_key appears after it
-            blocks = split_by_assay_name_and_key(norm_text, assay_descriptors)
+            blocks = {key: section.text for key, section in selected_sections.items()}
 
             state["status"] = "SPLIT"
             state["steps"].append({
                 "step": "contentsplitter",
-                "mode": "assay_name_and_key",
+                "mode": "anchored_assay_sections",
                 "assays": [{"assay_key": a.assay_key, "assay_name": a.assay_name} for a in assay_descriptors],
                 "blocks": {k: len(v.splitlines()) for k, v in blocks.items()},
             })
@@ -200,7 +317,7 @@ class JobController:
                 rec = item["record"]
                 source_provenance = self._source_provenance(
                     norm_text, assay_descriptors, blocks[k], ruleset, pdf_sha256,
-                    block_hashes[k], effective_device_id,
+                    block_hashes[k], effective_device_id, selected_sections[k],
                 )
                 source_provenance["project_root"] = str(root.resolve())
                 item["source_provenance"] = source_provenance
@@ -230,6 +347,8 @@ class JobController:
 
             if self._sha256_file(pdf) != pdf_sha256:
                 raise RuntimeError("source_pdf_changed_during_processing")
+            if Path(index_path).read_bytes() != index_bytes:
+                raise RuntimeError("rules_index_changed_during_processing")
             output_plan: Dict[str, Any] = {
                 "version": _OUTPUT_PLAN_VERSION,
                 "output_mode": mode,
@@ -331,7 +450,20 @@ class JobController:
                 details["partial_writes"] = writes
             return self._result("FAILED", job_id, str(pdf), details)
         finally:
-            self._release_lock(lock_path)
+            lease.release()
+
+    @staticmethod
+    def _path_key(value):
+        return os.path.normcase(str(Path(value).resolve()))
+
+    def _completed_result(self, root, state, pdf, binding):
+        if binding:
+            from .completion import verify_completed_job
+            receipt = verify_completed_job(root, state["job_id"], expected_sha256=binding["content_sha256"],
+                expected_pdf_path=binding["pdf_path"], store_path=binding["store_path"], device_id=binding["device_id"])
+            if not receipt["complete"]:
+                return self._result("FAILED", state["job_id"], str(pdf), {"error": receipt["reason"]})
+        return self._result("SKIPPED", state["job_id"], str(pdf), {"reason": "already_done"})
 
     def _sha256_file(self, path: Path) -> str:
         h = hashlib.sha256()
@@ -340,20 +472,21 @@ class JobController:
                 h.update(chunk)
         return h.hexdigest()
 
-    def _source_provenance(self, norm_text, descriptors, block, ruleset, pdf_hash, block_hash, device_id):
-        ordered = sorted((norm_text.find(a.assay_name), a.assay_key) for a in descriptors)
-        position = next(index for index, (_, key) in enumerate(ordered) if key == ruleset.assay_key)
-        start = ordered[position][0]
-        end = ordered[position + 1][0] if position + 1 < len(ordered) else len(norm_text)
-        raw = norm_text[start:end]
-        start += len(raw) - len(raw.lstrip())
-        if norm_text[start:start + len(block)] != block:
+    def _matches_source_sha(self, path: Path, expected: str) -> bool:
+        try:
+            return self._sha256_file(path) == expected
+        except OSError:
+            return False
+
+    def _source_provenance(self, norm_text, descriptors, block, ruleset, pdf_hash, block_hash, device_id, section):
+        start, end = section.start, section.end
+        if norm_text[start:end] != block:
             raise RuntimeError("source_block_occurrence_unproven")
         rule_text = ruleset.source_text or json.dumps(ruleset.data, ensure_ascii=False, sort_keys=True)
         return {
             "version": 1, "pdf_sha256": pdf_hash, "assay_key": ruleset.assay_key,
             "normalized_sha256": self._hash_text(norm_text), "assay_block_hash": block_hash,
-            "block_start": start, "block_end": start + len(block),
+            "block_start": start, "block_end": end,
             "descriptors": [{"assay_key": a.assay_key, "assay_name": a.assay_name} for a in descriptors],
             "ruleset": ruleset.data, "ruleset_file": ruleset.ruleset_file,
             "rule_source_text": rule_text, "rule_sha256": ruleset.source_sha256 or self._hash_text(rule_text),
@@ -367,12 +500,11 @@ class JobController:
     def _hash_text(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def _acquire_lock(self, lock_path: Path, stale_ttl_s: float) -> None:
-        if not try_acquire_exclusive(lock_path, stale_ttl_s):
+    def _acquire_lock(self, lock_path: Path, stale_ttl_s: float, *, bound: bool = False):
+        lease = try_acquire_scoped_exclusive(lock_path, stale_ttl_s, legacy_stale=not bound)
+        if lease is None:
             raise FileExistsError(str(lock_path))
-
-    def _release_lock(self, lock_path: Path) -> None:
-        release_exclusive(lock_path)
+        return lease
 
     def _load_state(self, path: Path) -> Dict[str, Any] | None:
         if not path.is_file():
@@ -571,7 +703,9 @@ class JobController:
                 missing.append(key)
         return missing
 
-    def read_job_evidence(self, project_root: str | Path, job_id: str):
+    def read_job_evidence(self, project_root: str | Path, job_id: str, *,
+                          expected_pdf_sha256: str | None = None, expected_pdf_path: str | None = None,
+                          include_context: bool = True):
         from .api import JobEvidence
 
         safe_job_id = _sanitize_job_id(job_id)
@@ -611,6 +745,13 @@ class JobController:
                 state_available=False,
                 retry_kind="retired",
             )
+        if expected_pdf_sha256 is not None:
+            expected = expected_pdf_sha256.lower()
+            if (str(state.get("pdf_sha256") or "").lower() != expected
+                    or str(state.get("job_id") or "") != safe_job_id or safe_job_id != expected[:16]):
+                return None
+        if expected_pdf_path is not None and os.path.normcase(str(Path(str(state.get("pdf_path") or "")).resolve())) != os.path.normcase(str(Path(expected_pdf_path).resolve())):
+            return None
         normalized_dump = ""
         block_dumps: list[tuple[str, str]] = []
         steps_raw = state.get("steps")
@@ -634,14 +775,14 @@ class JobController:
             steps = ()
         block_dumps.sort(key=lambda item: item[0].casefold())
         context_text, context_truncated, context_available, context_source_label, context_source_kind = (
-            _read_diagnostic_context(
-                normalized_dump,
-                block_dumps,
-            )
+            _read_diagnostic_context(normalized_dump, block_dumps) if include_context else ("", False, False, "", "")
         )
         # Legacy export evidence remains visible, but can never enable an action.
         retry_kind = "retired" if self._is_retired_output_state(state) else ""
         evidence_error = str(state.get("error") or "")
+        source_store = str((state.get("output_plan") or {}).get("sqlite_path") or "")
+        if not source_store:
+            source_store = next((str(step.get("store_path") or "") for step in steps if step.get("step") == "assay_identity_changes"), "")
         return JobEvidence(
             job_id=str(state.get("job_id") or safe_job_id),
             pdf_path=str(state.get("pdf_path") or ""),
@@ -658,6 +799,8 @@ class JobController:
             context_source_label=context_source_label,
             context_source_kind=context_source_kind,
             retry_kind=retry_kind,
+            store_path=source_store,
+            device_id=str(state.get("device_id") or ""),
         )
 
     def read_job_diagnostic_sources(self, project_root: str | Path, job_id: str):

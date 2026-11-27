@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -104,6 +105,26 @@ def test_fast_selection_and_refresh_reject_stale_page_and_error(opened_view):
     assert "Keine offenen" in view._lbl_pdf_status.cget("text")
 
 
+def test_reconciliation_rebinds_pending_pdf_token_without_losing_page_or_manual_zoom(opened_view):
+    _root, view, requests = opened_view
+    first = replace(_item(), store_path="db.sqlite3", selection_token="original:1")
+    view.render_cases((first,))
+    view.render_pdf_page(requests[-1], _page())
+    view._change_pdf_page(1)
+    view._set_pdf_zoom(1.5)
+    pending = requests[-1]
+    assert view._pdf_photo is None
+    refreshed = replace(first, selection_token="selection:2")
+    view.reconcile_cases((refreshed,))
+    current = requests[-1]
+    assert current != pending and current[3:] == (1, 1.5)
+    assert view.selected_item() == refreshed
+    view.render_pdf_page(pending, _page(index=1, zoom=1.5))
+    assert view._pdf_photo is None
+    view.render_pdf_page(current, _page(index=1, zoom=1.5))
+    assert view._pdf_photo is not None
+
+
 def test_same_report_different_run_and_hidden_view_reject_inflight_preview(opened_view):
     _root, view, requests = opened_view
     view.render_cases((_item(), _item(run=2)))
@@ -130,7 +151,7 @@ def test_preview_mismatched_payload_fails_visibly(opened_view):
     assert "passt nicht" in view._lbl_pdf_status.cget("text")
 
 
-def test_responsive_halves_and_fit_width_keep_workflow_visible(opened_view):
+def test_responsive_paired_panes_and_fit_width_keep_workflow_visible(opened_view):
     root, view, requests = opened_view
     root.geometry("1100x720+0+0")
     view.pack(fill="both", expand=True)
@@ -146,7 +167,7 @@ def test_responsive_halves_and_fit_width_keep_workflow_visible(opened_view):
         root.geometry(size)
         root.update_idletasks()
         root.update()
-        assert view._split.sashpos(0) == pytest.approx(view._split.winfo_width() / 2, abs=2)
+        assert view._split.sashpos(0) == pytest.approx(view._split.winfo_width() * .52, abs=2)
         assert view._pdf_canvas.winfo_ismapped()
         assert view._tree.winfo_ismapped()
         assert view._btn_save.winfo_ismapped()

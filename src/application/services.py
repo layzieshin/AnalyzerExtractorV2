@@ -22,9 +22,13 @@ def create_desktop_services(project_root: str | Path) -> DesktopAppServices:
     settings = SettingsController(root)
     settings.load()
     provider = settings.load
+    results = ResultsController(root, settings_provider=provider)
+    extraction = ExtractionController(root, settings_provider=provider)
     return DesktopAppServices(
-        extraction=ExtractionController(root, settings_provider=provider),
-        results=ResultsController(root, settings_provider=provider),
-        rules=RuleSuiteController(root),
+        extraction=extraction,
+        results=results,
+        rules=RuleSuiteController(root, settings_provider=provider, authoring_source_reader=results._authoring_sources,
+                                  identity_job_retry=extraction.retry_identity_job,
+                                  identity_jobs_reader=lambda: extraction.list_processing_items(create_missing=False)),
         settings=settings,
     )

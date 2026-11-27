@@ -16,6 +16,7 @@ from rule_editor.regex_builder_popup import RegexBuilderPopup
 from rule_editor.release_actions import ReleaseMixin
 from rule_editor.wizard import NewRulesetWizard
 from rule_editor_main import RuleEditorWindow
+from rule_editor.editor_workspace import RuleEditorWorkspace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STEP_FILES = (
@@ -41,6 +42,70 @@ class _Var:
 
     def set(self, value: str) -> None:
         self.value = value
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_local_pdf_reply_guard_and_minimum_fit_do_not_loop_or_rebind(stale, monkeypatch):
+    from types import SimpleNamespace
+    from src.application.api import ReportPdfPage
+    import rule_editor.pdf_text_actions as owner
+    host = PdfTextMixin()
+    requests, images = [], []
+    active = [False]
+    def submit(_key, work, **callbacks):
+        active[0] = True
+        requests.append((work, callbacks))
+        return True
+    host._task_runner = SimpleNamespace(is_active=lambda _key: active[0], submit=submit)
+    host._closed = False
+    host._context_generation = 0
+    host._busy = False
+    host._document_view = "pdf"
+    host.var_pdf, host.var_document_note, host.var_rule_pdf_page = _Var("A.pdf"), _Var(), _Var()
+    host.rule_pdf_canvas = SimpleNamespace(winfo_width=lambda: 40, delete=lambda *_: None, configure=lambda **_: None,
+        create_image=lambda *args, **kwargs: None, yview_moveto=lambda *_: None, xview_moveto=lambda *_: None)
+    host.btn_rule_pdf_previous = host.btn_rule_pdf_next = SimpleNamespace(configure=lambda **_: None)
+    def render(path, *, page_index, zoom, expected_sha256):
+        assert expected_sha256 == ("A-hash" if path == "A.pdf" else "B-hash")
+        return {"source_sha256": expected_sha256, "page": ReportPdfPage("", page_index, 2, zoom, 2000, 30, b"")}
+    host._rules = SimpleNamespace(render_rule_pdf_page=render)
+    monkeypatch.setattr(owner.tk, "PhotoImage", lambda **kwargs: images.append(kwargs) or object())
+    host._invalidate_local_pdf()
+    host._rule_pdf_sha256, host._rule_pdf_loaded_path, host._rule_pdf_zoom = "A-hash", "A.pdf", .05
+    host._request_rule_pdf()
+    old = requests[0]
+    if stale:
+        host.var_pdf.set("B.pdf")
+        host._invalidate_local_pdf()
+        host._rule_pdf_sha256, host._rule_pdf_loaded_path, host._rule_pdf_zoom = "B-hash", "B.pdf", .05
+        host._request_rule_pdf()
+    active[0] = False
+    old[1]["on_success"](old[0]())
+    if stale:
+        assert not images and len(requests) == 2
+        assert host._rule_pdf_sha256 == "B-hash"
+        work, callbacks = requests[1]
+        active[0] = False
+        callbacks["on_success"](work())
+    assert len(images) == 1
+    assert len(requests) == (2 if stale else 1)  # .05 floor must not reissue forever
+
+
+def test_builder_accept_rebuilds_current_marker_instead_of_earlier_test(tmp_path):
+    from src.application.api import RuleSuiteController
+    popup = RegexBuilderPopup.__new__(RegexBuilderPopup)
+    popup._rules = RuleSuiteController(tmp_path)
+    popup._last_result = {"regex": "old-tested-marker"}
+    popup._spec = lambda: {"left_marker": "NEW MARKER:", "value_type": "decimal"}
+    popup._render_result = lambda _result: None
+    popup.var_use_search_from = _Var()
+    popup.var_use_search_from.get = lambda: False
+    accepted = []
+    popup._on_accept = lambda regex, search: accepted.append((regex, search))
+    popup.destroy = lambda: None
+    popup._accept()
+    assert len(accepted) == 1 and "NEW" in accepted[0][0] and "old-tested-marker" not in accepted[0][0]
+    assert accepted[0][1] is None
 
 
 def _imports(rel_path: str) -> list[str]:
@@ -106,20 +171,21 @@ def test_var_root_rebinds_one_controller_and_ignores_empty_or_same_root(monkeypa
     first_root = tmp_path / "a"
     host.var_root = _Var(str(first_root))
     host._rules = None
+    host._controller_factory = _Controller
     host.project_root = first_root
-    host._bind_rules_controller = RuleEditorWindow._bind_rules_controller.__get__(host, type(host))
+    host._bind_rules_controller = RuleEditorWorkspace._bind_rules_controller.__get__(host, type(host))
 
     host._bind_rules_controller(first_root)
     first = host._rules
-    RuleEditorWindow._on_var_root_written(host)
+    RuleEditorWorkspace._on_var_root_written(host)
     assert host._rules is first
 
     host.var_root.set("   ")
-    RuleEditorWindow._on_var_root_written(host)
+    RuleEditorWorkspace._on_var_root_written(host)
     assert host._rules is first
 
     host.var_root.set(str(tmp_path / "b"))
-    RuleEditorWindow._on_var_root_written(host)
+    RuleEditorWorkspace._on_var_root_written(host)
     assert host._rules is not first
     assert host._rules.project_root == (tmp_path / "b").resolve()
     assert host.project_root == Path(str(tmp_path / "b"))
@@ -152,9 +218,9 @@ def test_pdf_worker_uses_ui_thread_controller_and_fulltext_fallback() -> None:
 
     rules = _Rules()
     host = _PdfHost()
-    host._load_text_thread(rules, "a.pdf", "(k)", "Name", "draft.json")
+    result = host._load_text_thread(rules, "a.pdf", "(k)", "Name", "draft.json")
     assert rules.calls == [("assay", "a.pdf", "(k)", "Name", "draft.json")]
-    assert host.success == ("BLOCK", ["(k)"])
+    assert result == ("BLOCK", ["(k)"], None, "")
 
     class _EmptyBlock(_Rules):
         def get_assay_text(self, pdf: str, key: str, name: str, *, draft_path: str | None = None) -> dict[str, object]:
@@ -163,10 +229,9 @@ def test_pdf_worker_uses_ui_thread_controller_and_fulltext_fallback() -> None:
 
     empty = _EmptyBlock()
     failed = _PdfHost()
-    failed._load_text_thread(empty, "b.pdf", "(k)", "Name", "draft.json")
+    result = failed._load_text_thread(empty, "b.pdf", "(k)", "Name", "draft.json")
     assert empty.calls == [("assay", "b.pdf", "(k)", "Name", "draft.json"), ("full", "b.pdf")]
-    assert failed.error[0] == "assay_block_empty: (k)"
-    assert failed.error[1] == "FULL"
+    assert result == ("", None, "assay_block_empty: (k)", "FULL")
 
     class _FallbackFails(_EmptyBlock):
         def load_normalized_pdf_text(self, pdf: str) -> str:
@@ -175,8 +240,7 @@ def test_pdf_worker_uses_ui_thread_controller_and_fulltext_fallback() -> None:
 
     broken = _FallbackFails()
     quiet = _PdfHost()
-    quiet._load_text_thread(broken, "c.pdf", "(k)", "Name", None)
-    assert quiet.error == ("assay_block_empty: (k)", "")
+    assert quiet._load_text_thread(broken, "c.pdf", "(k)", "Name", None) == ("", None, "assay_block_empty: (k)", "")
 
 
 def test_regex_builder_uses_injected_controller() -> None:
@@ -338,21 +402,30 @@ def test_history_step_fail_closed_on_revision_conflict_and_redo_rebinds(monkeypa
     assert host._undo_stack == [{"snapshot": {"assay_key": "(after)"}, "expected_revision": "bb" * 32}]
 
 
-def test_preview_worker_uses_ui_thread_controller_and_draft_path() -> None:
-    calls: list[tuple[str, str, str | None]] = []
-    scheduled: list[tuple[int, object]] = []
+def test_one_pdf_test_uses_captured_controller_target_and_task_lane() -> None:
+    from types import SimpleNamespace
+    calls, pending, completions = [], [], []
 
     class _Rules:
-        def preview_extract(self, pdf: str, key: str, *, draft_path: str | None = None) -> dict[str, str]:
-            calls.append((pdf, key, draft_path))
-            return {"value": "ok"}
+        def create_authoring_proof(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {"status": "ready"}
 
     host = ReleaseMixin.__new__(ReleaseMixin)
-    host.after = lambda delay, callback: scheduled.append((delay, callback))
-    host._preview_thread(_Rules(), "sample.pdf", "(6bd7)", "draft.json")
-
-    assert calls == [("sample.pdf", "(6bd7)", "draft.json")]
-    assert scheduled[0][0] == 0
+    host._rules, host._context_generation, host._proof_generation = _Rules(), 0, 0
+    host._busy, host._closed = False, False
+    host._task_runner = SimpleNamespace(is_active=lambda _key: False,
+        submit=lambda key, work, **callbacks: pending.append((key, work, callbacks)) or True)
+    host._sync_authoring_controls = lambda: None
+    host._set_busy = lambda value, _text: setattr(host, "_busy", value)
+    host._set_hint = lambda _text: None
+    assert host.request_authoring_test(("draft.json", "(6bd7)", "sample.pdf"), origin=object(),
+                                      is_current=lambda: True, on_complete=completions.append)
+    assert calls == [] and pending[0][0] == "editor-rule-test"
+    result = pending[0][1]()
+    pending[0][2]["on_success"](result)
+    assert calls == [(("(6bd7)", "draft.json", "sample.pdf"), {})]
+    assert completions == [{"status": "ready"}] and not host._busy
 
 
 def test_release_activation_readiness_is_fail_closed(monkeypatch) -> None:
@@ -367,13 +440,14 @@ def test_release_activation_readiness_is_fail_closed(monkeypatch) -> None:
     host._rules = _Rules()
     host.current_draft_path = "draft.json"
     host.var_new_assay_key = _Var("(1111)")
+    host._dialog_parent = lambda: None
     monkeypatch.setattr(
         "rule_editor.release_actions.messagebox.showerror",
-        lambda _title, message: errors.append(str(message)),
+        lambda _title, message, **_kwargs: errors.append(str(message)),
     )
 
     assert host._check_authoring_readiness_for_activate() is False
-    assert errors and "Mit PDFs prüfen" in errors[0]
+    assert errors and "Extraktion testen" in errors[0]
 
 
 def test_activation_validation_does_not_rewrite_clean_proven_draft() -> None:
@@ -517,6 +591,8 @@ def test_same_draft_wizard_close_reloads_editor_from_file() -> None:
     reloaded: list[str] = []
     host = ManageMixin.__new__(ManageMixin)
     host.current_draft_path = r"I:\rules\drafts\same.draft.json"
+    host._capture_authoring_completion = lambda _path: None
+    host._adopt_authoring_completion = lambda _completion: None
     host.on_load_draft_into_editor = lambda path: reloaded.append(path) or True
 
     host._sync_editor_after_wizard(r"I:\rules\drafts\same.draft.json")
@@ -770,6 +846,7 @@ def test_inventory_context_menu_history_and_trash_are_non_mutating(monkeypatch) 
         ],
         "draft": [
             ("Entwurf weiterbearbeiten", host.on_manage_edit_selected),
+            ("Entwurf verwerfen …", host.on_discard_selected_draft),
             ("Entwurf in Papierkorb verschieben …", host.on_manage_delete_selected),
             ("Endgültig löschen (nur nie aktiviert) …", host.on_delete_never_active_selected),
             ("Details anzeigen", host.on_show_inventory_details),
@@ -969,6 +1046,8 @@ class _SwitchRules:
 def _switch_host(rules: _SwitchRules) -> ManageMixin:
     host = ManageMixin()
     host._rules = rules
+    host._capture_authoring_completion = lambda _path: None
+    host._adopt_authoring_completion = lambda _completion: None
     host.current_draft_path = r"I:\rules\drafts\keep.draft.json"
     host.var_draft_path = _Var(host.current_draft_path)
     host.var_new_assay_key = _Var("(keep)")
@@ -1245,175 +1324,3 @@ def test_failed_callback_load_skips_success_and_activate(monkeypatch) -> None:
     assert host._dirty is True
     assert host.current_draft_path == r"I:\rules\drafts\keep.draft.json"
     assert host.var_draft_path.get() == r"I:\rules\drafts\keep.draft.json"
-
-
-def release_host(tmp_path, *, mode="create"):
-    from types import SimpleNamespace
-    class Button:
-        state = "disabled"
-        def configure(self, **kwargs):
-            self.state = kwargs.get("state", self.state)
-    proof = {"assay_key": "FRESH", "assay_name": "Fresh Assay", "mode": mode,
-        "draft_path": str(tmp_path / "draft.json"), "failing_pdf_path": str(tmp_path / "example.pdf"),
-        "reference_pdf_path": str(tmp_path / "reference.pdf") if mode == "update" else "",
-        "checked_at_utc": "2026-11-13T12:00:00+00:00", "failing_result_fields": ["test", "date"], "compared_fields": ["test", "date"], "status": "ready"}
-    calls, errors = [], []
-    class Rules:
-        project_root = tmp_path
-        structure_ok = True
-        def verify_authoring_proof(self, *args):
-            return {"ok": True, "errors": [], "proof": proof}
-        def validate_draft(self, draft):
-            return {"ok": self.structure_ok, "errors": [] if self.structure_ok else ["invalid"]}
-        def diff_draft_vs_active(self, *args):
-            return {"mode": mode, "changes": [{"path": "test"}]}
-        def activate_new_draft(self, *args):
-            calls.append(("create", args))
-            return "active.json"
-        def activate_draft(self, *args):
-            calls.append(("update", args))
-            return "active.json"
-    host = ReleaseMixin.__new__(ReleaseMixin)
-    host._rules, host.current_draft_path = Rules(), proof["draft_path"]
-    for name, value in (("var_new_assay_key", "FRESH"), ("var_new_assay_name", "Fresh Assay"),
-        ("var_pdf", proof["failing_pdf_path"]), ("var_reference_pdf", proof["reference_pdf_path"]),
-        ("var_proof_status", ""), ("var_proof_structure", ""), ("var_proof_example", ""), ("var_proof_reference", "")):
-        setattr(host, name, _Var(value))
-    host._proof_generation, host._proof_active_request = 0, None
-    host._proof_running, host._proof_needs_recheck, host._busy = False, False, False
-    host._dirty, host._field_form_dirty, host._suspend_dirty_tracking, host._field_form_loading = False, False, False, False
-    host.btn_activate = Button()
-    host._render_validation_report = lambda _report: None
-    host._save_meta_to_draft = lambda **kwargs: pytest.fail("clean proof/diff/activation must not serialize draft")
-    host._set_hint = lambda message: None
-    host._log = lambda message: None
-    host._reload_assays = lambda: None
-    host._set_busy = lambda value, status: setattr(host, "_busy", value)
-    host._proof_result_text = lambda value: errors.append(value)
-    from test_desktop_ui_v21 import _RecordingRunner
-    host._proof_task_runner = _RecordingRunner()
-    return host, proof, calls, errors
-
-
-def test_r1_release_proof_success_is_separate_and_final_confirmation_happens_exactly_once(tmp_path, monkeypatch):
-    host, proof, calls, details = release_host(tmp_path)
-    host.known_assay_keys = {"FRESH"}  # Stale inventory must not choose update mode.
-    assert host._refresh_authoring_status(adopt_paths=True)
-    assert "noch nicht aktiviert" in host.var_proof_status.get() and not calls
-    confirmations = []
-    answer = [False]
-    monkeypatch.setattr("rule_editor.release_actions.messagebox.askyesno", lambda *args: confirmations.append(args) or answer[0])
-    monkeypatch.setattr("rule_editor.release_actions.messagebox.showerror", lambda *args: pytest.fail(str(args)))
-    visible = []
-    host._show_advanced = visible.append
-    host.on_show_diff()
-    assert visible == ["log"]
-    host.on_activate()
-    assert len(confirmations) == 1 and not calls
-    answer[0] = True
-    host.on_activate()
-    assert len(confirmations) == 2 and len(calls) == 1 and calls[0][0] == "create"
-    assert "Aktivierung abgeschlossen" in host.var_proof_status.get()
-
-
-def test_r1_ui_pdf_selection_dirty_fields_and_effective_name_binding_fail_closed(tmp_path, monkeypatch):
-    host, proof, calls, details = release_host(tmp_path)
-    proof["assay_name"] = "  Fresh Assay  "
-    assert host._refresh_authoring_status(adopt_paths=True)
-    host.var_pdf.set(str(tmp_path / "other.pdf"))
-    host._on_proof_pdf_changed()
-    assert not host._refresh_authoring_status()
-    confirmations = []
-    monkeypatch.setattr("rule_editor.release_actions.messagebox.askyesno", lambda *args: confirmations.append(args) or True)
-    monkeypatch.setattr("rule_editor.release_actions.messagebox.showerror", lambda *args: details.append(str(args)))
-    host.on_activate()
-    assert not confirmations and not calls and host.btn_activate.state == "disabled"
-    host.var_pdf.set(proof["failing_pdf_path"])
-    host._on_proof_pdf_changed()
-    assert not host._refresh_authoring_status()  # Selection roundtrip is not a new proof.
-    host._proof_needs_recheck = False
-    HistoryMixin._on_form_changed(host)
-    assert host._dirty and host._proof_needs_recheck
-    host._dirty = False
-    HistoryMixin._on_field_form_changed(host)
-    assert host._field_form_dirty and not host._check_authoring_readiness_for_activate()
-    assert not confirmations and not calls
-
-
-def test_r1_structure_failure_has_no_override_activation_confirmation(tmp_path, monkeypatch):
-    host, proof, calls, details = release_host(tmp_path)
-    host._rules.structure_ok = False
-    monkeypatch.setattr("rule_editor.release_actions.messagebox.askyesno", lambda *args: pytest.fail("invalid structure cannot reach any confirmation"))
-    monkeypatch.setattr("rule_editor.release_actions.messagebox.showerror", lambda *args: details.append(str(args)))
-    host.on_activate()
-    assert not calls and details
-
-
-@pytest.mark.parametrize("change", ["draft", "pdf", "root"])
-def test_r1_late_proof_result_never_marks_changed_context_current(tmp_path, change):
-    host, proof, calls, details = release_host(tmp_path)
-    context = host._authoring_ui_context()
-    host._proof_generation = host._proof_active_request = 1
-    host._proof_running = host._busy = True
-    if change == "draft":
-        host.current_draft_path = str(tmp_path / "other-draft.json")
-    elif change == "pdf":
-        host.var_pdf.set(str(tmp_path / "other.pdf"))
-    else:
-        host._rules.project_root = tmp_path / "other-root"
-    host._invalidate_authoring_proof()
-    host._complete_authoring_check(1, context, proof, None)
-    assert host.btn_activate.state == "disabled" and not calls
-    assert "erfolgreich" not in host.var_proof_status.get()
-
-
-def test_r1_old_completion_cannot_clear_newer_proof_busy_state_and_running_guard_is_independent(tmp_path, monkeypatch):
-    host, proof, calls, details = release_host(tmp_path)
-    context = host._authoring_ui_context()
-    host._proof_generation = host._proof_active_request = 2
-    host._proof_running = host._busy = True
-    host.var_proof_status.set("Prüfung läuft")
-    host._complete_authoring_check(1, context, proof, None)
-    assert host._proof_running and host._busy and host.var_proof_status.get() == "Prüfung läuft"
-    host._busy = False  # Another legacy async helper may reset shared busy.
-    monkeypatch.setattr("rule_editor.release_actions.threading.Thread", lambda **kwargs: pytest.fail("a proof is already running"))
-    host.on_check_pdfs()
-    assert host._proof_running and host._proof_active_request == 2
-    assert not host._proof_task_runner.submissions
-
-
-@pytest.mark.parametrize("error,example", [("authoring_proof_reference_pdf_required", "nicht geprüft"),
-    ("authoring_proof_reference_must_differ", "nicht geprüft"), ("authoring_proof_reference_mismatch: test", "bestanden")])
-def test_r1_failed_reference_recheck_clears_old_pass_without_blame_on_example(tmp_path, error, example):
-    host, proof, calls, details = release_host(tmp_path, mode="update")
-    assert host._refresh_authoring_status(adopt_paths=True)
-    assert "Vergleich bestanden" in host.var_proof_reference.get()
-    host._proof_generation = host._proof_active_request = 1
-    host._proof_running = host._busy = True
-    host._complete_authoring_check(1, host._authoring_ui_context(), None, error)
-    assert "fehlgeschlagen" in host.var_proof_status.get()
-    assert "Vergleich bestanden" not in host.var_proof_reference.get() and "blockiert" in host.var_proof_reference.get()
-    assert example in host.var_proof_example.get() and "fehlgeschlagen" not in host.var_proof_example.get()
-    assert host.btn_activate.state == "disabled" and not calls
-    assert details and "Details:" in details[-1]
-
-
-def test_r1_destroyed_editor_ignores_queued_completion_and_worker_never_calls_tk(tmp_path):
-    host, proof, calls, details = release_host(tmp_path)
-    host._proof_generation = host._proof_active_request = 1
-    host._proof_running = host._busy = True
-    host._proof_disposed = True
-    host._set_busy = lambda *args: pytest.fail("disposed editor must not touch widgets")
-    host._complete_authoring_check(1, host._authoring_ui_context(), proof, None)
-    assert host._proof_running and host._busy
-    host._proof_disposed, host._proof_running, host._busy = False, False, False
-    host._set_busy = lambda value, status: setattr(host, "_busy", value)
-    host._rules.create_authoring_proof = lambda *args: proof
-    host.after = lambda *args: pytest.fail("proof worker must not call Tk after")
-    host.on_check_pdfs()
-    key, work, on_success, on_error = host._proof_task_runner.submissions[-1]
-    assert key.startswith("rule-authoring-proof-") and work() is proof
-    assert host._proof_running and not calls
-    host._proof_disposed = True
-    on_success(proof)
-    assert host._proof_running and not calls

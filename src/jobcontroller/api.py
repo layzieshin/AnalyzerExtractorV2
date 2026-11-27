@@ -18,6 +18,7 @@ __all__ = [
     "release_validated_run",
     "retry_excel_export",
     "submit",
+    "verify_completed_job",
 ]
 
 
@@ -38,6 +39,8 @@ class JobEvidence:
     context_source_label: str = ""
     context_source_kind: str = ""
     retry_kind: str = ""
+    store_path: str = ""
+    device_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,8 @@ def submit(
     sqlite_retry_count: int = 3,
     sqlite_retry_sleep_s: float = 0.2,
     device_id: str | None = None,
+    *,
+    expected_sha256: str | None = None,
 ) -> JobResult:
     """Public API (JobController)
 
@@ -68,6 +73,8 @@ def submit(
     - serial pipeline
     - output_mode: sqlite; legacy both|excel inputs normalize to sqlite
     - unknown output_mode returns FAILED before processing
+    - optional expected_sha256 binds a retry to verified temporary PDF bytes,
+      before DONE checks or pipeline side effects; bare legacy calls are unchanged
     """
     return JobController().submit(
         pdf_path,
@@ -79,12 +86,25 @@ def submit(
         sqlite_retry_count=sqlite_retry_count,
         sqlite_retry_sleep_s=sqlite_retry_sleep_s,
         device_id=device_id,
+        **({"expected_sha256": expected_sha256} if expected_sha256 is not None else {}),
     )
 
 
-def get_job_evidence(project_root: str | Path, job_id: str) -> JobEvidence | None:
+def get_job_evidence(
+    project_root: str | Path, job_id: str, *, expected_pdf_sha256: str | None = None,
+    expected_pdf_path: str | None = None,
+    include_context: bool = True,
+) -> JobEvidence | None:
     """Read-only job-state/evidence boundary for application diagnosis DTOs."""
-    return JobController().read_job_evidence(project_root, job_id)
+    return JobController().read_job_evidence(project_root, job_id,
+        expected_pdf_sha256=expected_pdf_sha256, expected_pdf_path=expected_pdf_path, include_context=include_context)
+
+
+def verify_completed_job(project_root, job_id, *, expected_sha256, expected_pdf_path, store_path, device_id):
+    """Read-only full SQLite processing receipt; no validation or reimport."""
+    from .completion import verify_completed_job as verify
+    return verify(project_root, job_id, expected_sha256=expected_sha256, expected_pdf_path=expected_pdf_path,
+                  store_path=store_path, device_id=device_id)
 
 
 def processing_eligibility_error(project_root: str | Path | None, job_id: str, *, require_evidence: bool = False) -> str:

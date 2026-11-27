@@ -15,8 +15,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List
 
+from src.assaycandidate.api import canonical_assay_key, load_known_assay_keys
 from src.assaychooser.api import detect_assays
-from src.contentsplitter.api import AssayDescriptor, split_by_assay_name_and_key
+from src.contentsplitter.api import AssayDescriptor, ContentSplitError, split_assay_sections, split_by_assay_name_and_key
 from src.extractor.api import extract_record
 from src.normalizer.api import normalize_lines
 from src.parser.api import parse
@@ -26,7 +27,7 @@ from . import regex_tools
 from .diffing import collect_diffs
 from .errors import RuleSuiteError
 from .history import snapshot_existing_active_ruleset
-from .json_io import _read_json_object, _safe_filename, _safe_key, _write_json_atomic, _write_bytes_atomic
+from .json_io import _read_json_object, _safe_filename, _safe_key, _write_bytes_atomic, _write_json_atomic
 from .lifecycle import rulesuite_draft_lock, rulesuite_lifecycle_lock
 from .validation import _validate_draft_data
 
@@ -56,17 +57,8 @@ class RuleSuite:
         draft_dir.mkdir(parents=True, exist_ok=True)
         draft_path = draft_dir / f"{_safe_key(assay_key)}.draft.json"
 
-        data: Dict[str, Any] = {
-            "assay_name": assay_name,
-            "assay_key": assay_key,
-            "lot_rule": {"regex": ""},
-            "extract_rules": {"fields": [], "dedupe_fields": []},
-            "excel_rules": {
-                "excel_filename_template": "{assay_name}.xlsx",
-                "sheetname_template": "{lot_id}",
-                "column_mapping": {},
-            },
-        }
+        from .templates import blank_draft_data
+        data = blank_draft_data(assay_key, assay_name)
         _write_json_atomic(draft_path, data)
         return draft_path
 
@@ -112,7 +104,8 @@ class RuleSuite:
         if not isinstance(data, dict):
             raise RuleSuiteError("draft_data_must_be_object")
         path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json_atomic(path, data)
+        with rulesuite_draft_lock(path):
+            _write_json_atomic(path, data)
         return path
 
     def set_field_regex(self, draft_path: str, field_key: str, regex: str) -> Path:
@@ -518,6 +511,9 @@ class RuleSuite:
         assay_key: str,
         assay_name: str,
         draft_path: str | None = None,
+        *,
+        strict: bool = False,
+        known_assay_keys: List[str] | None = None,
     ) -> Dict[str, Any]:
         root = Path(project_root)
         doc = parse(pdf_path)
@@ -527,10 +523,11 @@ class RuleSuite:
 
         index_path = root / "rules" / "index.json"
         detected: list[str] = []
-        try:
-            detected = [m.assay_key for m in detect_assays(norm_text, str(index_path))]
-        except Exception:
-            detected = []
+        if not strict:
+            try:
+                detected = [m.assay_key for m in detect_assays(norm_text, str(index_path))]
+            except Exception:
+                detected = []
 
         use_assay_name = assay_name.strip()
         if draft_path:
@@ -540,8 +537,22 @@ class RuleSuite:
         if not use_assay_name:
             raise RuleSuiteError("assay_name is required")
 
-        blocks = split_by_assay_name_and_key(norm_text, [AssayDescriptor(assay_key=assay_key, assay_name=use_assay_name)])
-        assay_block = blocks.get(assay_key, "")
+        descriptors = [AssayDescriptor(assay_key=assay_key, assay_name=use_assay_name)]
+        header = None
+        if strict:
+            known = load_known_assay_keys(str(index_path)) if known_assay_keys is None else set(known_assay_keys)
+            if known is None:
+                raise RuleSuiteError("authoring_pdf_assay_index_unreadable")
+            known = {canonical_assay_key(key) for key in known} | {canonical_assay_key(assay_key)}
+            try:
+                sections = split_assay_sections(norm_text, known_keys=known)
+            except ContentSplitError as exc:
+                raise RuleSuiteError("authoring_pdf_assay_header_ambiguous") from exc
+            assay_block, header = self._authoring_context(norm_lines, assay_key, sections=sections)
+            detected = [section.assay_key for section in sections if section.assay_key in known]
+        else:
+            blocks = split_by_assay_name_and_key(norm_text, descriptors)
+            assay_block = blocks.get(assay_key, "")
         if not assay_block:
             raise RuleSuiteError(f"assay_block_empty: {assay_key}")
 
@@ -552,7 +563,22 @@ class RuleSuite:
             "detected_assays": detected,
             "normalized_text": norm_text,
             "assay_block": assay_block,
+            **({"assay_header": header} if strict else {}),
         }
+
+    @staticmethod
+    def _authoring_context(lines: List[str], assay_key: str, *, sections=None) -> tuple[str, Dict[str, str]]:
+        """Use the productive parser; retain the authoring error/proof ABI."""
+        try:
+            if sections is None:
+                sections = split_assay_sections("\n".join(lines), known_keys=(assay_key,))
+        except ContentSplitError as exc:
+            raise RuleSuiteError("authoring_pdf_assay_header_ambiguous") from exc
+        targets = [row for row in sections if row.assay_key == canonical_assay_key(assay_key)]
+        if len(targets) != 1:
+            raise RuleSuiteError("authoring_pdf_assay_header_missing_or_ambiguous")
+        target = targets[0]
+        return target.text, {"assay_key": target.assay_key, "assay_name": target.assay_name}
 
     def validate_draft(self, draft_path: str) -> Dict[str, Any]:
         data = self.load_draft(draft_path)
@@ -564,6 +590,10 @@ class RuleSuite:
         pdf_path: str,
         assay_key: str,
         draft_path: str | None = None,
+        *,
+        strict: bool = False,
+        expected_header: Dict[str, str] | None = None,
+        known_assay_keys: List[str] | None = None,
     ) -> Dict[str, Any]:
         root = Path(project_root)
         ruleset = self._load_ruleset_for_preview(root, assay_key, draft_path)
@@ -577,8 +607,17 @@ class RuleSuite:
             assay_key=assay_key,
             assay_name=assay_name,
             draft_path=draft_path,
+            **({"strict": True} if strict else {}),
+            **({"known_assay_keys": known_assay_keys} if known_assay_keys is not None else {}),
         )
-        record = extract_record(text_result["assay_block"], ruleset)
+        if expected_header is not None and text_result.get("assay_header") != expected_header:
+            raise RuleSuiteError("authoring_pdf_assay_header_incompatible")
+        try:
+            record = extract_record(text_result["assay_block"], ruleset)
+        except RuntimeError as exc:
+            if strict:
+                exc.authoring_header = text_result["assay_header"]
+            raise
         return {
             "pdf_path": pdf_path,
             "assay_key": assay_key,
@@ -590,67 +629,58 @@ class RuleSuite:
             "dedupe_version": getattr(record, "dedupe_version", ""),
             "dedupe_basis": getattr(record, "dedupe_basis", {}),
             "data": record.data,
+            **({"assay_header": text_result["assay_header"]} if strict else {}),
         }
 
-    def _verified_activation_snapshot(self, project_root, assay_key, draft_path, *, assay_name=None):
-        from .authoring_readiness import AuthoringReadinessError, verify_authoring_proof
-
-        path = Path(draft_path)
-        raw = path.read_bytes()
-        report = verify_authoring_proof(project_root, assay_key, draft_path)
-        if not report.get("ok"):
-            raise AuthoringReadinessError(",".join(report.get("errors", [])) or "authoring_proof_invalid")
-        proof = report["proof"]
-        data = json.loads(raw)
-        if hashlib.sha256(raw).hexdigest() != proof.get("draft_sha256") or path.read_bytes() != raw:
-            raise AuthoringReadinessError("authoring_proof_draft_changed")
-        if assay_name is not None and str(data.get("assay_name") or "").strip() != assay_name.strip():
-            raise AuthoringReadinessError("authoring_proof_assay_name_mismatch")
-        if str(data.get("assay_key") or "").strip() != assay_key.strip():
-            raise AuthoringReadinessError("authoring_proof_assay_key_mismatch")
-        for name in ("index", "active_ruleset"):
-            original, expected = proof.get(name + "_path"), proof.get(name + "_sha256")
-            if original and hashlib.sha256(Path(original).read_bytes()).hexdigest() != expected:
-                raise AuthoringReadinessError(f"authoring_proof_{name}_changed")
-        return data, raw, proof
-
-    def activate_draft(self, project_root: str, assay_key: str, draft_path: str, *, require_authoring_proof: bool = False) -> Path:
-        with rulesuite_lifecycle_lock(project_root), rulesuite_draft_lock(draft_path):
+    def activate_draft(self, project_root: str, assay_key: str, draft_path: str, *,
+                       authoring_proof: Dict[str, Any] | None = None) -> Path:
+        with rulesuite_lifecycle_lock(project_root):
             root = Path(project_root)
+            from .identity_authoring import require_identity_activation_proof
+            require_identity_activation_proof(root.resolve(), assay_key, authoring_proof)
+            payload = None
+            if authoring_proof is not None:
+                from .authoring_readiness import _verified_activation_bytes
+                payload = _verified_activation_bytes(root.resolve(), assay_key, draft_path, authoring_proof)
             rs = resolve_ruleset(assay_key, str(root / "rules"), str(root / "rules" / "index.json"))
             target = root / "rules" / rs.ruleset_file
-            raw = None
-            if require_authoring_proof:
-                source_data, raw, proof = self._verified_activation_snapshot(project_root, assay_key, draft_path)
-                if proof.get("mode") != "update" or target.resolve() != Path(proof["active_ruleset_path"]):
-                    from .authoring_readiness import AuthoringReadinessError
-                    raise AuthoringReadinessError("authoring_proof_active_binding_changed")
-            else:
-                source_data = self.load_draft(draft_path)
+            source_data = json.loads(payload.decode("utf-8")) if payload is not None else self.load_draft(draft_path)
             check = _validate_draft_data(source_data)
             if not check["ok"]:
                 raise RuleSuiteError(f"draft_invalid: {check['errors']}")
             snapshot_existing_active_ruleset(target)
-            if raw is not None:
-                _write_bytes_atomic(target, raw)
+            if payload is not None and authoring_proof.get("version") == 2:
+                _write_bytes_atomic(target, payload)
             else:
                 _write_json_atomic(target, source_data)
             return target
 
-    def activate_new_draft(self, project_root: str, assay_key: str, assay_name: str, draft_path: str,
-                           *, require_authoring_proof: bool = False) -> Path:
-        with rulesuite_lifecycle_lock(project_root), rulesuite_draft_lock(draft_path):
-            source_data, raw = None, None
-            if require_authoring_proof:
-                source_data, raw, proof = self._verified_activation_snapshot(project_root, assay_key, draft_path, assay_name=assay_name)
-                if proof.get("mode") != "create":
-                    from .authoring_readiness import AuthoringReadinessError
-                    raise AuthoringReadinessError("authoring_proof_mode_changed")
-            return self._activate_new_draft_unlocked(project_root, assay_key, assay_name, draft_path,
-                verified_data=source_data, verified_bytes=raw)
+    def activate_new_draft(self, project_root: str, assay_key: str, assay_name: str, draft_path: str, *,
+                           authoring_proof: Dict[str, Any] | None = None) -> Path:
+        with rulesuite_lifecycle_lock(project_root):
+            from .identity_authoring import require_identity_activation_proof
+            require_identity_activation_proof(Path(project_root).resolve(), assay_key, authoring_proof)
+            payload = None
+            if authoring_proof is not None:
+                from .authoring_readiness import _verified_activation_bytes
+                payload = _verified_activation_bytes(Path(project_root).resolve(), assay_key, draft_path, authoring_proof)
+            root = Path(project_root).resolve()
+            from .identity_authoring import finalize_identity_publication, has_identity_transition
+            identity_case = bool(authoring_proof and authoring_proof.get("identity_case"))
+            target = self._activate_new_draft_unlocked(project_root, assay_key, assay_name, draft_path, payload=payload,
+                                                       exact=authoring_proof is not None and authoring_proof.get("version") == 2,
+                                                       identity_case=has_identity_transition(root, assay_key),
+                                                       identity_proof=authoring_proof if identity_case else None)
+            if identity_case:
+                try:
+                    finalize_identity_publication(root, assay_key)
+                except (OSError, RuleSuiteError):
+                    # Index publication already committed the prepared proof.
+                    # Bookkeeping failure must never revoke a visible rule.
+                    pass
+            return target
 
-    def _activate_new_draft_unlocked(self, project_root: str, assay_key: str, assay_name: str, draft_path: str,
-                                     *, verified_data=None, verified_bytes=None) -> Path:
+    def _activate_new_draft_unlocked(self, project_root: str, assay_key: str, assay_name: str, draft_path: str, *, payload: bytes | None = None, exact: bool = False, identity_case: bool = False, identity_proof: Dict[str, Any] | None = None) -> Path:
         root = Path(project_root)
         rules_dir = root / "rules"
         index_path = rules_dir / "index.json"
@@ -660,9 +690,13 @@ class RuleSuite:
         if not assay_key_clean or not assay_name_clean:
             raise RuleSuiteError("assay_key and assay_name are required")
 
-        source_data = self.load_draft(draft_path) if verified_data is None else deepcopy(verified_data)
-        source_data["assay_key"] = assay_key_clean
-        source_data["assay_name"] = assay_name_clean
+        source_data = json.loads(payload.decode("utf-8")) if payload is not None else self.load_draft(draft_path)
+        if exact:
+            if source_data.get("assay_key") != assay_key_clean or source_data.get("assay_name") != assay_name_clean:
+                raise RuleSuiteError("authoring_proof_new_identity_mismatch")
+        else:
+            source_data["assay_key"] = assay_key_clean
+            source_data["assay_name"] = assay_name_clean
         check = _validate_draft_data(source_data)
         if not check["ok"]:
             raise RuleSuiteError(f"draft_invalid: {check['errors']}")
@@ -672,7 +706,7 @@ class RuleSuite:
         if not isinstance(assays, list):
             raise RuleSuiteError("index.assays must be list")
 
-        if any(str(row.get("assay_key", "")).strip() == assay_key_clean for row in assays if isinstance(row, dict)):
+        if any(canonical_assay_key(str(row.get("assay_key", ""))) == canonical_assay_key(assay_key_clean) for row in assays if isinstance(row, dict)):
             raise RuleSuiteError(f"assay_key_exists: {assay_key_clean}")
 
         safe_name = _safe_filename(assay_name_clean)
@@ -681,24 +715,56 @@ class RuleSuite:
         if safe_name.lower() == "index":
             raise RuleSuiteError("invalid_assay_name_for_filename:index")
 
-        ruleset_file = f"{safe_name}.json"
+        ruleset_file = f"{safe_name}.{_safe_key(assay_key_clean)}.json" if identity_case else f"{safe_name}.json"
+        target = rules_dir / ruleset_file
+        from .identity_authoring import owns_prepared_target
+        resume_preparation = owns_prepared_target(root.resolve(), target, identity_proof, payload)
         lower_existing = {
             p.name.lower()
             for p in rules_dir.glob("*.json")
             if p.name.lower() != "index.json"
         }
-        if ruleset_file.lower() in lower_existing:
+        if ruleset_file.lower() in lower_existing and not resume_preparation:
             raise RuleSuiteError(f"ruleset_file_exists_case_insensitive: {ruleset_file}")
-        target = rules_dir / ruleset_file
-        if target.exists():
+        if target.exists() and not resume_preparation:
             raise RuleSuiteError(f"ruleset_file_exists: {ruleset_file}")
 
-        if verified_bytes is None:
-            _write_json_atomic(target, source_data)
-        else:
-            _write_bytes_atomic(target, verified_bytes)
-        assays.append({"assay_key": assay_key_clean, "ruleset_file": ruleset_file})
-        _write_json_atomic(index_path, index)
+        before_cases = case_path = prepared_cases = expected_index = None
+        if identity_proof is not None:
+            from .identity_cases import _catalogue_path
+            case_path = _catalogue_path(root.resolve())
+            before_cases = case_path.read_bytes()
+        try:
+            if resume_preparation:
+                pass
+            elif exact:
+                _write_bytes_atomic(target, payload)
+            else:
+                _write_json_atomic(target, source_data)
+            if identity_proof is not None and not resume_preparation:
+                from .identity_authoring import record_identity_activation
+                prepared_cases = record_identity_activation(root.resolve(), assay_key_clean, target, identity_proof)
+            assays.append({"assay_key": assay_key_clean, "ruleset_file": ruleset_file})
+            expected_index = json.dumps(index, indent=2, ensure_ascii=False).encode("utf-8")
+            # Last authoritative publication: a worker cannot see the new ID
+            # until both exact rule content and its tested decision are saved.
+            _write_json_atomic(index_path, index)
+        except Exception:
+            if identity_case:
+                current_index = index_path.read_bytes()
+                if expected_index is not None and current_index == expected_index and target.is_file() and target.read_bytes() == payload:
+                    return target  # Our final atomic switch did occur.
+                # Never restore a possibly foreign index or catalogue. The
+                # failed atomic index write normally left the original intact.
+                if prepared_cases is not None and case_path.read_bytes() == prepared_cases:
+                    _write_bytes_atomic(case_path, before_cases)
+                try:
+                    referenced = any(row.get("ruleset_file") == target.name for row in json.loads(current_index).get("assays", []))
+                except (ValueError, TypeError, AttributeError):
+                    referenced = True  # Unknown foreign mapping: preserve it.
+                if not referenced and not resume_preparation and target.is_file() and target.read_bytes() == payload:
+                    target.unlink()
+            raise
         return target
 
     def list_fields(self, project_root: str, assay_key: str) -> List[str]:

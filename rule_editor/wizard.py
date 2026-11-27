@@ -15,6 +15,7 @@ from typing import Callable
 from tkinter import filedialog, messagebox
 
 from .wizard_ui import _SEARCH_LABEL_TO_MODE, _SEARCH_MODE_LABELS, _STEP_TITLES, _STEPS, WizardUiMixin
+from .report_panel import clear_authoring_result, render_authoring_result
 
 _WINDOW_TITLE = "Regel aus PDF erstellen oder prüfen"
 _FULLTEXT_FALLBACK_WARNING = (
@@ -34,18 +35,21 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         start_intent: str = "neutral",
         initial_draft_path: str | None = None,
         on_session_closed: Callable[[str | None], None] | None = None,
+        proof_owner: object | None = None,
     ) -> None:
         super().__init__(master)
         self.withdraw()
         self.title(_WINDOW_TITLE)
         self.geometry("1100x780")
-        self.transient(master)
+        self.transient(master.winfo_toplevel())
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
         self._rules = rules
         self._on_open_in_editor = on_open_in_editor or (lambda _path: None)
         self._on_activate_requested = on_activate_requested or (lambda _path: None)
         self._on_session_closed = on_session_closed
+        self._proof_owner = proof_owner
+        self._proof_ui_generation = 0
         self._start_intent = start_intent if start_intent in {"neutral", "new"} else "neutral"
 
         self._step = 0
@@ -53,6 +57,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self._pending_draft_path: str | None = None
         self._draft_choices: list[dict[str, str]] = []
         self._normalized_pdf_text = ""
+        self._known_assay_keys = None
         self.assay_text: str = ""
         self._derived_for: tuple[str, str, str] | None = None
         self._using_fulltext_fallback = False
@@ -68,7 +73,6 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self.var_name = tk.StringVar(value="")
         self.var_mode = tk.StringVar(value="new" if self._start_intent == "new" else "")
         self.var_pdf = tk.StringVar(value="")
-        self.var_reference_pdf = tk.StringVar(value="")
         self.var_status = tk.StringVar(value="")
         self.var_match = tk.StringVar(value="")
         self.var_progress = tk.StringVar(value="")
@@ -85,6 +89,8 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self.var_name.trace_add("write", self._on_target_identity_changed)
         self.var_mode.trace_add("write", self._on_target_identity_changed)
         self.var_f_search_label.trace_add("write", self._on_search_label_changed)
+        for variable in (self.var_f_key, self.var_f_regex, self.var_f_mode, self.var_f_after, self.var_f_line):
+            variable.trace_add("write", self._invalidate_rule_test)
 
         self._build_ui()
         self._refresh_draft_choices()
@@ -115,9 +121,9 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         if key == "fields":
             self.btn_next.config(text="Speichern und nächstes Feld")
         elif key == "custom":
-            self.btn_next.config(text="Keine weiteren Felder / Abschluss prüfen")
+            self.btn_next.config(text="Abschluss prüfen")
         elif key == "finish":
-            self.btn_next.config(text="Fertig stellen")
+            self.btn_next.config(text="Geprüfte Regel aktivieren")
         else:
             self.btn_next.config(text="Weiter zu den Feldern")
         self.var_match.set("")
@@ -142,8 +148,26 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self._render_summary()
             self._set_status(
                 "Auch unvollständige Entwürfe können im Editor weiterbearbeitet werden. "
-                "Der PDF-Nachweis wird hier geprüft; aktiviert wird erst separat im Editor."
+                "Nur die ausdrückliche Aktivierung benötigt alle Prüfungen und Nachweise."
             )
+        self._sync_finish_buttons()
+
+    def _sync_finish_buttons(self) -> None:
+        if not hasattr(self, "btn_finish_later"):
+            return
+        finish = _STEPS[self._step] == "finish"
+        if finish:
+            self.btn_finish_later.pack(side="left", padx=(8, 0))
+            owner = self.__dict__.get("_proof_owner")
+            ready = owner is not None and owner.authoring_target_ready(self._rule_test_target(), origin=self)
+            self.btn_next.configure(state=tk.NORMAL if ready and not self._busy else tk.DISABLED)
+        else:
+            self.btn_finish_later.pack_forget()
+            self.btn_next.configure(state=tk.DISABLED if self._busy else tk.NORMAL)
+
+    def _finish_later(self) -> None:
+        self.var_finish_action.set("editor")
+        self._finish()
 
     def _on_next(self) -> None:
         if self._busy:
@@ -169,6 +193,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         elif key == "custom":
             self._show_step(3)
         elif key == "finish":
+            self.var_finish_action.set("activate")
             self._finish()
 
     def _on_continue_draft(self) -> None:
@@ -225,13 +250,16 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             return
         self._closed = True
         self._pdf_request_id = int(getattr(self, "_pdf_request_id", 0)) + 1
+        if action != "activate":
+            self._invalidate_rule_test()
         draft = self.draft_path
         callback = getattr(self, "_on_session_closed", None)
         self.destroy()
         if callable(callback):
             callback(draft)
-        if action in {"activate", "editor"} and draft:
-            # Legacy action names remain accepted; wizard success never activates.
+        if action == "activate" and draft:
+            self._on_activate_requested(draft)
+        elif action == "editor" and draft:
             self._on_open_in_editor(draft)
 
     def _on_mode_changed(self) -> None:
@@ -241,10 +269,12 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self._apply_target_control_states()
 
     def _on_pdf_path_changed(self, *_args: object) -> None:
+        self._invalidate_rule_test()
         if self.var_pdf.get().strip() != self._pdf_fingerprint:
             self._invalidate_neutral_pdf()
 
     def _on_target_identity_changed(self, *_args: object) -> None:
+        self._invalidate_rule_test()
         self._apply_target_control_states()
         if self._derived_for is None:
             return
@@ -260,6 +290,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
 
     def _invalidate_neutral_pdf(self) -> None:
         self._normalized_pdf_text = ""
+        self._known_assay_keys = None
         self._pdf_fingerprint = ""
         self._clear_derived_assay_text()
         self._pdf_request_id += 1
@@ -536,15 +567,6 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         if path:
             self.var_pdf.set(path)
 
-    def _on_pick_reference_pdf(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Referenz-PDF wählen",
-            filetypes=[("PDF", "*.pdf")],
-            parent=self,
-        )
-        if path:
-            self.var_reference_pdf.set(path)
-
     def _on_load_text(self) -> None:
         if self._busy:
             return
@@ -565,11 +587,17 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
     def _load_text_thread(self, rules: object, pdf: str, request_id: int) -> None:
         error: str | None = None
         text = ""
+        known_keys = None
         try:
-            text = str(rules.load_normalized_pdf_text(pdf))
+            context_reader = getattr(rules, "load_authoring_pdf_context", None)
+            if callable(context_reader):
+                context = context_reader(pdf)
+                text, known_keys = str(context["normalized_text"]), tuple(context["known_assay_keys"])
+            else:
+                text = str(rules.load_normalized_pdf_text(pdf))
         except Exception as exc:
             error = str(exc)
-        self._schedule_ui(lambda t=text, e=error, p=pdf, rid=request_id: self._finish_text_load(t, e, p, rid))
+        self._schedule_ui(lambda t=text, e=error, p=pdf, rid=request_id, keys=known_keys: self._finish_text_load(t, e, p, rid, known_assay_keys=keys))
 
     def _schedule_ui(self, callback: Callable[[], None]) -> None:
         if getattr(self, "_closed", False):
@@ -579,7 +607,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         except (tk.TclError, RuntimeError):
             return
 
-    def _finish_text_load(self, text: str, error: str | None, pdf: str, request_id: int) -> None:
+    def _finish_text_load(self, text: str, error: str | None, pdf: str, request_id: int, *, known_assay_keys=None) -> None:
         if getattr(self, "_closed", False) or request_id != self._pdf_request_id:
             return
         try:
@@ -594,6 +622,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             self.var_status.set(f"PDF-Text konnte nicht geladen werden: {error}")
             return
         self._normalized_pdf_text = text
+        self._known_assay_keys = known_assay_keys
         self._pdf_fingerprint = pdf
         self._clear_derived_assay_text()
         self._set_preview_text(text)
@@ -618,7 +647,9 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         normalized = str(getattr(self, "_normalized_pdf_text", "") or "")
         block = ""
         if key and name and normalized.strip() and hasattr(self._rules, "derive_assay_block"):
-            block = str(self._rules.derive_assay_block(normalized, key, name)).strip()
+            known = getattr(self, "_known_assay_keys", None)
+            kwargs = {"known_assay_keys": known} if known is not None else {}
+            block = str(self._rules.derive_assay_block(normalized, key, name, **kwargs)).strip()
         return ("block", block) if block else ("fulltext", normalized)
 
     def _publish_derived_assay_text(self, outcome: str, text: str) -> None:
@@ -727,6 +758,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                 regex=regex,
                 search_from=search_from if self.var_f_mode.get() != "none" else {},
             )
+            self._invalidate_rule_test()
             self._reload_fields()
         except Exception as exc:
             messagebox.showerror("Feld", str(exc), parent=self)
@@ -843,6 +875,7 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         try:
             search_from = self._build_search_from()
             self._rules.add_field(self.draft_path, key, regex, required=False, search_from=search_from)
+            self._invalidate_rule_test()
         except Exception as exc:
             messagebox.showerror("Feld", str(exc), parent=self)
             return
@@ -851,46 +884,20 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
         self._clear_field_form()
         self.var_status.set(f"Feld '{key}' hinzugefügt. Das nächste eigene Feld kann jetzt angelegt werden.")
 
-    def _authoring_mode(self) -> str:
-        if not self.draft_path:
-            return ""
-        report = self._rules.diff_draft_vs_active(self.var_key.get().strip(), self.draft_path)
-        mode = str(report.get("mode", "")).strip()
-        if mode not in {"create", "update"}:
-            raise RuntimeError("authoring_mode_unbekannt")
-        return mode
-
     def _render_summary(self) -> None:
+        """Render cached widget/field state; never reread drafts or source files."""
         self.list_summary.delete(0, tk.END)
         if not self.draft_path:
             return
-        self._reload_fields()
-        mode = ""
-        try:
-            mode = self._authoring_mode()
-        except Exception as exc:
-            self.lbl_mode_summary.config(text=f"Art der Änderung konnte nicht bestimmt werden: {exc}")
-            self.frm_reference.pack_forget()
-        else:
-            if mode == "update":
-                self.lbl_mode_summary.config(
-                    text="Zum PDF-Nachweis der geänderten aktiven Regel sind Problem-PDF und eine andere Referenz-PDF erforderlich."
-                )
-                self.frm_reference.pack(fill="x", before=self.lbl_required_summary)
-            else:
-                self.lbl_mode_summary.config(text="Prüfung einer Neuanlage: eine Referenz-PDF ist nicht erforderlich.")
-                self.frm_reference.pack_forget()
-                self.var_reference_pdf.set("")
+        self.lbl_mode_summary.config(text="Eine Test-PDF wählen und 'Extraktion testen' ausführen. Eine geeignete zweite PDF wird automatisch gesucht; aktiviert wird nur ausdrücklich.")
         if getattr(self, "_using_fulltext_fallback", False):
             self.list_summary.insert(tk.END, _FULLTEXT_FALLBACK_WARNING)
         self.list_summary.insert(tk.END, f"Assay: {self.var_key.get().strip()}  {self.var_name.get().strip()}")
-        self.list_summary.insert(tk.END, f"Art: {mode or '-'}")
         self.list_summary.insert(tk.END, f"Felder: {len(self._fields)}")
         self.list_summary.insert(tk.END, f"Entwurf: {self.draft_path}")
         if self.assay_text.strip():
             try:
-                report = self._rules.locate_fields(self.draft_path, self.assay_text, group=1)
-                self._field_report = report
+                report = self._field_report or {}
                 rows = [row for row in report.get("results", []) if isinstance(row, dict)]
                 confirmed = sum(1 for row in rows if self._row_has_nonempty_value(row))
                 complete = len(rows) == len(self._fields) and confirmed == len(self._fields) and bool(self._fields)
@@ -915,25 +922,56 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
                 text="Feldtreffer noch nicht geprüft. Der Entwurf kann ohne Aktivierung im Editor weiterbearbeitet werden.",
                 fg="#9a6700",
             )
-        try:
-            structure = self._rules.validate_draft(self.draft_path)
-        except Exception as exc:
-            self.list_summary.insert(tk.END, f"Strukturprüfung fehlgeschlagen: {exc}")
-            return
-        if structure.get("ok"):
-            self.list_summary.insert(tk.END, "Strukturprüfung: in Ordnung")
-        else:
-            self.list_summary.insert(tk.END, f"Strukturprüfung: {len(structure.get('errors', []))} Fehler")
-            for err in structure.get("errors", []):
-                self.list_summary.insert(tk.END, f"  - {err}")
+        self.list_summary.insert(tk.END, "Struktur und PDF-Extraktion werden gemeinsam mit 'Extraktion testen' geprüft.")
 
-    def _same_pdf(self, left: str, right: str) -> bool:
-        if not left or not right:
-            return False
-        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+    def _rule_test_target(self) -> tuple[str, str, str]:
+        return str(self.draft_path or ""), self.var_key.get().strip(), self.var_pdf.get().strip()
+
+    def _invalidate_rule_test(self, *_args) -> None:
+        self._field_report = None
+        self._proof_ui_generation = self.__dict__.get("_proof_ui_generation", 0) + 1
+        owner = self.__dict__.get("_proof_owner")
+        if owner is not None:
+            owner._invalidate_authoring_test(origin=self)
+        if not getattr(self, "_closed", False) and hasattr(self, "tree_authoring_values"):
+            clear_authoring_result(self, "Auswahl oder Entwurf geändert – bitte Extraktion testen")
+            self._sync_finish_buttons()
+
+    def _on_rule_test(self) -> None:
+        owner = self.__dict__.get("_proof_owner")
+        target = self._rule_test_target()
+        if self._busy or owner is None or not all(target):
+            self._set_status("Bitte Entwurf und eine Test-PDF wählen. Eine laufende Prüfung zuerst abschließen.")
+            return
+        generation = self._proof_ui_generation
+
+        def current():
+            return not self._closed and generation == self._proof_ui_generation and target == self._rule_test_target()
+
+        def completed(result):
+            if self._closed:
+                return
+            self._busy = False
+            self.btn_next.configure(state=tk.NORMAL)
+            self.btn_rule_test.configure(state=tk.NORMAL)
+            if current() and result is not None:
+                render_authoring_result(self, result)
+                self._set_status("Regeltest abgeschlossen. Kontrolliert aktivieren oder im Editor weiterbearbeiten." if result.get("status") == "ready" else "Regeltest fehlgeschlagen. Bitte Felder oder Assay-Abschnitt nacharbeiten.")
+            else:
+                clear_authoring_result(self, "Nachweis nicht aktuell – bitte Extraktion testen")
+                self._set_status("Nachweis nicht aktuell – bitte Extraktion testen.")
+            self._sync_finish_buttons()
+
+        if owner.request_authoring_test(target, origin=self, is_current=current, on_complete=completed):
+            self._busy = True
+            self.btn_next.configure(state=tk.DISABLED)
+            self.btn_rule_test.configure(state=tk.DISABLED)
+            clear_authoring_result(self, "Regeltest läuft …")
+        else:
+            self._set_status("Eine Prüfung läuft bereits. Bitte kurz warten.")
 
     def _finish(self) -> None:
-        if not self.draft_path:
+        if not self.draft_path or self._busy:
             return
         action = self.var_finish_action.get()
         if action == "editor":
@@ -941,77 +979,11 @@ class NewRulesetWizard(WizardUiMixin, tk.Toplevel):
             return
         if action != "activate":
             return
-        pdf_path = self.var_pdf.get().strip()
-        if not self._pdf_ready():
-            messagebox.showwarning(
-                "PDF fehlt",
-                "Der PDF-Nachweis braucht eine erfolgreich geladene PDF.",
-                parent=self,
-            )
+        owner = self.__dict__.get("_proof_owner")
+        if owner is None or not owner.authoring_target_ready(self._rule_test_target(), origin=self):
+            messagebox.showwarning("Regeltest erforderlich", "Bitte zuerst 'Extraktion testen' mit dieser Test-PDF ausführen. Alle konfigurierten Felder müssen erfolgreich extrahiert werden.", parent=self)
             return
-        if not self._all_fields_confirmed():
-            messagebox.showwarning(
-                "Felder unvollständig",
-                "Der PDF-Nachweis ist blockiert, solange nicht jedes konfigurierte Feld "
-                "einen nichtleeren Treffer im PDF-Text hat.",
-                parent=self,
-            )
-            return
-        try:
-            structure = self._rules.validate_draft(self.draft_path)
-        except Exception as exc:
-            messagebox.showerror("Strukturprüfung", str(exc), parent=self)
-            return
-        if not structure.get("ok"):
-            messagebox.showwarning(
-                "Strukturprüfung",
-                "Der PDF-Nachweis ist blockiert, solange die Strukturprüfung Fehler meldet.",
-                parent=self,
-            )
-            return
-        try:
-            mode = self._authoring_mode()
-        except Exception as exc:
-            messagebox.showerror("Art der Änderung", str(exc), parent=self)
-            return
-        reference_pdf = self.var_reference_pdf.get().strip()
-        if mode == "update":
-            if not reference_pdf.lower().endswith(".pdf"):
-                messagebox.showwarning(
-                    "Referenz-PDF fehlt",
-                "Bei einer Änderung der aktiven Regel fehlt die Referenz-PDF. "
-                "Es ist eine zweite, andere PDF nötig, mit der die bisherige Regel funktioniert hat.",
-                    parent=self,
-                )
-                return
-            if self._same_pdf(pdf_path, reference_pdf):
-                messagebox.showwarning(
-                    "Referenz-PDF",
-                    "Die Referenz-PDF muss eine andere Datei sein als die Problem-PDF.",
-                    parent=self,
-                )
-                return
-        try:
-            self._rules.create_authoring_proof(
-                self.var_key.get().strip(),
-                self.draft_path,
-                pdf_path,
-                reference_pdf if mode == "update" else None,
-            )
-        except Exception as exc:
-            message = "Der Entwurf hat die PDF-Prüfung nicht bestanden:\n" f"{exc}"
-            if getattr(self, "_using_fulltext_fallback", False):
-                message += (
-                    "\n\nAssay-Name, Assay-Schlüssel oder die Blocktrennung müssen korrigiert werden. "
-                    "Der vollständige PDF-Text ist nur eine Authoring-Hilfe; der Nachweis ist nicht erfolgreich."
-                )
-                self.var_status.set(
-                    "Nachweis fehlgeschlagen. Assay-Name, Assay-Schlüssel oder die Blocktrennung korrigieren. "
-                    "Kein erfolgreicher Abschluss."
-                )
-            messagebox.showerror("Nachweis fehlgeschlagen", message, parent=self)
-            return
-        self._shutdown("editor")
+        self._shutdown("activate")
 
     def _set_preview_text(self, text: str) -> None:
         if not hasattr(self, "txt_preview"):

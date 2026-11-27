@@ -22,14 +22,6 @@
       "ruleset_file": "Anti-Nucleosomes IgG.json"
     },
     {
-      "assay_key": "(6a74)",
-      "ruleset_file": "Rheumatoid Factor IgA.json"
-    },
-    {
-      "assay_key": "(661f)",
-      "ruleset_file": "Anti-dsDNA-NcX IgG.json"
-    },
-    {
       "assay_key": "(1c9e)",
       "ruleset_file": "ANA Screen IgG.json"
     },
@@ -44,6 +36,70 @@
     {
       "assay_key": "(0437)",
       "ruleset_file": "Anti-DFS70 IgG.json"
+    },
+    {
+      "assay_key": "(5f03)",
+      "ruleset_file": "Anti-TPO IgG.json"
+    },
+    {
+      "assay_key": "(6a74)",
+      "ruleset_file": "Rheumatoid Factor IgA.json"
+    },
+    {
+      "assay_key": "(661f)",
+      "ruleset_file": "Anti-dsDNA-NcX IgG.json"
+    },
+    {
+      "assay_key": "(8750)",
+      "ruleset_file": "Anti-ENA PoolPlus IgG.json"
+    },
+    {
+      "assay_key": "(e9f6)",
+      "ruleset_file": "Anti-Centromeres IgG (e9f6).json"
+    },
+    {
+      "assay_key": "(78ed)",
+      "ruleset_file": "ANA Screen IgG (78ed).json"
+    },
+    {
+      "assay_key": "(1c39)",
+      "ruleset_file": "Anti-DFS70 IgG (1c39).json"
+    },
+    {
+      "assay_key": "(0767)",
+      "ruleset_file": "Anti-Chlamydia trachomatis IgG.json"
+    },
+    {
+      "assay_key": "(9add)",
+      "ruleset_file": "Anti-Chlamydia pneumoniae IgG.json"
+    },
+    {
+      "assay_key": "(2399)",
+      "ruleset_file": "Anti-Chlamydia trachomatis IgA.json"
+    },
+    {
+      "assay_key": "(238a)",
+      "ruleset_file": "Anti-Chlamydia pneumoniae IgA.json"
+    },
+    {
+      "assay_key": "(c5fe)",
+      "ruleset_file": "Anti-Parvovirus B19 IgG.json"
+    },
+    {
+      "assay_key": "(8fab)",
+      "ruleset_file": "Anti-Parvovirus B19 IgM.json"
+    },
+    {
+      "assay_key": "(8bac)",
+      "ruleset_file": "Anti-CCP IgG Ratio.json"
+    },
+    {
+      "assay_key": "(0753)",
+      "ruleset_file": "Anti-ENA ProfilePlus 1 IgG.json"
+    },
+    {
+      "assay_key": "(2d71)",
+      "ruleset_file": "Anti-ENA ProfilePlus 1 IgG (2d71).json"
     }
   ]
 }

@@ -1,6 +1,6 @@
 # PDF Ergebnis-Extractor (Projekt)
 
-- Projektversion: **2.2.0**; Änderungen unter `docs/RELEASE_NOTES_2_2_0.md`, Prüfstand unter `docs/TESTBASELINE.md`
+- Projektversion: **2.0.0**; aktueller Prüf-/Freigabestand unter `docs/TESTBASELINE.md`
 - Windows 11 Zielumgebung
 - `src/` ist Project Root (in PyCharm markieren)
 - Public APIs existieren ausschließlich in `src/<module>/api.py`
@@ -17,33 +17,29 @@
 python test_app_main.py
 ```
 
-Startet die **Analyzer Result Extractor** Desktop-Oberfläche (Sidebar mit Auswertung, Ergebnisse, Statistik, Validierung, Regelwerke, Einstellungen, Diagnose). Primärer Workflow: PDFs verarbeiten, Auto-Import konfigurieren, Ergebnisse und Klärfälle prüfen, Regelwerke validieren.
+Startet die **Analyzer Result Extractor** Desktop-Oberfläche (Sidebar mit Arbeitsübersicht, Prüfplatz, Ergebnisse, Änderungen, Statistik, Regelwerke, Einstellungen, Diagnose). Primärer Workflow: PDFs verarbeiten, Auto-Import konfigurieren, Ergebnisse und Klärfälle prüfen, Regelwerke validieren.
 
-In **Ergebnisse** werden alle Assays eines Berichts gemeinsam angezeigt. **In Validierung prüfen** bzw. **Validierung / Berichtgerät korrigieren** öffnen denselben Arbeitsbereich mit Original-PDF und Messwerten. Dort das konkrete Gerät einmal für den ganzen Quellbericht bestätigen und anschließend jeden Assay mit Initialen und optionalem Kommentar einzeln freigeben. Ein fehlendes Gerät kann direkt hier mit einem unterscheidbaren Namen angelegt werden. Eine Importvoreinstellung ist noch keine Gerätebestätigung.
-
-Ein Gerätewechsel zeigt den bisherigen und neuen Stand sowie den Umfang des gesamten Berichts. Ein Grund ist erforderlich; danach braucht jeder betroffene Assay eine erneute Freigabe. Bereits gespeicherte Validierungen, Ergebnisfassungen und QK-Berichte bleiben erhalten. SQLite ist die verbindliche Ablage. Neue Verarbeitung und Validierung erzeugen keine Excel-Dateien; vorhandene Arbeitsmappen und historische Ausgabepläne bleiben lesbar.
+In **Ergebnisse** werden alle Assays eines Berichts gemeinsam angezeigt. Einzelne Runs können
+mit lokal gespeicherten Operator-Initialen und einem optionalen Kommentar validiert werden.
+Eine bestehende Validation wird nie still überschrieben: Die separate Aktion
+**Validierung korrigieren** legt nach Bestätigung einen neuen, verknüpften Historieneintrag an.
+SQLite ist die verbindliche Ablage für neue Ergebnisse und append-only Validierungen. In **Validierung** stehen das Original-PDF und die Arbeitsliste nebeneinander. Neue Verarbeitung, Erstvalidierung und Korrektur erzeugen oder ändern keine Excel-Dateien. Vorhandene Arbeitsmappen und historische Ausgabepläne bleiben unverändert und lesbar. Historische Excel-Fehler haben in **Diagnose** keine Wiederholungsaktion.
 
 Assay-Tabellen zeigen den vollständigen gespeicherten Namen. Die ausgewählte Ergebnisfassung bestimmt den Namen; eine noch offene Neuanalyse ersetzt ihn nicht. Fehlt ein belegter Name, steht dort **Assayname fehlt**. Auch gleichnamige Assays bleiben getrennt auswählbar. Bei unbekannten Kandidaten ist ein aus der Datei abgeleiteter **Namenshinweis** ausdrücklich als solcher gekennzeichnet.
 
 ### Qualitätskontrolle und PDF-Nachweise
 
-Unter **Einstellungen → Assays & QK** auch vor dem ersten Import den Assay wählen und ein Profil mit einem benannten Level und dessen **IST-Feld** speichern. Gerät, SOLL, MIN/MAX, Datum-/Zeitformat und Westgard sind optionale Ergänzungen. Konfigurationsänderungen brauchen keine Operatorinitialen. Für eine gemeinsame statistische Skala eine Einheit bestätigen oder die Größe unter **Erweitert** ausdrücklich als dimensionslos kennzeichnen. Eine fehlende Einheit kann beim Bearbeiten desselben Profils ergänzt werden.
+Ist die Uhrzeit getrennt extrahiert, können im bestehenden Prüfprofil **Messzeitfeld (optional)** und **Zeitformat** ausdrücklich zugeordnet werden, etwa `ZEIT` mit `%H:%M` oder `%H:%M:%S` (auch `%H%M` ist möglich). Beide Felder bleiben zunächst leer. Ohne Zuordnung gilt der bisherige Datumsweg; bei Zuordnung muss das Datumsformat ohne Uhrzeit sein. Fehlende, unlesbare oder formatwidrige Messzeiten werden mit Grund ausgeschlossen, ohne Ersatz durch Mitternacht oder Importzeit. Gleiche tatsächliche Zeitpunkte bleiben ohne erfundene Reihenfolge. Jede Änderung legt eine neue Profilfassung an; alte Profile und PDF-Nachweise bleiben erhalten.
 
-Ein Profil gilt standardmäßig für den Assay auf allen Geräten. Die Messwerte bleiben trotzdem je physischem Gerät getrennt. Bei Bedarf kann ein neues Profil gerätespezifisch sein; die Bindung eines bestehenden Profils bleibt fest. **Weiteres Profil** übernimmt vorhandene Zuordnungen als bearbeitbare Kopie. Gerätename genügt; SN, LNR und EVA sind optional. Alte Kennungen werden nicht zusammengelegt.
+In **Einstellungen** werden Geräte und benannte Kontrollprofile gepflegt. **Geräte übernehmen** überführt vorhandene Altgeräte ausdrücklich in den ausgewählten SQLite-Speicher; Originaldateien und historische Kennungen bleiben erhalten. Ein verwendbares Gerät braucht einen Namen und mindestens SN, LNR oder EVA. Ein Profil ordnet dem Assay die extrahierten Messdatums- und Kontrollfelder IST/SOLL/MIN/MAX zu und legt Zahlenformat, Einheit, relative QMMA-Grenze und Westgard-Regeln fest. Änderungen erhalten die früheren Fassungen.
 
-Der Entwurf bleibt während der Sitzung beim Wechsel zwischen Profilen, beim Inline-Anlegen eines Geräts und nach Eingabefehlern erhalten. Beim Schließen kann er ausdrücklich **behalten** oder verworfen werden. Behaltene Entwürfe erscheinen mit Namen in derselben Assayübersicht und werden über **Entwurf fortsetzen** wieder geöffnet. Speichern veröffentlicht eine neue vollständige Profilfassung; frühere Fassungen bleiben unverändert.
+Unter **Statistik** werden Kit-Chargen und ihre menschlich validierten Quellen geprüft. Die Kontrollauswahl zeigt QMMA, optionale SD, Befunde und ein Diagramm mit anklickbaren Messpunkten, Vergrößern und Verschieben. QMMA braucht keine SD. Ohne verwendbare SD sind SD-Bänder und Westgard ausdrücklich nicht verfügbar. Eine manuelle SD oder eine bestätigte validierte Referenzserie wird beim Einrichten der Charge eingefroren; Referenzserien liefern Mittelwert und Stichproben-SD. Gleichdatierte Werte ohne belegte zeitliche Reihenfolge werden nicht künstlich zu einer Messfolge verbunden. Das klassische 2-SD-Prüfsignal bleibt aktiv; die Auswahl **1₂s** steuert die Warnanzeige.
 
-Bekannte Datums-/Zeitangaben wie `14.11.2026`, `2026-11-14`, `8:05` und `08:05:00` werden ohne Formatcode erkannt. Leere optionale Formatfelder bedeuten Automatik; vorhandene bewusste Overrides bleiben erhalten. Ein Tag erhält keine erfundene Uhrzeit und Minuten keine ergänzten Sekunden. Unbekannte oder widersprüchliche Zeiten beeinflussen die zeitabhängigen Funktionen; ein gültiger IST-Wert kann weiterhin in Mittelwert und empirische SD eingehen. Unklare Zahlenschreibweisen aus unbekannter Herkunft brauchen eine bewusste Komma-/Punkteinstellung; belegte unveränderte Originalexportfelder haben einen eingefrorenen Dezimalnachweis.
+Eine SD-Referenz muss zur belegten Messwertdefinition und Einheit gehören. Bei einer anderen Einheit, IST-Feldzuordnung oder Zahlenschreibweise wird die alte SD mit sichtbarem Grund gesperrt; QMMA bleibt unabhängig verfügbar. Eine bewusst neu eingegebene manuelle SD erhält den Bezug zum aktuellen Profil. Reine Namensänderungen sowie Datums-, Regel-, SOLL- oder MIN/MAX-Anpassungen sperren eine ansonsten passende SD nicht. Nicht belegbare Alt-Referenzen werden nicht umgedeutet; frühere PDF-Nachweise bleiben unverändert.
 
-Herstellergrenzen aus MIN/MAX und aktivierbare Einzelwert-Prozentgrenzen sind getrennte Grenzarten. Die Prozentgrenzen verwenden je Level dessen SOLL: `SOLL × (1 ± p / 100)`. Sie sind unabhängig von der bisherigen relativen QMMA-Schwelle, SD und Westgard. Eine Grenzüberschreitung allein entfernt den Messwert nicht aus der Statistik. Bestehende QMMA-Grenzen werden nicht automatisch in die neue Prozentkonfiguration übernommen; die Konfiguration bestätigt keine vollständige Rili-BÄK-Konformität.
+**Mit PDF abschließen** verlangt eine bewusst gewählte neuere validierte Nachfolgecharge. Analyse und PDF werden gemeinsam als unveränderlicher Nachweis gespeichert. Jede Kontrolle beginnt auf einer eigenen Seite mit Diagramm, kompakten Kennzahlen und ausschließlich ihren Einzelwerten: Messwert, Datum, tatsächlich erfasste Uhrzeit, Anwender und menschlicher Validierer samt Validierungszeit in UTC. Lange Tabellen werden für dieselbe Kontrolle fortgesetzt. Ohne erfasste Uhrzeit steht **Nicht erfasst**; fehlende oder widersprüchliche Anwender-/Validierungsnachweise werden sichtbar benannt. Anwender und Validierer werden nicht aus den Initialen des Chargenabschlusses abgeleitet.
 
-Unter **Statistik** zeigen die Kontrollserien je Gerät Anzahl, Mittelwert, empirische Stichproben-SD (n−1), VK und die jeweils verfügbaren unabhängigen Bewertungen. SOLL wird erst für QMMA, MIN/MAX erst für Herstellergrenzen benötigt. Westgard ist bei neuen Profilen ausgeschaltet; inaktive Regelblöcke erscheinen im Standardbericht und Diagramm nicht. QMMA und empirische Kennzahlen brauchen keine freigegebene SD-Referenz. Für Westgard muss eine manuelle SD oder bestätigte Referenzserie mit passender Messwertdefinition, Zahlenschreibweise und Einheit belegt sein. Eine unpassende oder nicht belegbare Referenz bleibt mit Grund gesperrt. Die empirische SD erzeugt keine neue Westgard-Referenz. Das Diagramm verwendet die eingefrorenen Werte und Grenzen; Messpunkte können angeklickt, vergrößert und verschoben werden.
-
-**Abschluss prüfen** bereitet aus dem vollständigen Nutzungsverlauf eine unverbindliche Modell-/PDF-Vorschau vor. Ein zeitlich sicher späterer Nutzungszeuge einer anderen Kit-Charge kann auch unvalidiert oder statistisch ungeeignet sein; eine globale Chargenreihenfolge wird daraus nicht abgeleitet. Vorschau und **Später** schreiben nichts. Erst die abschließende Bestätigung speichert exakt das vorbereitete Modell und PDF gemeinsam. Geänderte Quellen, Profilfassungen oder Auswahlkontexte blockieren eine veraltete Vorschau.
-
-Der Standardausdruck **KONTROLLPROBENEINZELMESSUNG** ist kompakt: A4 mit Stammdaten, Diagramm und rechter Legende, Kennzahlen, Messwerttabelle sowie leeren Unterschriftsfeldern. Datum und tatsächliche Uhrzeit stehen in einer Zeile. Fortsetzungen wiederholen die Zuordnung und Tabellenköpfe; ein weiteres Level kann mit vollständigem eigenem Kopf, Diagramm und Kennzahlen auf derselben Seite beginnen. Ausschlüsse, Grenzüberschreitungen und Westgard-Warnungen bleiben positionsbezogen sichtbar. Technische Hash-/Tokenlisten und wiederholte Einzelprobenbelege werden standardmäßig nicht mitgedruckt; vollständige Rohwerte, Identitäten und gebundene Validierungen bleiben im digitalen Analysemodell erhalten. Der PDF-Fuß nennt dessen Modellkennung. Anwender stammt aus der Extraktion; Validierer und Abschlussinitialen werden davon getrennt behandelt und ersetzen keinen Anwender.
-
-**Nachweisfassungen → PDF speichern** exportiert die archivierten Originalbytes an einen neuen Dateinamen. **Erläuterungen und zusätzliche Nachweise mitdrucken** ist standardmäßig aus und gilt bewusst für den einzelnen Export. Bei Auswahl kommen vollständige punktbezogene Rohwert-/Quell-/Validierungsnachweise, Methoden und Regelbefunde hinzu; diese Druckfassung darf mehr Seiten benötigen. Nach erfolgreichem Export wird die Option wieder ausgeschaltet, bei einem Fehler bleibt sie für einen erneuten Versuch erhalten. Alte Modelle erhalten dabei keine nachberechneten neuen Kennzahlen, gespeicherte Modelle und Original-PDFs bleiben unverändert. Vorhandene Zieldateien werden nicht überschrieben. Späte Messwerte erfordern eine begründete Wiederöffnung; frühere Nachweise bleiben lesbar.
+**Nachweisfassungen** zeigt frühere Auswertungen. **PDF speichern** exportiert standardmäßig deren ursprüngliche Bytes an einen neuen Dateinamen. Die zunächst ausgeschaltete Option **Erläuterungen zur Diagrammauswertung mitdrucken** erstellt zusätzlich eine erweiterte Druckfassung aus dem gespeicherten Analysemodell. Legenden, Interpretation und Verfahrensdetails stehen nur in deren Anhang; gespeicherte Nachweise und Berechnungen bleiben unverändert. Bestehende Dateien werden nicht überschrieben. Späte Messwerte benötigen eine begründete Wiederöffnung; alte Nachweise bleiben lesbar. Der Bericht heißt **Validierte Kit-Chargen-Auswertung** und ist kein Nachweis vollständiger Rili-BÄK-Konformität. Die statistischen Befunde verändern keine menschliche Ergebnisvalidierung.
 
 Alltagstauglicher Ablauf: `DOCUMENTATION/13_ui_v21_user_workflow.md`.
 
@@ -64,9 +60,9 @@ python test_app_main.py
 python rule_editor_main.py
 ```
 
-Visueller Regelwerk-Editor inkl. Inventar, Drafts, Nacharbeit und Lifecycle (Aktiv / Draft / Inaktiv).
+Visueller Regelwerk-Editor inkl. Inventar, Drafts, Nacharbeit und Lifecycle (Aktiv / Draft / Inaktiv). In **Regelwerke** läuft derselbe Arbeitsbereich direkt in der Desktop-Oberfläche; `rule_editor_main.py` und `ARE_START_RULE_EDITOR=1` öffnen nur dessen eigenständigen Fensterrahmen.
 
-Der geladene Entwurf wird zunächst mit **Mit PDFs prüfen** geprüft. **Prüfung erfolgreich – noch nicht aktiviert** ist ein Nachweis für genau diesen Entwurf und diese PDF-Auswahl. Updates brauchen zusätzlich eine eigenständige passende Referenz. Änderungen an Entwurf, PDF-Auswahl oder aktiver Bindung entwerten den Nachweis. Erst eine abschließende Aktivierungsbestätigung veröffentlicht den geprüften Stand; Proof-only und **Nein** ändern keine aktive Regel. Ein Update archiviert die exakten bisherigen Regelbytes.
+**Änderungen:** Ein bekannter Dokumentname mit neuer Herstellerkennung hält den gesamten betroffenen PDF-Import vor der Ergebnisausgabe an, auch bei mehreren Assays. Der Name ist nur ein Vorschlag, kein Alias. Den bisherigen Assay ausdrücklich wählen und für die neue Kennung ein eigenes leeres oder kopiertes Regelwerk anlegen. Eine frei gewählte passende Test-PDF genügt; eine geeignete zweite lokale Quelle wird automatisch geprüft. Ohne geeignete zweite Quelle bleibt der Hinweis gelb, eine fehlgeschlagene Prüfung blockiert. Erst die ausdrückliche Aktivierung startet den Nachlauf ausschließlich für die betroffenen ursprünglichen Importaufträge. Fehlende/geänderte PDFs oder weitere offene Kennungen bleiben sichtbar offen; **Betroffene PDFs erneut verarbeiten** wiederholt nur noch nicht erfolgreiche Aufträge. Bereits fertige Ergebnisse und alte Regeln bleiben unverändert. Bei einem alten Direktimport ohne Queueauftrag die unveränderte PDF über den normalen Import erneut einreichen.
 
 ### Headless Dauerbetrieb
 
@@ -207,8 +203,13 @@ python rule_editor_main.py
 
 Editor-Funktionen (Auszug):
 
-- Inventar als Startseite und dreispaltiger Arbeitsbereich: Feldliste, Beispielbericht, Feldeinstellungen
-- Geführter Anlage-Wizard, Regex-Bibliothek, Markierungs-Ansicht, Undo/Redo und Auto-Save; seltene Funktionen unter `Erweiterte Optionen`
+- Inventar als Startseite und responsiver Arbeitsbereich: Feldliste links, Feldeinstellungen in der Mitte, Test-PDF und Prüfergebnis rechts (bei wenig Platz darunter)
+- Geführter Anlage-Wizard, Regex-Bibliothek, Markierungs-Ansicht, Undo/Redo und Auto-Save; seltene Funktionen unter `Regeldetails`
+- **Regel testen** prüft genau einen gewählten Testbericht mit dem aktuellen Entwurf und sucht automatisch eine geeignete zweite lokale PDF. Die extrahierten Feldwerte und beide Prüfergebnisse werden angezeigt; der Test schreibt keine Ergebnisse.
+- Fehlt eine geeignete zweite PDF, bleibt **Einmal geprüft – Zweitprüfung noch offen** gelb sichtbar; eine ausdrückliche Aktivierung ist trotzdem möglich. Fehler der Erstprüfung oder einer geeigneten Zweitprüfung blockieren die Aktivierung. Änderungen am Entwurf oder an der PDF-Auswahl erfordern einen neuen Test; aktiviert wird niemals automatisch.
+- **Entwurf verwerfen** entfernt nach einer einzigen Bestätigung nur den konkret gewählten gespeicherten Entwurf und seinen eigenen Prüfnachweis, auch wenn dieselbe Kennung bereits aktiv ist. Ungespeicherte Eingaben dieses Entwurfs gehen dabei ebenfalls verloren; bei Abbrechen bleibt beides erhalten. Aktive Regeln, Index, Historie und Papierkorb bleiben unverändert.
+- Textvorschau, Regeltest und neuer Import trennen denselben eindeutig erkannten PDF-Abschnitt anhand der Herstellerkennung (unabhängig von deren Groß-/Kleinschreibung und vom frei gewählten Anzeigenamen). Mehr-Assay-Berichte bleiben getrennt. Ältere V2-Prüfnachweise ohne diese Abschnittsbindung oder nach einer relevanten Änderung bekannter Sonderkennungen müssen neu geprüft werden; gespeicherte Regeln, Ergebnisse und Archiv-PDFs werden nicht verändert.
+- Der direkte Regelarbeitsplatz zeigt links ein gemeinsames Feld-/Markierungsraster, mittig Assay-Text oder die echte mehrseitige Original-PDF und rechts Prüfung, Feldformular und Funktionen. Der Ansichtswechsel erhält Eingaben und Position; ein Dateiwechsel entfernt alte Treffer. Im integrierten Editor wird dafür nur vorübergehend die volle Arbeitsfläche genutzt; **Zur Übersicht** stellt die Navigation wieder her. Der modale **Regex-Baukasten** übernimmt den aktuellen Stand ausschließlich ins aufrufende Feldformular, nicht in die gespeicherte Regel.
 - Draft-vs-Active-Diff vor Aktivierung
 
 ### Inventar und Lifecycle (AP-16C / AP-16D)
@@ -268,7 +269,7 @@ Inaktive Regelwerke werden nicht direkt bearbeitet; stattdessen Kopie nach `rule
 
 ## Build (Feldversuch-Paket)
 
-Das Windows-Release enthält das geprüfte portable ZIP samt Prüfsummen und Buildnachweis. Für einen eigenen Windows-Build ohne Python auf dem Ziel-PC gilt:
+Kanonischer portabler Build für Windows ohne Python auf dem Ziel-PC:
 
 ```powershell
 python packaging/build_onedir.py
@@ -285,9 +286,7 @@ Entry der gebündelten EXE: `test_app_main.py` (Produkt-Shell, nicht mehr `gui_m
 
 Der Builder prüft zuerst die vollständige Testsuite und beendet sich bei Fehlern vor Bereinigung oder Build. Die Produktversion stammt aus `pyproject.toml`; `build-info.json` neben der EXE dokumentiert Version, tatsächlichen Ausgangscommit/Arbeitsbaumzustand, Eingabe-Fingerabdruck und Abhängigkeiten. Der Fenstertitel zeigt die geladene Version. `ARE_HOME` beeinflusst den Datenordner, nicht die Produktversion. Ein alter Build ist kein Beleg für den aktuellen Prüfstand.
 
-Auf dem Ziel-PC: ZIP vollständig entpacken, `AnalyzerResultExtractorV2.exe` starten. `_internal` und `rules` gehören zum Paket.
-
-**Bestehende portable Installation aktualisieren:** Anwendung schließen und den bisherigen Ordner sichern. EXE, `_internal` und `build-info.json` durch die neue Fassung ersetzen. Vorhandene `rules`, `storage`, `jobs`, `input` und `output` einschließlich SQLite und eingefrorener Jobbelege behalten; diese enthalten Konfiguration, eigene Regeln und Quellnachweise. Ein neues leeres Projekt ist kein Ersatz für diese Daten.
+Auf dem Ziel-PC: ZIP entpacken, `AnalyzerResultExtractorV2.exe` starten.
 Optional `$env:ARE_HOME` auf den entpackten Ordner setzen.
 
 Anleitung: `docs/AP17A_FIELD_TRIAL_PACKAGE.md`

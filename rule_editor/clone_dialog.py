@@ -24,7 +24,7 @@ class CloneRulesetDialog(tk.Toplevel):
         configure_desktop_theme(self)
         self.title("Als neue Regel duplizieren")
         self.resizable(False, False)
-        self.transient(master)
+        self.transient(master.winfo_toplevel())
         self.grab_set()
 
         self._rules = rules

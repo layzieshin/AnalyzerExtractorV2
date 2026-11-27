@@ -5,7 +5,7 @@ import socket
 from pathlib import Path
 from typing import Any, Callable
 
-from src.jobcontroller.api import get_job_evidence, submit
+from src.jobcontroller.api import get_job_evidence, submit, verify_completed_job
 from src.jobqueue.api import (
     claim_next_job,
     enqueue_pdf_job,
@@ -13,9 +13,10 @@ from src.jobqueue.api import (
     mark_job_done,
     mark_job_failed,
     mark_job_pending,
-    recover_stale_jobs,
+    reconcile_completed_job,
     retry_failed_job,
     verify_job_content_sha256,
+    release_job_attempt,
 )
 from src.ingestion.api import mark_source_changed_failure, reconcile_processing_for_job
 from src.runtime.api import load_runtime_config
@@ -75,8 +76,8 @@ def enqueue_pdf(
     return _as_processing_job(job)
 
 
-def list_processing_jobs(project_root: str | Path) -> list[ProcessingJob]:
-    return [_as_processing_job(job) for job in list_jobs(str(project_root))]
+def list_processing_jobs(project_root: str | Path, *, create_missing: bool = True) -> list[ProcessingJob]:
+    return [_as_processing_job(job) for job in list_jobs(str(project_root), create_missing=create_missing)]
 
 
 def retry_failed(
@@ -99,6 +100,10 @@ def process_next_pending(
     *,
     worker_id: str | None = None,
     submit_func: SubmitFunc | None = None,
+    job_id: str | None = None,
+    retry_failed: bool = False,
+    expected_sha256: str | None = None,
+    expected_pdf_path: str | None = None,
 ) -> ProcessingResult:
     root = Path(project_root)
     wid = worker_id or default_worker_id()
@@ -108,18 +113,37 @@ def process_next_pending(
         "claim_lock_ttl_s": config.queue_claim_lock_ttl_s,
         "max_attempts": config.queue_max_attempts,
     }
-    recover_stale_jobs(
-        str(root),
-        config.queue_processing_ttl_s,
-        claim_lock_ttl_s=config.queue_claim_lock_ttl_s,
-    )
-    job = claim_next_job(str(root), wid, **queue_kwargs)
+    if job_id is not None and expected_sha256 is not None:
+        evidence = get_job_evidence(root, job_id, expected_pdf_sha256=expected_sha256,
+                                    expected_pdf_path=expected_pdf_path, include_context=False)
+        if evidence is not None and evidence.status == "DONE":
+            try:
+                marked = reconcile_completed_job(str(root), job_id, expected_sha256=expected_sha256,
+                    expected_pdf_path=expected_pdf_path, store_path=config.sqlite_path, device_id=config.device_id,
+                    claim_lock_ttl_s=config.queue_claim_lock_ttl_s)
+            except (ValueError, RuntimeError) as exc:
+                return ProcessingResult(False, job_id=job_id, pdf_path=expected_pdf_path or "",
+                    queue_status="FAILED", submit_status="FAILED", message=str(exc))
+            if marked is not None:
+                reconcile_processing_for_job(str(root), job_id, marked.status)
+                return ProcessingResult(False, job_id=job_id, pdf_path=marked.pdf_path,
+                                        queue_status="DONE", submit_status="SKIPPED", message="already_done")
+    job = claim_next_job(str(root), wid, **queue_kwargs, job_id=job_id, retry_failed=retry_failed,
+                         expected_sha256=expected_sha256, expected_pdf_path=expected_pdf_path,
+                         store_path=config.sqlite_path, device_id=config.device_id, managed_attempt=True)
     if job is None:
-        return ProcessingResult(processed=False, message="no_pending_jobs")
+        return ProcessingResult(processed=False, job_id=job_id or "", message="selected_job_not_pending" if job_id else "no_pending_jobs")
 
-    lock_kwargs = {"claim_lock_ttl_s": config.queue_claim_lock_ttl_s}
     try:
-        verify_job_content_sha256(str(root), job.job_id, **lock_kwargs)
+        return _process_claimed_job(root, config, job, wid, effective_submit, expected_sha256)
+    finally:
+        release_job_attempt(job.attempt_id)
+
+
+def _process_claimed_job(root, config, job, wid, effective_submit, expected_sha256):
+    lock_kwargs = {"claim_lock_ttl_s": config.queue_claim_lock_ttl_s, "attempt_id": job.attempt_id}
+    try:
+        verify_job_content_sha256(str(root), job.job_id, claim_lock_ttl_s=config.queue_claim_lock_ttl_s)
     except Exception as e:
         marked = mark_job_failed(
             str(root),
@@ -138,16 +162,22 @@ def process_next_pending(
             message=marked.last_error,
         )
     try:
+        # Keep ordinary/injected legacy submit contracts unchanged. An exact
+        # case retry must carry the claimed identity to the real parser copy;
+        # never fall back to a path-only call after a TypeError.
+        source_binding = {"expected_sha256": job.content_sha256} if expected_sha256 is not None or job.identity_binding else {}
+        bound = job.identity_binding
         res = effective_submit(
             job.pdf_path,
             str(root),
             output_mode="sqlite",
-            sqlite_path=config.sqlite_path,
+            sqlite_path=bound["store_path"] if bound else config.sqlite_path,
             lock_ttl_s=config.pipeline_lock_ttl_s,
             sqlite_busy_timeout_ms=config.sqlite_busy_timeout_ms,
             sqlite_retry_count=config.sqlite_retry_count,
             sqlite_retry_sleep_s=config.sqlite_retry_sleep_s,
-            device_id=config.device_id,
+            device_id=bound["device_id"] if bound else config.device_id,
+            **source_binding,
         )
     except Exception as e:
         marked = mark_job_failed(
@@ -170,6 +200,14 @@ def process_next_pending(
     submit_status = str(getattr(res, "status", ""))
     details = getattr(res, "details", None)
     detail_map = details if isinstance(details, dict) else {}
+
+    if job.identity_binding and (submit_status == "DONE" or
+            (submit_status == "SKIPPED" and detail_map.get("reason") == "already_done")):
+        binding = job.identity_binding
+        receipt = verify_completed_job(root, job.job_id, expected_sha256=binding["content_sha256"],
+            expected_pdf_path=binding["pdf_path"], store_path=binding["store_path"], device_id=binding["device_id"])
+        if not receipt["complete"]:
+            submit_status, detail_map = "FAILED", {"error": receipt["reason"]}
 
     if submit_status == "DONE":
         marked = mark_job_done(str(root), job.job_id, worker_id=wid, **lock_kwargs)

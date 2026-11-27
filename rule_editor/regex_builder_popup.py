@@ -15,11 +15,15 @@ class RegexBuilderPopup(tk.Toplevel):
         assay_text: str,
         selection: dict[str, object] | None,
         on_accept: Callable[[str, dict[str, Any] | None], None],
+        field_key: str = "",
     ) -> None:
         super().__init__(master)
-        self.title("Regex-Baustein")
-        self.geometry("800x620")
-        self.transient(master)
+        self.title("Regex-Baukasten")
+        width, height = min(1100, max(760, master.winfo_toplevel().winfo_width() - 20)), min(590, max(510, master.winfo_toplevel().winfo_height() - 40))
+        self.geometry(f"{width}x{height}")
+        self.minsize(760, 510)
+        self._field_key = field_key
+        self.transient(master.winfo_toplevel())
         self._rules = rules
         self._assay_text = assay_text
         self._on_accept = on_accept
@@ -46,10 +50,11 @@ class RegexBuilderPopup(tk.Toplevel):
         self.var_value_min_len = tk.StringVar(value="")
         self.var_value_max_len = tk.StringVar(value="")
         self.var_expected = tk.StringVar(value=str(spec.get("expected_value", "")))
-        self.var_use_search_from = tk.BooleanVar(value=initial_mode != "none")
+        self.var_use_search_from = tk.BooleanVar(value=self.var_search_anchor_mode.get() != "none")
 
         self._build_ui()
         self._build_regex()
+        self.grab_set()
 
     def _initial_spec(self, selection: dict[str, object] | None) -> dict[str, Any]:
         if not selection:
@@ -65,138 +70,123 @@ class RegexBuilderPopup(tk.Toplevel):
         return spec if isinstance(spec, dict) else {"value_type": "auto"}
 
     def _build_ui(self) -> None:
-        intro = tk.Label(
-            self,
-            text=(
-                "Optionale Bausteine setzen. Der Builder erzeugt nur einen Regex; "
-                "im Ruleset wird keine Baustein-Spec gespeichert. "
-                "Min./Max. Wertlaenge begrenzen den extrahierten Wert."
-            ),
-            anchor="w",
-            justify="left",
-            wraplength=720,
-            fg="#444",
-        )
-        intro.pack(fill="x", padx=10, pady=(10, 6))
-
-        search_frame = tk.LabelFrame(self, text="Suchbereich")
-        search_frame.pack(fill="x", padx=10, pady=(0, 8))
-        search_frame.columnconfigure(1, weight=1)
-
-        tk.Label(search_frame, text="Modus").grid(row=0, column=0, sticky="w", padx=(6, 4), pady=(6, 4))
-        ttk.Combobox(
-            search_frame,
-            textvariable=self.var_search_anchor_mode,
-            values=["none", "after", "line"],
-            width=12,
-            state="readonly",
-        ).grid(row=0, column=1, sticky="w", pady=(6, 4))
-        tk.Checkbutton(
-            search_frame,
-            text="als search_from uebernehmen",
-            variable=self.var_use_search_from,
-        ).grid(row=0, column=2, columnspan=2, sticky="w", padx=(8, 6), pady=(6, 4))
-
-        tk.Label(search_frame, text="Suchwort/Marker").grid(row=1, column=0, sticky="w", padx=(6, 4), pady=(0, 4))
-        tk.Entry(search_frame, textvariable=self.var_search_anchor).grid(
-            row=1, column=1, sticky="we", pady=(0, 4)
-        )
-        tk.Checkbutton(
-            search_frame,
-            text="als Regex",
-            variable=self.var_search_anchor_regex,
-        ).grid(row=1, column=2, sticky="w", padx=(8, 6), pady=(0, 4))
-        tk.Label(search_frame, text="Zeile").grid(row=1, column=3, sticky="e", padx=(8, 4), pady=(0, 4))
-        tk.Entry(search_frame, textvariable=self.var_line_index, width=10).grid(
-            row=1, column=4, sticky="w", pady=(0, 4), padx=(0, 6)
-        )
-
-        form = tk.LabelFrame(self, text="Regex-Wertgrenzen")
-        form.pack(fill="x", padx=10, pady=(0, 8))
-        form.columnconfigure(1, weight=1)
-        form.columnconfigure(4, weight=1)
-
-        self._entry_row(form, 0, "Zeile enthaelt", self.var_line_contains, self.var_line_contains_regex)
-        self._entry_row(form, 1, "Zeile beginnt", self.var_line_startswith, self.var_line_startswith_regex)
-
-        self._marker_row(
-            form,
-            2,
-            "Nach Marker",
-            self.var_left_marker,
-            self.var_left_occurrence,
-            self.var_left_regex,
-        )
-        self._marker_row(
-            form,
-            3,
-            "Vor Marker",
-            self.var_right_marker,
-            self.var_right_occurrence,
-            self.var_right_regex,
-        )
-
-        tk.Label(form, text="Werttyp").grid(row=4, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
-        ttk.Combobox(
-            form,
-            textvariable=self.var_value_type,
-            values=["auto", "text", "token", "decimal", "range", "value_with_unit", "asy_filename", "validation_status"],
-            width=20,
-            state="readonly",
-        ).grid(row=4, column=1, sticky="w", pady=(0, 6))
-        tk.Label(form, text="Treffer Nr.").grid(row=4, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_match_index, width=8).grid(row=4, column=3, sticky="w", pady=(0, 6))
-
-        tk.Label(form, text="Min. Wertlaenge").grid(row=5, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_value_min_len, width=8).grid(row=5, column=1, sticky="w", pady=(0, 6))
-        tk.Label(form, text="Max. Wertlaenge").grid(row=5, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_value_max_len, width=8).grid(row=5, column=3, sticky="w", pady=(0, 6))
-
-        tk.Label(form, text="Erwartet").grid(row=6, column=0, sticky="w", padx=(6, 4), pady=(0, 6))
-        tk.Entry(form, textvariable=self.var_expected).grid(row=6, column=1, columnspan=4, sticky="we", pady=(0, 6), padx=(0, 6))
-
-        btns = tk.Frame(self)
-        btns.pack(fill="x", padx=10, pady=(0, 8))
-        tk.Button(btns, text="Regex bauen", command=self._build_regex).pack(side="left")
-        tk.Button(btns, text="Testen", command=self._test_regex).pack(side="left", padx=(6, 0))
-        tk.Button(btns, text="Uebernehmen", command=self._accept).pack(side="left", padx=(6, 0))
-        tk.Button(btns, text="Schliessen", command=self.destroy).pack(side="right")
-
-        self.txt_result = tk.Text(self, wrap="word", height=14)
-        self.txt_result.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.txt_result.configure(state="disabled")
-
-    def _entry_row(self, parent: tk.Widget, row: int, label: str, var: tk.StringVar, regex_var: tk.BooleanVar) -> None:
-        tk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(6, 4), pady=(6 if row == 0 else 0, 4))
-        tk.Entry(parent, textvariable=var).grid(
-            row=row,
-            column=1,
-            columnspan=3,
-            sticky="we",
-            pady=(6 if row == 0 else 0, 4),
-        )
-        tk.Checkbutton(parent, text="als Regex", variable=regex_var).grid(
-            row=row,
-            column=4,
-            sticky="w",
-            padx=(8, 6),
-            pady=(6 if row == 0 else 0, 4),
-        )
-
-    def _marker_row(
-        self,
-        parent: tk.Widget,
-        row: int,
-        label: str,
-        marker_var: tk.StringVar,
-        occurrence_var: tk.StringVar,
-        regex_var: tk.BooleanVar,
-    ) -> None:
-        tk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(6, 4), pady=(0, 4))
-        tk.Entry(parent, textvariable=marker_var).grid(row=row, column=1, sticky="we", pady=(0, 4))
-        tk.Label(parent, text="Vorkommen").grid(row=row, column=2, sticky="w", padx=(8, 4), pady=(0, 4))
-        tk.Entry(parent, textvariable=occurrence_var, width=8).grid(row=row, column=3, sticky="w", pady=(0, 4))
-        tk.Checkbutton(parent, text="als Regex", variable=regex_var).grid(row=row, column=4, sticky="w", padx=(8, 6), pady=(0, 4))
+        from interfaces.tk.widgets.common import Card
+        from .toolbar import _configure_button_styles
+        _configure_button_styles(self)
+        style = ttk.Style(self)
+        compact = self.master.winfo_toplevel().winfo_height() < 650 or self.master.winfo_toplevel().winfo_width() < 1000
+        size = 8 if compact else 9
+        style.configure("Builder.TLabel", background="#ffffff", foreground="#486272", font=("Segoe UI", size))
+        style.configure("BuilderTitle.TLabel", background="#ffffff", foreground="#185a71", font=("Segoe UI", 9, "bold"))
+        style.configure("Builder.TEntry", padding=(4, 2))
+        style.configure("Builder.TCombobox", padding=(4, 2))
+        style.configure("Builder.TCheckbutton", font=("Segoe UI", size), padding=0)
+        self.configure(background="#f1f5f8")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+        header = ttk.Frame(self, style="CardInner.TFrame", padding=(14, 8))
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text=f"REGELWERKSTATT · FELD {self._field_key}", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Regex-Baukasten", style="SectionTitle.TLabel").grid(row=1, column=0, sticky="w")
+        ttk.Button(header, text="×", command=self.destroy, width=0, style="RuleSuite.Secondary.TButton").grid(row=0, column=1, rowspan=2, sticky="e")
+        inside = ttk.Frame(self, style="Content.TFrame", padding=(10, 6))
+        inside.grid(row=1, column=0, sticky="nsew")
+        inside.columnconfigure((0, 1), weight=1, uniform="groups")
+        self._builder_inputs = {}
+        def group(title, row, column):
+            card = Card(inside, rounded=True, padding=8)
+            card.body.pack_configure(padx=8, pady=(3, 3) if compact else (6, 8))
+            card.grid(row=row, column=column, sticky="nsew", padx=(0, 6) if column == 0 else 0, pady=(0, 6))
+            card.body.columnconfigure((0, 1), weight=1, uniform="pair")
+            ttk.Label(card.body, text=title, style="BuilderTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 1 if compact else 3))
+            return card.body
+        def field(parent, label, variable, name, row, column=0, span=1, values=None):
+            cell = ttk.Frame(parent, style="CardInner.TFrame")
+            cell.grid(row=row, column=column, columnspan=span, sticky="ew", padx=(0, 6) if column == 0 and span == 1 else 0, pady=(0, 1 if compact else 3))
+            cell.columnconfigure(0, weight=1)
+            ttk.Label(cell, text=label, style="Builder.TLabel").grid(row=0, column=0, sticky="w")
+            control = ttk.Combobox(cell, textvariable=variable, values=values, state="readonly", width=1, font=("Segoe UI", size), style="Builder.TCombobox") if values else ttk.Entry(cell, textvariable=variable, width=1, font=("Segoe UI", size), style="Builder.TEntry")
+            control.grid(row=1, column=0, sticky="ew")
+            self._builder_inputs[name] = control
+            return control
+        def flag(parent, text, variable, name, row, column=1, span=1):
+            control = ttk.Checkbutton(parent, text=text, variable=variable, style="Builder.TCheckbutton")
+            control.grid(row=row, column=column, columnspan=span, sticky="w", pady=(0, 2))
+            self._builder_inputs[name] = control
+            return control
+        mode_labels = {"none": "Gesamter Text", "after": "Nach Textmarker", "line": "Ab Zeile"}
+        type_labels = {"auto": "Automatisch", "text": "Text", "token": "Token", "decimal": "Dezimalzahl",
+                       "range": "Bereich", "value_with_unit": "Wert mit Einheit", "asy_filename": "ASY-Dateiname", "validation_status": "Validierungsstatus"}
+        self.var_search_mode_label = tk.StringVar(master=self, value=mode_labels.get(self.var_search_anchor_mode.get(), "Gesamter Text"))
+        self.var_value_type_label = tk.StringVar(master=self, value=type_labels.get(self.var_value_type.get(), "Automatisch"))
+        self.var_search_anchor_mode.trace_add("write", lambda *_: self.var_search_mode_label.set(mode_labels.get(self.var_search_anchor_mode.get(), "Gesamter Text")))
+        self.var_value_type.trace_add("write", lambda *_: self.var_value_type_label.set(type_labels.get(self.var_value_type.get(), "Automatisch")))
+        search = group("01 · Suchbereich", 0, 0)
+        mode = field(search, "Modus", self.var_search_mode_label, "search_anchor_mode", 1, values=tuple(mode_labels.values()))
+        mode.bind("<<ComboboxSelected>>", lambda _event: self.var_search_anchor_mode.set(next(key for key, value in mode_labels.items() if value == self.var_search_mode_label.get())))
+        field(search, "Zeile", self.var_line_index, "line_index", 1, 1)
+        anchor = ttk.Frame(search, style="CardInner.TFrame")
+        anchor.grid(row=2, column=0, columnspan=2, sticky="ew")
+        anchor.columnconfigure(0, weight=1)
+        field(anchor, "Suchwort / Marker", self.var_search_anchor, "search_anchor", 0)
+        flag(anchor, "als Regex", self.var_search_anchor_regex, "search_anchor_is_regex", 0)
+        flag(search, "Suchbereich als search_from übernehmen", self.var_use_search_from, "use_search_from", 3, 0, 2)
+        filters = group("02 · Zeilenfilter", 0, 1)
+        for row, label, variable, check, name in ((1, "Zeile enthält", self.var_line_contains, self.var_line_contains_regex, "line_contains"),
+                                                (2, "Zeile beginnt mit", self.var_line_startswith, self.var_line_startswith_regex, "line_startswith")):
+            cell = ttk.Frame(filters, style="CardInner.TFrame")
+            cell.grid(row=row, column=0, columnspan=2, sticky="ew")
+            cell.columnconfigure(0, weight=1)
+            field(cell, label, variable, name, 0)
+            flag(cell, "als Regex", check, name + "_is_regex", 0)
+        markers = group("03 · Begrenzende Marker", 1, 0)
+        for row, label, variable, occurrence, check, name in ((1, "Nach Marker", self.var_left_marker, self.var_left_occurrence, self.var_left_regex, "left_marker"),
+                                                             (2, "Vor Marker", self.var_right_marker, self.var_right_occurrence, self.var_right_regex, "right_marker")):
+            cell = ttk.Frame(markers, style="CardInner.TFrame")
+            cell.grid(row=row, column=0, columnspan=2, sticky="ew")
+            cell.columnconfigure((0, 1), weight=1, uniform="marker")
+            field(cell, label, variable, name, 0)
+            field(cell, "Vorkommen", occurrence, name + "_occurrence", 0, 1)
+            flag(cell, "als Regex", check, name + "_is_regex", 0, 2)
+        value = group("04 · Wert und Erwartung", 1, 1)
+        value_type = field(value, "Werttyp", self.var_value_type_label, "value_type", 1, values=tuple(type_labels.values()))
+        value_type.bind("<<ComboboxSelected>>", lambda _event: self.var_value_type.set(next(key for key, label in type_labels.items() if label == self.var_value_type_label.get())))
+        field(value, "Treffer-Nr.", self.var_match_index, "match_index", 1, 1)
+        field(value, "Min. Wertlänge", self.var_value_min_len, "value_min_len", 2)
+        field(value, "Max. Wertlänge", self.var_value_max_len, "value_max_len", 2, 1)
+        field(value, "Erwarteter Testwert", self.var_expected, "expected_value", 3, 0, 2)
+        output = Card(inside, rounded=True, padding=8)
+        output.body.pack_configure(padx=8, pady=(3, 3) if compact else (6, 8))
+        output.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        output.body.columnconfigure((0, 1), weight=1, uniform="result")
+        inside.rowconfigure(2, weight=1)
+        ttk.Label(output.body, text="Vorschau · Regex & Capture", style="BuilderTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(output.body, text="Testergebnis", style="BuilderTitle.TLabel").grid(row=0, column=1, sticky="w")
+        self.txt_result = tk.Text(output.body, height=2, width=10, wrap="word", font=("Consolas", 9), relief="flat", background="#ffffff", foreground="#23485e", takefocus=True)
+        self.txt_result.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        self.var_capture = tk.StringVar(master=self)
+        self.var_test_result = tk.StringVar(master=self, value="Noch nicht getestet")
+        self.var_test_note = tk.StringVar(master=self)
+        self.var_comparison = tk.StringVar(master=self)
+        capture = ttk.Label(output.body, textvariable=self.var_capture, style="Builder.TLabel")
+        capture.grid(row=2, column=0, sticky="ew", padx=(0, 8))
+        ttk.Label(output.body, textvariable=self.var_test_result, foreground="#126854", background="#ffffff").grid(row=1, column=1, sticky="w")
+        note = ttk.Label(output.body, textvariable=self.var_test_note, style="Builder.TLabel")
+        note.grid(row=2, column=1, sticky="ew")
+        comparison = ttk.Label(output.body, textvariable=self.var_comparison, style="Builder.TLabel")
+        comparison.grid(row=3, column=1, sticky="ew")
+        output.body.bind("<Configure>", lambda event: [label.configure(wraplength=max(150, event.width // 2 - 20)) for label in (capture, note, comparison)])
+        footer = ttk.Frame(self, style="CardInner.TFrame", padding=(12, 7))
+        footer.grid(row=2, column=0, sticky="ew")
+        self.btn_build = ttk.Button(footer, text="Regex bauen", command=self._build_regex, style="RuleSuite.Secondary.TButton", width=0)
+        self.btn_build.pack(side="left")
+        self.btn_test = ttk.Button(footer, text="Testen", command=self._test_regex, style="RuleSuite.Secondary.TButton", width=0)
+        self.btn_test.pack(side="left", padx=6)
+        self.btn_accept = ttk.Button(footer, text="Übernehmen", command=self._accept, style="RuleSuite.Primary.TButton", width=0)
+        self.btn_accept.pack(side="right")
+        ttk.Button(footer, text="Schließen", command=self.destroy, style="RuleSuite.Secondary.TButton", width=0).pack(side="right", padx=6)
+        self.bind("<Escape>", lambda _event: self.destroy())
 
     def _spec(self) -> dict[str, Any]:
         return {
@@ -246,46 +236,36 @@ class RegexBuilderPopup(tk.Toplevel):
         self._render_result(result)
 
     def _render_result(self, result: dict[str, Any]) -> None:
-        lines = [
-            "Regex:",
-            str(result.get("regex", "")),
-            "",
-            f"Capture: {result.get('capture', '')}",
-        ]
-        proposed = result.get("proposed_search_from")
-        if proposed:
-            lines.append(f"search_from Vorschlag: {proposed}")
-        warnings = result.get("warnings") or []
-        lines.append("Warnungen: " + (", ".join(str(w) for w in warnings) if warnings else "keine"))
-
-        test_search_from = result.get("test_search_from")
-        if isinstance(test_search_from, dict):
-            if "line" in test_search_from:
-                lines.append(f"Test-Kontext: search_from line={test_search_from.get('line')}")
-            elif "after" in test_search_from:
-                lines.append(f"Test-Kontext: search_from after={test_search_from.get('after')!r}")
-
-        test = result.get("test")
-        if isinstance(test, dict):
-            lines.extend(["", "Test:"])
-            if test.get("error"):
-                lines.append(f"FEHLER: {test.get('error')}")
-            elif test.get("matched"):
-                value = str(test.get("value") or "")
-                lines.append(f"HIT: {value}")
-                expected = self.var_expected.get().strip()
-                if expected:
-                    lines.append("Vergleich: " + ("OK" if value == expected else f"abweichend (erwartet {expected})"))
-            else:
-                lines.append("MISS")
-
         self.txt_result.configure(state="normal")
         self.txt_result.delete("1.0", tk.END)
-        self.txt_result.insert(tk.END, "\n".join(lines))
+        self.txt_result.insert(tk.END, str(result.get("regex", "")))
         self.txt_result.configure(state="disabled")
+        proposed = result.get("proposed_search_from")
+        self.var_capture.set(f"Capture: {result.get('capture', '')}" + (f" · Suchvorschlag: {proposed}" if proposed else ""))
+        warnings = result.get("warnings") or []
+        note = "Warnungen: " + ", ".join(str(item) for item in warnings) if warnings else "Keine Warnungen"
+        context = result.get("test_search_from")
+        if isinstance(context, dict):
+            note += f" · ab Zeile {context['line']}" if "line" in context else f" · nach {context.get('after', '')}"
+        self.var_test_note.set(note)
+        test = result.get("test")
+        self.var_comparison.set("")
+        if not isinstance(test, dict):
+            self.var_test_result.set("Noch nicht getestet")
+        elif test.get("error"):
+            self.var_test_result.set(f"Fehler · {test['error']}")
+        elif test.get("matched"):
+            raw = test.get("value")
+            value = "" if raw is None else str(raw)
+            self.var_test_result.set(f"Treffer · {value}")
+            expected = self.var_expected.get().strip()
+            if expected:
+                self.var_comparison.set("Erwartung erfüllt" if value == expected else f"Abweichung · erwartet {expected}")
+        else:
+            self.var_test_result.set("Kein Treffer")
 
     def _accept(self) -> None:
-        result = self._last_result or self._build_regex()
+        result = self._build_regex()
         regex = str(result.get("regex", ""))
         search_from = result.get("proposed_search_from") if self.var_use_search_from.get() else None
         self._on_accept(regex, search_from if isinstance(search_from, dict) else None)
