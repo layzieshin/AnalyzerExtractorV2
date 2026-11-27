@@ -70,8 +70,13 @@ jobs:
               allowed = files | {'index.json','template.json','README.md'}
               actual = {n.removeprefix(prefix+'rules/') for n in z.namelist() if n.startswith(prefix+'rules/') and not n.endswith('/')}
               assert actual == allowed, actual ^ allowed
+              approved = json.loads((root/'.github/release-rules-2.3.0.json').read_bytes())
+              assert set(approved) == files | {'index.json'}
               for rel in allowed:
-                  assert z.read(prefix+'rules/'+rel) == (root/'rules'/rel).read_bytes(), rel
+                  raw = z.read(prefix+'rules/'+rel)
+                  assert raw == (root/'rules'/rel).read_bytes(), rel
+                  if rel in approved:
+                      assert hashlib.sha256(raw).hexdigest() == approved[rel], rel
               assert not any(n.startswith(prefix + folder + '/') for folder in ('storage', 'output', 'input', 'jobs') for n in z.namelist() if not n.endswith('/'))
           (delivery/'SHA256SUMS').write_text(hashlib.sha256(package.read_bytes()).hexdigest()+'  '+name+'\n', encoding='utf-8')
           print(f'{len(cases)} Windows tests passed; verified 25 rules and the application ZIP at {info["base_commit"]}.')
