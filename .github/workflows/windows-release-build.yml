@@ -38,7 +38,9 @@ jobs:
       - name: Run project tests and build the standalone program
         shell: pwsh
         run: |
-          $env:PYTEST_ADDOPTS = "--capture=sys --junitxml=$env:RUNNER_TEMP/windows-tests.xml"
+          # pytest tokenizes PYTEST_ADDOPTS with POSIX quoting, even on Windows.
+          $report = (Join-Path $env:RUNNER_TEMP 'windows-tests.xml').Replace('\', '/')
+          $env:PYTEST_ADDOPTS = '--capture=sys --junitxml="' + $report + '"'
           python packaging/build_onedir.py
           exit $LASTEXITCODE
       - name: Check the downloadable ZIP against this revision
