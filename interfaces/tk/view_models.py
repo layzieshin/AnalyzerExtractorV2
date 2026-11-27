@@ -7,6 +7,8 @@ from typing import Iterator
 from src.application.api import (
     AssayCandidateItem,
     DuplicateCandidateDetail,
+    DesktopSettings,
+    DeviceInventoryStatus,
     IngestionInstanceItem,
     ProcessingEnqueueOutcome,
     ProcessingOutcome,
@@ -15,6 +17,7 @@ from src.application.api import (
     ReportRunOccurrence,
     ReportSummaryItem,
     RulesetInventoryItem,
+    ValidationQueueItem,
     WatchCycleSummary,
     friendly_processing_message,
 )
@@ -29,6 +32,7 @@ _EXCEL_USER_MESSAGES = frozenset(
 DESKTOP_VIEW_KEYS: tuple[str, ...] = (
     "dashboard",
     "results",
+    "changes",
     "statistics",
     "validation",
     "rules",
@@ -37,20 +41,89 @@ DESKTOP_VIEW_KEYS: tuple[str, ...] = (
 )
 
 NAV_LABELS: dict[str, str] = {
-    "dashboard": "Auswertung",
+    "dashboard": "Arbeitsübersicht",
     "results": "Ergebnisse",
+    "changes": "Änderungen",
     "statistics": "Statistik",
-    "validation": "Validierung",
+    "validation": "Prüfplatz",
     "rules": "Regelwerke",
     "settings": "Einstellungen",
     "diagnostics": "Diagnose",
 }
 
-PRIMARY_NAV_KEYS: tuple[str, ...] = ("dashboard", "results", "statistics", "validation", "rules")
+PRIMARY_NAV_KEYS: tuple[str, ...] = ("dashboard", "validation", "results", "changes", "statistics", "rules")
 SECONDARY_NAV_KEYS: tuple[str, ...] = ("settings", "diagnostics")
 
 DASHBOARD_RECENT_LIMIT = 10
 DASHBOARD_REPORT_JOIN_LIMIT = 250
+
+
+def import_device_label(settings: DesktopSettings, inventory: DeviceInventoryStatus) -> str:
+    device_id = str(settings.device_id or getattr(inventory, "default_device_id", "") or "").strip()
+    if not device_id:
+        return "Kein Gerät ausgewählt"
+    for item in inventory.devices:
+        if item.device_id == device_id:
+            label = item.display_name or device_id
+            return label if item.active else f"{label} · inaktiv"
+    return f"{device_id} · nicht verfügbar"
+
+
+def validation_case_status(item: ValidationQueueItem) -> str:
+    if item.validation_ambiguous:
+        return "Historie unklar"
+    if item.comparison:
+        return "Vergleich offen"
+    if item.missing_fields or item.revision_error:
+        return "Nacharbeit"
+    return "Validiert" if item.current_validation is not None else "Offen"
+
+
+def filter_validation_cases(items, *, statuses=(), assays=(), devices=()):
+    return tuple(item for item in items
+                 if (not statuses or validation_case_status(item) in statuses)
+                 and (not assays or (item.assay_name or "Assayname fehlt") in assays)
+                 and (not devices or (item.device_id or "–") in devices))
+
+
+def filter_report_summaries(items, *, statuses=(), assays=(), devices=(), search="", lot="", date_from="", date_to=""):
+    def day(value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        for pattern in ("%Y-%m-%d", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(text, pattern).date()
+            except ValueError:
+                pass
+        raise ValueError("Bitte ein Datum als JJJJ-MM-TT oder TT.MM.JJJJ eingeben.")
+
+    start, end = day(date_from), day(date_to)
+    if start and end and start > end:
+        raise ValueError("Das Von-Datum muss vor dem Bis-Datum liegen.")
+    query, charge = search.strip().casefold(), lot.strip().casefold()
+    matches = []
+    for item in items:
+        if statuses and report_list_status(item) not in statuses:
+            continue
+        if assays and not set(item.assay_names or ("Assayname fehlt",)) & set(assays):
+            continue
+        if devices and not set(item.device_ids or ("–",)) & set(devices):
+            continue
+        if charge and not any(charge in value.casefold() for value in item.lot_ids):
+            continue
+        haystack = " ".join((item.file_name, *item.assay_names, *item.assay_keys, *item.device_ids, *item.lot_ids)).casefold()
+        if query and query not in haystack:
+            continue
+        if start or end:
+            try:
+                created = datetime.fromisoformat(item.latest_created_at).date()
+            except (TypeError, ValueError):
+                continue
+            if (start and created < start) or (end and created > end):
+                continue
+        matches.append(item)
+    return tuple(matches)
 
 
 @dataclass(frozen=True)
@@ -62,6 +135,7 @@ class DashboardRecentRow:
     time_text: str
     source: str
     report_id: str | None = None
+    notice: str = ""
 
 
 @dataclass(frozen=True)
@@ -96,6 +170,8 @@ def format_source_kind(source_kind: str) -> str:
 
 def status_badge_kind(display_status: str) -> str:
     text = str(display_status or "").casefold()
+    if text in {"kennung klären", "zuordnung offen"}:
+        return "warning"
     if any(
         token in text
         for token in ("fehlgeschlagen", "fehler", "klärung", "klaerung", "klärfall", "prüfung", "pruefung")
@@ -125,7 +201,7 @@ def report_list_status(item: ReportSummaryItem) -> str:
 
 def report_summary_row_values(item: ReportSummaryItem) -> tuple[str, str, str, str, str]:
     assay_text = ", ".join(item.assay_names) if item.assay_names else "Assayname fehlt"
-    device_text = ", ".join(item.device_names or item.device_ids) if item.device_ids else "-"
+    device_text = ", ".join(item.device_ids) if item.device_ids else "-"
     return (
         item.file_name or "-",
         report_list_status(item),
@@ -172,11 +248,11 @@ def build_dashboard_recent_rows(
             elif report.assay_count:
                 summary_parts.append("0 Ergebnis(se)")
             if report.device_ids:
-                summary_parts.append(f"Gerät {', '.join(report.device_names or report.device_ids)}")
+                summary_parts.append(f"Gerät {', '.join(report.device_ids)}")
             summary = " | ".join(summary_parts) if summary_parts else (item.friendly_message or "-")
             report_id = report.report_id
         else:
-            summary = item.friendly_message or (
+            summary = "–" if item.technical_detail == "assay_identity_change_pending" else item.friendly_message or (
                 "Verarbeitet" if item.display_status == "Fertig" else str(item.display_status or "-")
             )
             report_id = None
@@ -190,6 +266,7 @@ def build_dashboard_recent_rows(
                 time_text=format_timestamp(item.updated_at or item.created_at),
                 source=format_source_kind(item.source_kind),
                 report_id=report_id,
+                notice=item.friendly_message if item.technical_detail == "assay_identity_change_pending" else "",
             )
         )
     return tuple(rows)
@@ -271,6 +348,8 @@ def build_batch_file_statuses(
         if processed.queue_status == "FAILED" or processed.submit_status == "FAILED":
             detail = processed.message or "Verarbeitung fehlgeschlagen"
             friendly = friendly_processing_message(processed.message)
+            if processed.message == "assay_identity_change_pending":
+                return BatchFileStatus(label, enqueue.pdf_path, "Kennung klären", friendly)
             if friendly in _EXCEL_USER_MESSAGES:
                 detail = friendly
             return BatchFileStatus(
@@ -413,7 +492,7 @@ def occurrence_list_rows(detail: ReportDetail) -> list[tuple[str, str, str, str,
                 occ_id,
                 occurrence.assay_name or group.assay_display_label or "Assayname fehlt",
                 occurrence.charge or occurrence.lot_id or "-",
-                occurrence.device_name or occurrence.device_id or "-",
+                occurrence.device_id or "-",
                 format_timestamp(occurrence.created_at),
             )
         )
@@ -429,7 +508,7 @@ def occurrence_field_rows(detail: ReportDetail, occurrence_id_value: str) -> tup
 
 
 def report_detail_header_lines(detail: ReportDetail) -> tuple[str, str, str, str]:
-    device_text = ", ".join(detail.device_names or detail.device_ids) if detail.device_ids else "-"
+    device_text = ", ".join(detail.device_ids) if detail.device_ids else "-"
     return (
         detail.file_name or "-",
         format_timestamp(detail.latest_created_at),
@@ -438,7 +517,7 @@ def report_detail_header_lines(detail: ReportDetail) -> tuple[str, str, str, str
     )
 
 
-def validation_status_line(occurrence: ReportRunOccurrence | None) -> str:
+def validation_status_line(occurrence: ReportRunOccurrence | ValidationQueueItem | None) -> str:
     if occurrence is None:
         return "Keine Messung ausgewählt."
     if occurrence.validation_ambiguous:
@@ -450,7 +529,7 @@ def validation_status_line(occurrence: ReportRunOccurrence | None) -> str:
     return f"Validiert von {current.operator_initials} am {format_timestamp(current.validated_at_utc)}{comment}"
 
 
-def validation_history_rows(occurrence: ReportRunOccurrence | None) -> list[tuple[str, str, str, str]]:
+def validation_history_rows(occurrence: ReportRunOccurrence | ValidationQueueItem | None) -> list[tuple[str, str, str, str]]:
     if occurrence is None:
         return []
     current_id = occurrence.current_validation.validation_id if occurrence.current_validation else None

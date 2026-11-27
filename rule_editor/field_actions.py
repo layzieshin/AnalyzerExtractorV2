@@ -35,6 +35,26 @@ class FieldsMixin:
                 self.tree_fields.see(selected_item)
         finally:
             self._suppress_field_select = previous
+        self._refresh_field_grid()
+
+    def _refresh_field_grid(self):
+        if not getattr(self, "_unified_field_grid", False):
+            return
+        count = len(self.fields_data)
+        hits = sum(bool(row.get("matched")) for row in self._field_marking_data.values())
+        self.var_field_count.set(f"{count} Felder" + (f" · {hits} Treffer" if self._field_marking_data else ""))
+        for item in self.tree_fields.get_children():
+            values = self.tree_fields.item(item, "values")
+            key = str(values[0])
+            row = self._field_marking_data.get(key)
+            if row is None:
+                value, status = "Noch nicht geprüft", ""
+            else:
+                raw = row.get("value")
+                value = str(raw) if raw is not None and raw != "" else "Kein Treffer"
+                status = "Fehler" if row.get("error") else "Treffer" if row.get("matched") else "Fehlt"
+            checked = "☑" if key in self._visible_marking_keys else "☐"
+            self.tree_fields.item(item, text=f"{checked}  {key}\n     {value}", values=(*values[:3], status))
 
     def _render_search_from(self, search_from: object) -> str:
         if isinstance(search_from, dict) and "after" in search_from:
@@ -248,6 +268,9 @@ class FieldsMixin:
             self._search_mode_applying = False
         if mark_dirty and not previous and not self._field_form_loading:
             self._field_form_dirty = True
+            invalidate = getattr(self, "_invalidate_authoring_test", None)
+            if callable(invalidate):
+                invalidate()
 
     def _sync_search_inputs(self) -> None:
         mode = self.var_search_mode.get().strip()
@@ -391,8 +414,14 @@ class FieldsMixin:
         if len(self._undo_stack) > 50:
             self._undo_stack = self._undo_stack[-50:]
         self._redo_stack.clear()
+        sync = getattr(self, "_sync_authoring_controls", None)
+        if callable(sync):
+            sync()
 
     def _commit_receipt_undo(self, receipt: object) -> bool:
+        invalidate = getattr(self, "_invalidate_authoring_test", None)
+        if callable(invalidate):
+            invalidate()
         entry = history_entry_from_receipt(receipt)
         if entry is None:
             messagebox.showerror("Fehler", _RECEIPT_ERROR)
@@ -483,6 +512,9 @@ class FieldsMixin:
         return self._commit_new_field()
 
     def on_apply_field(self) -> None:
+        if not self._field_form_is_new and self.var_field_key.get().strip() != self._selected_field_key:
+            self._set_hint("Für eine neue Kennung bitte ausdrücklich 'Markiertes Feld ersetzen' wählen.")
+            return
         self.on_commit_field_form()
 
     def _commit_new_field(self) -> bool:
@@ -707,9 +739,19 @@ class FieldsMixin:
         button = getattr(self, "btn_field_commit", None)
         if button is None:
             return
+        if getattr(self, "_busy", False):
+            button.configure(state=tk.DISABLED)
+            replacement = getattr(self, "btn_field_replace", None)
+            if replacement is not None:
+                replacement.configure(state=tk.DISABLED)
+            return
         if self._field_form_is_new:
-            button.configure(text="Neues Feld anlegen", state=tk.NORMAL, command=self.on_add_field)
+            button.configure(text="Feld anlegen", state=tk.NORMAL, command=self.on_add_field)
         elif self._selected_field_key:
-            button.configure(text="Markiertes Feld ersetzen", state=tk.NORMAL, command=self._commit_replace_field)
+            same_key = self.var_field_key.get().strip() == self._selected_field_key
+            button.configure(text="Änderung anwenden", state=tk.NORMAL if same_key else tk.DISABLED, command=self.on_apply_field)
         else:
-            button.configure(text="Markiertes Feld ersetzen", state=tk.DISABLED, command=self._commit_replace_field)
+            button.configure(text="Änderung anwenden", state=tk.DISABLED, command=self.on_apply_field)
+        replacement = getattr(self, "btn_field_replace", None)
+        if replacement is not None:
+            replacement.configure(state=tk.NORMAL if self._selected_field_key and not self._field_form_is_new else tk.DISABLED)

@@ -17,6 +17,10 @@ flowchart LR
   Extractor --> DbWriter[SQLite]
 ```
 
+Neue Importe und der V2-Autorentest verwenden gemeinsam `contentsplitter.api.split_assay_sections`: verankerte Dokumentköpfe statt editierbarer Regel-Anzeigenamen, kanonischer ID-Abgleich und belegte normalisierte Text-Offsets. Vierstellige Hex-Kennungen begrenzen auch unbekannte Assays; andere Kennungen nur aus der vorhandenen Konfiguration bzw. dem getesteten Entwurf. Die wirksame Sonderkey-Menge ist Teil der V2-Nachweisbindung und wird vor Aktivierung unter dem Lifecycle-Lock erneut geprüft. Alte case-sensitive Splitter-/Chooser-Aufrufe und die Neuanalyse historischer eingefrorener Offsets bleiben kompatibel. `prepare_draft_discard`/`discard_draft` prüfen genau die bestätigten Datei-/Nachweis-Hashes unter Lifecycle- und Draft-Lock; sie ändern keinen anderen Lifecycle-Bestand.
+
+Der direkte RuleSuite-Arbeitsplatz nutzt ein Feld-/Markierungsraster, einen mittigen Text/Original-PDF-Wechsel und das rechte Formular. `RuleSuiteController` liest eine begrenzte Bytes-Aufnahme und bindet deren SHA bereits beim Textladen; Textableitung und der vorhandene begrenzte `application.pdf_preview`-Renderer arbeiten nur auf kurzlebigen Aufnahmen dieser Bytes außerhalb des Tk-Threads. Direkte Original-PDFs benötigen weder Report-ID noch ResultStore; auch ohne erkannten Assaytext bleibt die echte Originalansicht verfügbar. Datei-/Kontext-/Anfragewechsel verwerfen alte Antworten. Der lokale modale Regex-Baukasten bleibt an das aufrufende Formular gebunden und schreibt keine Draft-Datei.
+
 - Orchestrator: `src/jobcontroller/api.py`
 - Headless Queue: `src/watchdog/api.py` + `src/jobqueue/api.py`
 - Processing (Queue/Worker-Orchestrierung): `src/processing/api.py`
@@ -104,44 +108,6 @@ Felder und Metadaten; `Alte Werte behalten` und `Neue Werte uebernehmen` fuehren
 zur getrennten Erstvalidation zurueck. Jede Aktion erhaelt die beim Anzeigen
 erfasste Datenbank und Kennung. Vier Controller bleiben bestehen; die ausdrücklich freigegebene Statistik-Navigation ergänzt die siebte View.
 
-## Regelfreigabe im vorhandenen Editor (R1)
-
-Der geladene Entwurf wird im bestehenden dreispaltigen Workspace direkt über
-„Mit PDFs prüfen“ freigegeben vorbereitet. Struktur, Beispiel-/Problem-PDF,
-Update-Referenz und Gesamtstatus sind getrennt sichtbar; ein erfolgreicher
-Nachweis aktiviert nichts. Genau eine abschließende Bestätigung in ReleaseMixin
-führt über denselben RuleSuiteController zur Aktivierung. Der vorhandene Wizard
-bleibt Erstellung-/Feldhilfe und gibt höchstens einen geprüften Entwurf zurück.
-Ungespeicherte Felder, Meta-/PDF-/Root-/Draftwechsel und verspätete Workerresultate
-können keinen alten Nachweis aktivieren. Ein alter Callback darf weder den Status
-noch Busy eines neueren Prüfversuchs zurücksetzen. Zerstörte Fenster verwerfen
-Completion-Ereignisse. Die neue PDF-Proofarbeit nutzt den bestehenden TkTaskRunner
-mit threadsicherer Queue und ausschließlich auf dem Hauptthread geplantem Tk-Polling;
-ein Proof-Worker ruft kein Tk-`after` auf. Reine Diff-/Strukturansichten serialisieren
-saubere bytegebundene Entwürfe nicht neu.
-
-Der bestehende readiness-Owner erzeugt Proof-Version 2 aus exakt erfassten
-Draft-/Index-/Active-/PDF-Bytes. Kurze Lifecycle→Draft-Sperren schützen Capture,
-Pending und Ready-Publikation; PDF-Arbeit läuft ohne langfristig gehaltene
-TTL-Sperre. Private Snapshots speisen die echte Extraktion. Der private Index
-verweist für den geprüften Assay stets auf die private Active-Kopie, auch wenn
-die originale Bindung absolut oder ein Alias ist. Originalpfade und Original-
-Hashes bleiben im Nachweis. Vor Ready werden aktueller Modus, Bindungen und
-Inputs erneut geprüft. Eine Versuchskennung verhindert, dass ältere langsame
-Ergebnisse neuere fehlgeschlagene Prüfungen überschreiben. Keine zweite
-Nachweisablage oder Workflowengine entsteht.
-
-Beim Update müssen alle bisherigen Referenzfelder und `lot_id` gleich bleiben;
-gleiche PDF-Bytes sind auch unter anderem Dateinamen keine Referenz. Der echte
-Extractor verlangt weiterhin jedes konfigurierte Feld, auch `required=false`.
-Der proofpflichtige Produktpfad prüft innerhalb derselben bestehenden
-Aktivierungsowner und konsistenter Lifecycle→Draft-Sperrfolge nochmals, bindet
-die tatsächlich publizierten Draftbytes und verwirft ungetestete Namensargumente.
-Untere API-Aufrufe bleiben mit optionaler Proofpflicht kompatibel. Die zentrale
-Draftnamenbildung verwirft pfadartige Assaykeys hostunabhängig und behält die
-zusätzliche resolved-Enthaltenheitsprüfung gegen Symlinks. Vorhandene Regeln
-werden nicht dafür umgeschrieben.
-
 ## Modulgrenzen
 
 ### Versionierte Geräte- und QC-Autorität (P4/P5)
@@ -205,38 +171,12 @@ Owner-Lesevorgänge sind kein atomarer Latest-Snapshot: genau dieses Manifest
 definiert die Population und wird vor Publikation unter dem QC-Schreiblock erneut
 geprüft.
 
-Chargenidentität ist Gerät/Assay/exakte extrahierte Kit-Charge. Der statistische
-Beginn bleibt das älteste geeignete Messdatum. Die davon unabhängige Nutzung
-kommt aus `get_lot_chronology`: alle projizierten Ergebnisse, auch unvalidierte
-und numerisch ungeeignete, mit Datum-/Zeitpräzision und möglichen offenen
-Kandidatenidentitäten. `QCUsageSnapshot` hält das vollständige kanonische JSON
-und seinen Hash. Tage ohne gemessene Uhrzeit sind ganze Tagesintervalle;
-nur zusammenhängend explizite Stunden/Minuten/Sekunden verfeinern sie. Fehlende
-höhere Zeitkomponenten werden nicht durch strptime-Standardwerte ergänzt.
-
-Abschluss setzt mindestens einen geeigneten Zielchargenwert und eine sicher
-spätere Nutzung einer anderen Charge voraus; ein späterer Beginn oder eine
-Validierung dieser belegenden Messung ist nicht erforderlich. Gleichstände,
-überlappende Zeitintervalle und unbekannte Zielnutzung werden nicht künstlich
-geordnet. Unlesbare Revisionshistorie mit unbekannter Kandidatenidentität
-verlangt gruppenweite Klärung. Der Nachweis ist paarweise und behauptet keine
-global neueste Charge. Bestehende Bindung oder ausdrückliche Profilwahl liefert
-den Kontext; widersprüchliche zeitliche Interpretationen bleiben sichtbar.
-
-ResultsController bereitet über `prepare_qc_lot_close` Modell und echte PDF
-rein lesend vor. Der bestehende Statistikknopf „Abschluss prüfen“ öffnet diesen
-Vorschlag mit allen Leveln, Quellen und Klärungsgründen. Abbruch speichert nichts.
-`close_qc_lot(preview, ...)` veröffentlicht die vorbereiteten Bytes; unter
-`BEGIN IMMEDIATE` prüft der einzige QC-Schreibowner Ziel-/Zeugenquellen,
-Profil/Inventar, vollständigen Chronologietoken, erwarteten Chargenkopf,
-Modell-/PDF-Hashes und SD-Bindung erneut. Abschluss und Nachweis entstehen
-atomar. Erwartete Abwesenheit (`expected_version_id=0`) erlaubt den direkten
-ersten abgeschlossenen Snapshot ohne beiläufige offene Revision oder neue SD.
-Die finale Veröffentlichung sperrt Dialogabbruch und Fensterschließen.
-
-Neue Werte ändern weder geschlossenen Zustand noch Archivbytes; ein separater
-Live-Änderungshinweis bleibt neben der Archivansicht sichtbar. Eine begründete
-Wiederöffnung erzeugt ausdrücklich eine neue Revision; frühere PDFs bleiben
+Chargenidentität ist Gerät/Assay/exakte extrahierte Kit-Charge, Beginn das älteste
+geeignete Messdatum. Abschluss verlangt eine andere neuere validierte Charge
+mit Datumsnachweis, passende Quellen-/Konfigurationskennungen sowie ein bereits
+geliefertes eingefrorenes Modell und PDF mit Prüfsumme. Nachweis und Abschluss
+werden atomar gespeichert; Fehler lassen die Charge offen. Späte Werte brauchen
+eine begründete Wiederöffnung mit neuer Chargenrevision; frühere PDFs bleiben
 bytegenau lesbar. Manuelle SD und ausdrücklich bestätigte validierte
 Referenzserien werden eingefroren. P5 bewahrt diese rohen Referenzen unverändert
 und ergänzt berechneten Mittelpunkt und Stichproben-SD im Analysemodell. Ohne
@@ -247,7 +187,7 @@ und die eigene StatisticsView organisieren die Chargen-/QMMA-Arbeit. Dialoge zei
 Speichern bleibt bei kleinen Fenstern erreichbar. Datenbankzugriffe und
 Quelllisten laufen über `TkTaskRunner`. Mutationen sind an angezeigten Speicher
 und Version gebunden; verspätete Antworten werden verworfen. Es gibt weiterhin
-vier Controller, vier Servicefelder und sieben Views. Statistik organisiert
+vier Controller, vier Servicefelder und acht Views. Statistik organisiert
 **Mit PDF abschließen**, explizite Nachfolgechargenwahl, historische
 Nachweisfassungen und Export an einen neuen Dateinamen.
 
@@ -292,36 +232,6 @@ günstige Teilmengenauswahl oder kontrollübergreifende Längspoolung. Fehlende
 SD/Ordnung/Gruppierung werden mit Gründen sichtbar; menschliche Validation
 bleibt unabhängig.
 
-P2 erzeugt Modellversion 2 mit `arev2-qc-analysis-v3` und `arev2-qc-pdf-v3`.
-Die vier bisherigen Modellversion-1-Kombinationen aus Analyse v1/v2 und PDF v1/v2
-bleiben lesbar; ungültige Querkombinationen werden abgewiesen. Neue
-Quellenmanifeste heißen `qc-sources-v2`. Hersteller-MIN/MAX brauchen dieselbe
-Decimal-Konstanz wie SOLL und Einheit. Getrennte Hersteller-/Prozentgrenzen,
-Punktbefunde und `chart.reference_lines` sind eingefroren; UI/PDF berechnen keine
-Grenzwerte. Die profilweite Einzelwertabweichung p erzeugt pro Level
-`SOLL × (1 ± p/100)`, unabhängig von QMMA/SD/Westgard. Gleichheit liegt innerhalb;
-Grenzüberschreitung schließt den Punkt nicht aus. Tatsächlich vertauschte
-Prozentgrenzen bleiben erklärt unverfügbar, auch bei negativem SOLL. SOLL null
-und p null werden ohne Sonderumdeutung berechnet. Altmodelle erhalten beim Lesen
-oder erläuterten Drucken keine rückwirkenden neuen Linien.
-
-P4 vom 13.11.2026 erzeugt zusätzlich genau Modellversion 3 /
-`arev2-qc-analysis-v4` / `arev2-qc-pdf-v4`. Das historische Tupel
-2 / analysis-v3 / pdf-v3 bleibt literal erhalten. Der reine Analyseowner friert
-je Level `descriptive` (n, Mittelwert, empirische Stichproben-SD mit n-1, VK),
-`period`, stabile Darstellungspositionen und je Punkt `measurement` sowie absolute
-und relative absolute Abweichungen ein. Grundgesamtheit bleiben die bereits
-geeigneten Werte. Die exakt budgetierte Decimal-Varianz verwendet
-`(n*sum(x²)-sum(x)²)/(n*(n-1))`; n<2 gibt keine empirische SD, nichtpositiver
-Mittelwert keinen VK. Relative Einzelabweichungen brauchen positiven SOLL.
-Ausgeschlossene Werte erhalten keine scheinbar gültigen Abweichungen. Diese
-empirische SD ist ausdrücklich keine freigegebene Westgard-Referenz. Eine
-vorhandene Mittelwertlinie gehört ebenfalls zu `chart.reference_lines`.
-Datums-/Zeitpräzision folgt nur zusammenhängend belegten H/M/S-Komponenten;
-fehlende Zeiten werden nicht ergänzt. UI und PDF verwenden die eingefrorenen
-Zahlen, die Anzeige rundet auf sechs signifikante Stellen. Historische Modelle
-erhalten weder Deskriptivwerte noch Abweichungen nachträglich.
-
 `QCAnalysis` hält nur kanonisches JSON und SHA-256 unveränderlich. Sein Modell
 enthält das vollständige Manifest, unveränderte rohe SD-Referenzen, berechnete
 Serien, Diagramm, Befunde, Nichtverfügbarkeitsgründe, Zählungen und
@@ -338,48 +248,27 @@ Grenzen: 16 MiB Modell, 50.000 beobachtete Punkte in der Analyse, 200 PDF-Seiten
 64 MiB PDF, 4 KiB Prozessmetadaten. Dateibasierter Austausch vermeidet einen
 vollen Pipe-/Queue-Puffer. Der Kindprozess prüft die echte PDF erneut; Eltern
 prüfen Größe/Hash/Identitäten. Lange Tabellen werden paginiert, unbeherrschbarer
-Inhalt liefert einen kontrollierten Fehler. Anschließend prüft `close_lot`
+Inhalt liefert einen kontrollierten Fehler. Anschließend prüft P4 `close_lot`
 Quellen/Konfiguration erneut und speichert PDF und Abschluss atomar. Rendering-
 oder Konfliktfehler lassen die Charge offen. Export prüft gespeicherte Hashes
 und erstellt standardmäßig ausschließlich eine neue Datei mit den archivierten Bytes.
 
-Die aktuelle Darstellung `arev2-qc-pdf-v4` verwendet kompakte A4-Abschnitte je
-Level: dreiteiliger Kopf aus belegten Stammdaten, Diagramm mit rechter Legende,
-zwei Statistikspalten, Messwerttabelle und leere Unterschriftsfelder. Elf übliche
-Messungen passen auf eine vollständige Seite; die geprüften Standardbeispiele
-mit 60 Messwertzeilen insgesamt benötigen höchstens drei Seiten. Ein Folgelevel
-kann mit vollständigem eigenem Kopf, Diagramm und Statistik auf derselben Seite
-beginnen. Eingebaute Times-Roman/Times-Bold vermeiden externe Fontabhängigkeiten;
-Datum/Zeit bleibt einzeilig, Zeilen sind gleichmäßig kompakt. Die Zeitachse bleibt
-echt, zu dichte Beschriftungen werden ausgelassen. Farbe und Strichart trennen
-Grenzlinien; Ringe und Punktsymbole kennzeichnen Grenz- beziehungsweise Westgard-
-Befunde. Fortsetzungen wiederholen Gerät, Assay, Kit-/Reagenzcharge, Level und
-Tabellenkopf. Reine Datumswerte erzeugen keine scheinbar erfassten Uhrzeiten.
+Die aktuelle Darstellung `arev2-qc-pdf-v2` beginnt für jede Kontrolle eine eigene
+Seite: Diagramm, QMMA/SOLL/SD/Referenzumfang, Grenzen, konkrete Befunde und nur
+ihre Einzelwerte. Fortsetzungsseiten behalten Kontrolle, vollständigen Assaynamen
+und Kit-Charge im Kopf. Datum allein erzeugt weder in der Tabelle noch an der
+Achse eine scheinbar erfasste Uhrzeit. Anwender stammt aus dem eingefrorenen
+Quellenpayload (`ANWENDER` oder öffentlicher Legacy-Alias `user`), Validierer und
+UTC-Zeit ausschließlich aus dem zu Run/Revision/Auswahl passenden Nachweis.
+Widersprüche oder fehlende Bindungen werden sichtbar statt geraten.
 
-Darstellungsnummern (Pos) sind je Level stabil an `point_key` gebunden, keine
-analytischen Läufe. Laufangaben stammen nur aus einem ausdrücklich konfigurierten
-`run_grouping_field` und dessen eingefrorenem `run_group_raw`; technische Run-IDs
-sind ausschließlich Nachweisidentitäten. Anwender stammt aus dem eingefrorenen
-Quellenpayload (`ANWENDER` oder Legacy-Alias `user`), Validierer und UTC-Zeit
-nur aus dem zu Ergebnis/Revision/Auswahl passenden Nachweis. Fehlende Bindungen,
-mehrdeutige Anwender und ausgeschlossene Punkte bleiben im Standard mit Position
-und verständlichem Grund sichtbar. Vollständige lange Rohangaben, Identitäten
-und Validatorbindung bleiben im bestehenden digitalen Analysemodell erhalten;
-der Fuß nennt die Modellkennung. Der Renderer fügt keinen JSON-Rohdatenanhang
-hinzu. Zusätzliche technische Papiernachweise sind bewusst optional. Weder Klinikdaten aus dem
-Vorlagenbild noch Hersteller-/Kontrollmaterialnamen, Kalibrationen oder
-Unterschriften werden erfunden.
-
-`include_explanations=False` bleibt Standard und druckt die fachliche Auswertung
-mit Legende und wichtigen positionsgebundenen Befunden. Technische Quellen-/
-Validierungslisten und wiederholte Einzelprobenbelege werden nur mit
-`include_explanations=True` zusätzlich gedruckt, ebenso Methoden, Referenzen und
-die vollständige Westgard-Regelliste. Beim Export bedeutet der Standard weiterhin
-unveränderte Archivbytes. Die optionale Druckfassung verwendet nur das gespeicherte
-Modell, bei alten Modellen den bisherigen Layoutzweig und ausschließlich damalige
-Kennzahlen; DB, Modell und alte PDF bleiben unverändert. Der Bool-Modus bleibt
-beim Spawn und in den Rückgabemetadaten geprüft. Die echten prä-P2- und prä-P4-
-Fixtures binden ursprüngliches Modell/PDF, Hash und Herkunft.
+`include_explanations=False` bleibt im bestehenden Render-/Exportpfad der
+Standard. Beim Export bedeutet das unveränderte Archivbytes. Die optionale
+Druckfassung rendert nur das gespeicherte Modell und hängt Legenden,
+Interpretation und Verfahrensdetails an; sie schreibt weder DB noch Modell oder
+alte PDF um. Der Bool-Modus wird beim Spawn und in den Rückgabemetadaten geprüft.
+Alte v1-Nachweise bleiben exakt exportierbar und können bei unterstütztem Modell
+als separate erläuterte Druckfassung dargestellt werden.
 
 Assaynamen sind Präsentationsdaten im bestehenden Application-Owner. Der
 ResultsController bevorzugt die tatsächlich ausgewählte Revision, sonst den
@@ -470,7 +359,10 @@ flowchart LR
 - `src/ingestion` ist alleiniger Owner fuer Import-Instanz-Ledger (`ingestion_id`), Watch-Scan/Stabilitaet, Archivierung/Recovery und `current_path`. Persistenz: `<project_root>/storage/ingestion/*.json` (atomar, file-backed; corrupt/invalid JSON fail-closed). Archive publish: verified partial → exclusive `os.link` into final target (same volume, no overwrite); unsupported/failed link fails closed with source+partial preserved. Archive-Status inkl. `RECOVERY_REQUIRED` wenn Quelle+Ziel fehlen und kein verifiziertes Partial finalisierbar ist. Keine Writes in `src.resultstore`.
 - `SettingsController` persistiert optional `<project_root>/storage/desktop_settings.json` fuer den effektiven `output_mode=sqlite`, `sqlite_path`, `watch_enabled`, `watch_input_path`, `watch_backup_path`, `watch_recursive`, `device_id` und `operator_initials` (Legacy-Alias `watch_dir` beim Laden). Initialen werden getrimmt; `watch_enabled` / `watch_recursive` Default `false`. Archiv-Eligibility nur bei Queue-Status `DONE` (nicht `FAILED`).
 - Phase 3A: Application-Readmodels/DTOs fuer Ingestion-Instanzen (`IngestionInstanceItem` mit queue-aware `display_status`), Report-Lesen (`ReportSummaryItem`/`ReportDetail` via `src.resultstore.api.list_report_summaries`/`get_report_runs` mit gemeinsamer Owner-Gruppierung: primaer `job_id`, Legacy-Fallback normalisierter `pdf_path` + deterministisches `created_at`-Fenster `LEGACY_REPORT_TIME_WINDOW_S=5.0`), Nacharbeit-Diagnose (`JobDiagnosisItem` via gehaertetem `get_job_evidence` inkl. begrenztem `context_text`/`context_source_label`; Volltext-Discovery via `get_job_diagnostic_sources`), Duplikat-Diagnose (`DuplicateCandidate*`/`DuplicateExistingRunItem`/`DuplicateDecisionResult`), Assay-Kandidaten (`RuleSuiteController.discover_assay_candidates` und `discover_assay_candidates_for_job`), Watch-/Device-Readmodels (`WatchTimingSettings` mit safe Normalisierung `max(0.5, scan)` / stabile Fenster-Regeln, `DeviceInventoryStatus`), zentraler Statusmapping-Vertrag (`presentation.py`), kontrollierte Desktop-Aktionen (`SettingsController.open_output_folder`, `ResultsController.open_report_pdf`; generische `open_path` nicht oeffentlich).
-- Phase 3B (Shell), aktueller Stand: `AnalyzerDesktopApp` in `interfaces/tk/test_app.py` — sieben Views (`dashboard`, `results`, `statistics`, `validation`, `rules`, `settings`, `diagnostics`), `TkTaskRunner` fuer Hintergrund-I/O, Orchestrierung ueber `src.application.api` (vier Controller). Default-Start: `test_app_main.py` → `run_entry` → `main()` → `AnalyzerDesktopApp`; Fallback `LegacyTestApp` via `ARE_LEGACY_UI`. Controller-/Storage-Zugriffe nicht auf dem Tk-Hauptthread; Widgets/Dialoge nur im UI-Thread. Gate 3 wurde historisch mit kompletter Suite, Onedir-Build und manuellem Tk-Smoke abgeschlossen; der aktuelle Statistik-Navigationsstand wird gesondert in TESTBASELINE qualifiziert.
+- Phase 3B (Shell), aktueller Stand: `AnalyzerDesktopApp` in `interfaces/tk/test_app.py` — acht Views (`dashboard`, `results`, `changes`, `statistics`, `validation`, `rules`, `settings`, `diagnostics`), `TkTaskRunner` fuer Hintergrund-I/O, Orchestrierung ueber `src.application.api` (vier Controller). Default-Start: `test_app_main.py` → `run_entry` → `main()` → `AnalyzerDesktopApp`; Fallback `LegacyTestApp` via `ARE_LEGACY_UI`. Controller-/Storage-Zugriffe nicht auf dem Tk-Hauptthread; Widgets/Dialoge nur im UI-Thread. Gate 3 wurde historisch mit kompletter Suite, Onedir-Build und manuellem Tk-Smoke abgeschlossen; der aktuelle Statistik-Navigationsstand wird gesondert in TESTBASELINE qualifiziert.
+
+- Herstellerkennungsfälle liegen ausschließlich beim RuleSuite-Fachowner unter `storage/rulesuite/identity_cases.json` (private Runtime-Daten, nicht im ausgelieferten Regelbestand). Der gemeinsame Abschnittsparser trennt Kennung und Dokumenttitel vom konfigurierten Anzeigenamen. Bekannte Namen ergeben nur belegte Zuordnungsvorschläge; neue IDs werden nie als Alias geroutet. Vor jeder Ausgabe entstehen store-/quellengebundene offene Fälle, vorhandene DONE-Jobs bleiben unverändert. Zuordnung/leer/Kopie, exakte V2-Prüfung und erste Aktivierung sind unter dem vorhandenen Lifecycle-Lock gebunden; Regelinhalt und privater Vorbereitungsbeleg werden vor dem atomaren Indexschalter gesichert. Nach der ersten Veröffentlichung ist die neue ID unabhängig von der alten Regel. `ChangesView` orchestriert über `RuleSuiteController`; der injizierte bestehende `ExtractionController` verarbeitet fallgenau über den bestehenden Queue-Claim. FAILED wird dabei atomar direkt PROCESSING, niemals global PENDING; Pfad, voller SHA, Store und Originalgerät bleiben eingefroren. Aktivierung allein erledigt einen Fall nicht. Nur erfolgreiche, zum Speicher/Gerät passende Originalaufträge schließen ihn; fehlende Quellen oder weitere offene Kennungen bleiben offen. Diagnose bietet keinen zweiten Zuordnungsweg für denselben Kennungsfall.
+- Gebundene Nachläufe behalten ihre vollständige Fallbindung auch bei Lock/Abbruch/TTL und im allgemeinen Worker-/Diagnosepfad. Ein günstiger Statusfilter überspringt abgeschlossene Queuezeilen; der Claim liest den Fallindex einmal und isoliert einzelne unvollständige Altzeilen. Neue Versuche haben UUID und einen gehaltenen Betriebssystem-Lock statt TTL-/Host-PID-Eigentum; lebende Arbeit wird nicht überholt, Prozessende gibt den Besitz frei. Nur der tatsächliche Besitzer entfernt seinen Marker. `verify_completed_job` liest vollständige unveränderliche SQLite-Ausgaben (einschließlich echter `already_persisted`- und `duplicate_pending`-Belege), nicht die ausgewählte Validierungsfassung. Ein vollständiger gespeicherter Abschluss kann ausschließlich die Queue nachziehen, ohne neuen Import; dünne/fremde Belege bleiben offen. Ein ausdrücklich neu manuell eingereichter Alt-Direktimport bleibt im ursprünglichen Quellen-/Store-/Gerätekontext ausführbar, ohne einen alten gesperrten Auftrag allgemein auf PENDING zu setzen.
 - `ExtractionController.run_watch_cycle()` ist headless testbar; `interfaces/headless/watchdog.py` delegiert dorthin (kein Event-Watchdog). Stable-Window-Normalisierung entspricht `SettingsController.get_watch_timing()`.
 - `ResultsController` loest `current_pdf_path` additiv ueber `src.ingestion.api.resolve_current_path` (Exact-Match; sonst Legacy-Fallback; Mehrdeutigkeit ohne Willkuer-Auswahl). Report-`display_status` priorisiert echte Queue-Status aus `src.jobqueue.api.list_jobs`, sonst Ledger-Status der exakt aufgeloesten `ingestion_id`; `DONE` nur bei leerem `job_id`, `legacy_fallback` und ohne Queue-/Ledger-Evidenz.
 - Phase 4: `src.resultvalidation.api` ist alleiniger Owner der Tabelle `run_validations`. Erstvalidation und explizite Korrektur sind append-only; Korrekturen verweisen ueber `supersedes_validation_id` auf den vorherigen Stand. `src.resultstore` bleibt read-only. `ResultsController` reichert Report-DTOs mit aktueller Validation und Historie an und leitet `Unvalidiert`, `Teilweise validiert`, `Validiert` bzw. bei Fehler/Klaerfall `Pruefung erforderlich` ab. Die Tk-View schreibt nie direkt nach SQLite.
@@ -481,7 +373,7 @@ flowchart LR
 
 - `test_app_main.py` startet die Produkt-Shell (`AnalyzerDesktopApp`); `ARE_LEGACY_UI=1` aktiviert die tabbed Legacy-`TestApp`.
 - `run_entry`: `ARE_SMOKE_EXIT=1` → Startup-Check ohne Tk; `ARE_START_RULE_EDITOR=1` → Rule Editor; sonst `main(project_root=resolve_app_root(...))`.
-- `rule_editor_main.py` startet den Tkinter-Rule-Editor (auch aus der Rules-Ansicht bzw. per EXE-Neustart im Frozen-Modus). Das Fenster haelt genau einen `RuleSuiteController`. `rule_editor/**/*.py` importiert `src` hoechstens als `src.application.api`; Assay-Auswahl und Manage-Inventar nutzen `list_inventory`. Die Aktivierung eines bestehenden Regelwerks laeuft ueber denselben Controller und damit ueber den byte-genauen, fail-closed History-Snapshot. Die Phase-6-Inventar-Startseite und der dreispaltige Workspace (`field_list_panel`, `report_panel`, `field_settings_panel`) bleiben bestehen; seltene Funktionen liegen in `advanced_view`. Phase 7 erweitert das Inventar additiv um read-only History/Trash mit Zeitstempel, SHA-256 und Fehlerstatus. History und Inactive werden ueber den Controller als neue, nicht ueberschreibende Drafts geoeffnet; Trash bleibt unveraenderlich. Gate 7 ist nach Review, Vollregression und sichtbarer isolierter Lifecycle-Abnahme `GATE_PASSED`.
+- Die Rules-Ansicht bettet genau einen `RuleEditorWorkspace` aus `rule_editor/editor_workspace.py` ein und nutzt den vorhandenen `RuleSuiteController` der Desktop-Services. `rule_editor_main.py` ist der duenne eigenstaendige Fensterrahmen desselben Frames (auch fuer `ARE_START_RULE_EDITOR=1`); die Produktansicht startet keinen zweiten Prozess. Das gemeinsame Inventar liest `list_inventory` einmal und filtert seine Anzeige lokal. Der responsive Workspace ordnet Feldliste, Feldeinstellungen und Test-PDF/Ergebnis an; seltene Funktionen bleiben in `advanced_view`. Direkter Editor und Wizard verwenden denselben asynchronen Ein-Test-PDF-Nachweis mit automatischer lokaler Zweitpruefung: keine geeignete zweite Quelle bedeutet gelb/offen, eine fehlgeschlagene geeignete Quelle blockiert. Rohwerte bleiben nur transient in der Darstellung; der Test schreibt keinen ResultStore. Auswahl-/Entwurfs-/Kontextwechsel verwerfen veraltete Antworten. Die ausdruecklich bestaetigte Aktivierung bindet denselben Beleg und die create/update-Intention; der bestehende Lifecycle-Lock prueft Nachweis, Quellen und exakte Entwurfsbytes vor dem Schreiben erneut. History/Inactive werden weiterhin nicht ueberschreibend als Draft geoeffnet; Trash bleibt unveraenderlich.
 - `gui_min_ext.py` / `gui_min.py` sind **Legacy**-Direktmodus-GUIs fuer `submit` ohne Queue/Arbeitsliste; weiterhin fuer Smoke/Entwicklung, nicht mehr Packaging-Entry.
 
 ## Runtime-Vertrag
@@ -497,9 +389,3 @@ flowchart LR
 - Legacy-PyInstaller-Spec bleibt nur aus Kompatibilitaetsgruenden im Repo und ist nicht mehr die bevorzugte Build-Quelle.
 
 Feldversuch-Anleitung: `docs/AP17A_FIELD_TRIAL_PACKAGE.md`
-
-### 2.2 report-device and optional profile ownership
-
-The existing owners remain authoritative. QC owns optional version-2 profiles, named device inventory and explicit retained drafts. DbWriter owns additive schema-2 report assignments, semantic device claims and candidate materialization; Resultstore projects them read-only and rejects incomplete marked component schemas. Resultvalidation binds each immutable human decision to the displayed selected result and whole-report assignment under its own transaction. Application's existing ResultsController orchestrates these two explicit steps; the same ValidationView handles initial review and Results-originated correction. The raw import device/key is never substituted for confirmed physical identity.
-
-New analysis model tuple `(4, arev2-qc-analysis-v5, arev2-qc-pdf-v5)` freezes per-function eligibility and source interpretation. The exact older tuples, including literal `(3, arev2-qc-analysis-v4, arev2-qc-pdf-v4)`, remain supported. Original archived model/PDF bytes are read and exported without migration or recalculation. Live QC sources, lot chooser, chronology, SD origins and stale-preview checks all use the effective physical device; unknown same-assay usage remains local uncertainty rather than disappearing or blocking unrelated assays.

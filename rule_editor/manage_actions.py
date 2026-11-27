@@ -49,20 +49,24 @@ class ManageMixin:
     def _inventory_iid(self, row: dict[str, object]) -> str:
         return f"{row.get('kind', '')}|{row.get('path', '')}"
 
-    def _refresh_ruleset_overview(self) -> None:
+    def _refresh_ruleset_overview(self, *, items=None) -> None:
         if self.tree_rulesets is None:
             return
         for row_id in self.tree_rulesets.get_children():
             self.tree_rulesets.delete(row_id)
         self._inventory_by_iid = {}
         try:
-            rows = [_inventory_row(item) for item in self._rules.list_inventory(kind="all")]
+            rows = [_inventory_row(item) for item in (self._rules.list_inventory(kind="all") if items is None else items)]
         except Exception as exc:
             self._set_hint(f"Inventar konnte nicht geladen werden: {exc}")
             return
         selected_kinds = self._selected_inventory_kinds()
+        search_variable = getattr(self, "var_inventory_search", None)
+        query = str(search_variable.get()).strip().casefold() if search_variable is not None else ""
         for row in rows:
             if row.get("kind") not in selected_kinds:
+                continue
+            if query and query not in " ".join(str(row.get(field) or "") for field in ("assay_key", "assay_name", "ruleset_file", "error")).casefold():
                 continue
             if row.get("read_only") and row.get("error"):
                 status = f"NUR LESEN · FEHLER: {row['error']}"
@@ -132,6 +136,7 @@ class ManageMixin:
         if kind == "draft":
             return [
                 ("Entwurf weiterbearbeiten", self.on_manage_edit_selected),
+                ("Entwurf verwerfen …", self.on_discard_selected_draft),
                 ("Entwurf in Papierkorb verschieben …", self.on_manage_delete_selected),
                 ("Endgültig löschen (nur nie aktiviert) …", self.on_delete_never_active_selected),
                 ("Details anzeigen", self.on_show_inventory_details),
@@ -161,10 +166,108 @@ class ManageMixin:
             return
         row = self._selected_inventory_row()
         if not row:
-            button.configure(text="Aktion für Auswahl")
+            button.configure(text="Regel auswählen")
+            bar = getattr(self, "inventory_selection_actions", None)
+            if bar is not None:
+                bar.pack_forget()
             return
         actions = self._inventory_context_actions(row)
-        button.configure(text=str(actions[0][0]) if actions else "Details anzeigen")
+        button.configure(text="Entwurf bearbeiten" if row.get("kind") == "draft" else str(actions[0][0]) if actions else "Details anzeigen")
+        bar = getattr(self, "inventory_selection_actions", None)
+        if bar is not None:
+            bar.pack(fill="x", pady=(8, 0))
+            discard = getattr(self, "btn_inventory_discard", None)
+            if discard is not None:
+                bar.set_visible(discard, row.get("kind") == "draft")
+                discard.configure(state="disabled" if getattr(self, "_busy", False) else "normal")
+
+    def on_discard_selected_draft(self) -> None:
+        row = self._selected_inventory_row()
+        if row is None or row.get("kind") != "draft":
+            self._set_hint("Bitte einen gespeicherten Entwurf auswählen.")
+            return
+        self._request_draft_discard(str(row.get("path") or ""), expected_revision=str(row.get("sha256") or "") or None,
+            inventory_selection=self._inventory_iid(row))
+
+    def on_discard_current_draft(self) -> None:
+        path = str(getattr(self, "current_draft_path", "") or "")
+        if not path:
+            self._set_hint("Kein gespeicherter Entwurf geladen.")
+            return
+        self._request_draft_discard(path)
+
+    def _discard_operation_busy(self, busy: bool, status: str) -> None:
+        if not busy:
+            progress = getattr(self, "_discard_progress", None)
+            if progress is not None:
+                progress.destroy()
+                self._discard_progress = None
+            self._dialog_guard = False
+            self._set_busy(False, status)
+            return
+        self._dialog_guard = True
+        self._set_busy(True, status)
+        progress = tk.Toplevel(self._dialog_parent())
+        progress.title("Entwurf verwerfen")
+        progress.transient(self._dialog_parent())
+        progress.resizable(False, False)
+        tk.Label(progress, text=status, padx=24, pady=18).pack()
+        progress.protocol("WM_DELETE_WINDOW", lambda: None)
+        progress.grab_set()
+        progress.focus_set()
+        self._discard_progress = progress
+
+    def _request_draft_discard(self, path: str, *, expected_revision: str | None = None, inventory_selection: str | None = None) -> None:
+        if getattr(self, "_busy", False) or getattr(self, "_dialog_guard", False) or getattr(self, "_field_mutation_guard", False):
+            self._set_hint("Bitte den laufenden Vorgang zuerst beenden.")
+            return
+        same_loaded = self._same_draft_path(str(getattr(self, "current_draft_path", "") or ""), path)
+        local_changes = same_loaded and (getattr(self, "_dirty", False) or getattr(self, "_field_form_dirty", False))
+        rules = self._rules
+        context, proof_generation = self._context_generation, self._proof_generation
+        def current():
+            return rules is self._rules and context == self._context_generation and proof_generation == self._proof_generation
+        def failed(exc):
+            self._discard_operation_busy(False, "Bereit")
+            if current():
+                messagebox.showerror("Entwurf verwerfen", str(exc), parent=self._dialog_parent())
+                self._set_hint("Verwerfen abgelehnt. Bitte den gespeicherten Entwurf neu laden.")
+        def committed(result):
+            self._discard_operation_busy(False, "Bereit")
+            if rules is not self._rules:
+                return
+            if self._same_draft_path(str(getattr(self, "current_draft_path", "") or ""), result["draft_path"]):
+                self._invalidate_authoring_test()
+                self._clear_loaded_draft()
+            self._refresh_ruleset_overview()
+            self._set_hint("Gespeicherter Entwurf und eigener Prüfnachweis verworfen. Aktive Regeln bleiben unverändert.")
+        def prepared(receipt):
+            self._discard_operation_busy(False, "Bereit")
+            if not current():
+                return
+            row = self._selected_inventory_row() if inventory_selection is not None else None
+            if inventory_selection is not None and (row is None or self._inventory_iid(row) != inventory_selection):
+                return
+            dirty_note = "\nAuch die ungespeicherten Eingaben dieses Entwurfs im Editor gehen verloren." if local_changes else ""
+            self._dialog_guard = True
+            try:
+                confirmed = messagebox.askyesno("Entwurf verwerfen", f"Diesen gespeicherten Entwurf endgültig verwerfen?\n\n{receipt['assay_name']} · {receipt['assay_key']}\n{receipt['draft_path']}\n\nNur diese Entwurfsdatei und ihr eigener Prüfnachweis werden entfernt. Kein Papierkorb; aktive Regel, Index und Historie bleiben unverändert.{dirty_note}", parent=self._dialog_parent())
+            finally:
+                self._dialog_guard = False
+            if not confirmed:
+                return
+            if not current():
+                return
+            self._discard_operation_busy(True, "Gespeicherten Entwurf verwerfen …")
+            def commit():
+                if not current():
+                    raise RuntimeError("Der Entwurfskontext wurde gewechselt.")
+                return rules.discard_draft(receipt["draft_path"], expected_revision=receipt["revision"], expected_readiness_revision=receipt["readiness_revision"])
+            if not self._task_runner.submit("editor-draft-discard", commit, on_success=committed, on_error=failed):
+                self._discard_operation_busy(False, "Bereit")
+        self._discard_operation_busy(True, "Gespeicherten Entwurf prüfen …")
+        if not self._task_runner.submit("editor-draft-discard-read", lambda: rules.prepare_draft_discard(path, expected_revision=expected_revision), on_success=prepared, on_error=failed):
+            self._discard_operation_busy(False, "Bereit")
 
     def on_inventory_primary_action(self) -> None:
         row = self._selected_inventory_row()
@@ -316,6 +419,7 @@ class ManageMixin:
             start_intent="neutral" if intent == "neutral" else "new",
             initial_draft_path=str(getattr(self, "current_draft_path", "") or "").strip() or None,
             on_session_closed=self._sync_editor_after_wizard,
+            proof_owner=self,
         )
 
     def _prepare_dirty_editor_for_wizard(self) -> bool:
@@ -352,11 +456,11 @@ class ManageMixin:
         target = str(draft_path or "").strip()
         if not current or not target or not self._same_draft_path(current, target):
             return
+        completion = self._capture_authoring_completion(target)
         self.on_load_draft_into_editor(current)
+        self._adopt_authoring_completion(completion)
 
     def _wizard_open_draft(self, draft_path: str) -> None:
-        if "_proof_loaded_identity" in self.__dict__:
-            self._proof_loaded_identity = None
         current = str(getattr(self, "current_draft_path", "") or "").strip()
         if current and self._same_draft_path(current, draft_path):
             if self.on_load_draft_into_editor(draft_path) is False:
@@ -373,9 +477,19 @@ class ManageMixin:
         self._set_hint("Entwurf zum Weiterbearbeiten im Editor geladen. Es wurde nichts aktiviert.")
 
     def _wizard_activate_draft(self, draft_path: str) -> None:
-        # Compatibility callback: a wizard can return a checked draft, never
-        # issue the user's separate final activation intent.
-        self._wizard_open_draft(draft_path)
+        completion = self._capture_authoring_completion(draft_path)
+        current = str(getattr(self, "current_draft_path", "") or "").strip()
+        if current and self._same_draft_path(current, draft_path):
+            if self.on_load_draft_into_editor(draft_path) is False:
+                return
+        else:
+            opened = self._open_draft_in_editor(draft_path)
+            if opened in {"abort", "error"}:
+                return
+        self._adopt_authoring_completion(completion)
+        self.on_activate()
+        self._reload_assays()
+        self._refresh_ruleset_overview()
 
     def _on_editor_close(self) -> None:
         if getattr(self, "_field_mutation_guard", False) or getattr(self, "_dialog_guard", False):
@@ -406,7 +520,7 @@ class ManageMixin:
 
     def _dialog_parent(self) -> tk.Misc | None:
         if hasattr(self, "winfo_toplevel"):
-            return self
+            return self.winfo_toplevel()
         return None
 
     def _predicted_draft_path(self, assay_key: str) -> str:
@@ -666,7 +780,7 @@ class ManageMixin:
         path = str(row.get("path", ""))
         if kind == "draft":
             if not messagebox.askyesno(
-                "Entwurf verwerfen",
+                "Entwurf in Papierkorb",
                 (
                     "Entwurf in den Papierkorb verschieben?\n"
                     "Das ist keine endgültige Löschung; der Eintrag bleibt unter rules/trash/ erhalten.\n\n"

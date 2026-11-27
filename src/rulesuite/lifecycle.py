@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from contextlib import contextmanager
 from datetime import datetime
@@ -119,6 +120,8 @@ def deactivate_ruleset(project_root: str, assay_key: str) -> Dict[str, Any]:
 
 
 def _deactivate_ruleset_unlocked(project_root: str, assay_key: str) -> Dict[str, Any]:
+    from .identity_authoring import finalize_identity_publication
+    finalize_identity_publication(Path(project_root).resolve(), assay_key)
     key = assay_key.strip()
     if not key:
         raise RuleSuiteError("assay_key required")
@@ -598,3 +601,90 @@ def _delete_never_active_ruleset_unlocked(project_root: str, draft_path: str) ->
 def delete_ruleset(project_root: str, assay_key: str) -> Dict[str, Any]:
     """Compatibility wrapper: deactivates instead of deleting active rules."""
     return deactivate_ruleset(project_root, assay_key)
+
+
+def _discard_drafts_directory(project_root: str) -> Path:
+    root = Path(project_root).resolve()
+    rules, drafts = root / "rules", root / "rules" / "drafts"
+    if not rules.is_dir() or not drafts.is_dir() or rules.resolve() != rules or drafts.resolve() != drafts:
+        raise RuleSuiteError("draft_discard_redirected_directory")
+    return drafts
+
+
+def _draft_discard_snapshot(project_root: str, draft_path: str) -> tuple[Dict[str, Any], dict[Path, bytes]]:
+    _discard_drafts_directory(project_root)
+    draft = _resolve_never_active_draft(project_root, draft_path)
+    requested = Path(draft_path)
+    if not requested.is_absolute():
+        requested = draft.parent / requested
+    if requested.is_symlink():
+        raise RuleSuiteError("draft_discard_link_not_allowed")
+    rules = (Path(project_root) / "rules").resolve()
+    index_path = rules / "index.json"
+    if index_path.exists():
+        index = _read_json_object(index_path)
+        rows = index.get("assays", [])
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise RuleSuiteError("ruleset_identity_ambiguous")
+        for row in rows:
+            active_file = row.get("ruleset_file")
+            if isinstance(active_file, str) and (rules / active_file).resolve() == draft:
+                raise RuleSuiteError("draft_discard_active_path")
+    payload = draft.read_bytes()
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise RuleSuiteError("draft_discard_unreadable") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("assay_key"), str) or not data["assay_key"].strip():
+        raise RuleSuiteError("ruleset_identity_ambiguous")
+    proof = draft.with_name(draft.name + ".readiness")
+    snapshots = {draft: payload}
+    if proof.exists() or proof.is_symlink():
+        if proof.is_symlink() or not proof.is_file() or proof.resolve().parent != draft.parent:
+            raise RuleSuiteError("draft_discard_proof_invalid")
+        snapshots[proof] = proof.read_bytes()
+    return {
+        "draft_path": str(draft), "assay_key": data["assay_key"].strip(), "assay_name": str(data.get("assay_name") or ""),
+        "revision": hashlib.sha256(payload).hexdigest(),
+        "readiness_revision": hashlib.sha256(snapshots[proof]).hexdigest() if proof in snapshots else None,
+    }, snapshots
+
+
+def prepare_draft_discard(project_root: str, draft_path: str, *, expected_revision: str | None = None) -> Dict[str, Any]:
+    """Freeze only the selected saved draft and its own sidecar for confirmation."""
+    _discard_drafts_directory(project_root)
+    with rulesuite_lifecycle_lock(project_root):
+        draft = _resolve_never_active_draft(project_root, draft_path)
+        with rulesuite_draft_lock(draft):
+            receipt, _snapshots = _draft_discard_snapshot(project_root, draft_path)
+            if expected_revision is not None and receipt["revision"] != expected_revision:
+                raise RuleSuiteError("draft_revision_conflict")
+            return receipt
+
+
+def discard_draft(project_root: str, draft_path: str, *, expected_revision: str,
+                  expected_readiness_revision: str | None) -> Dict[str, Any]:
+    """Discard one confirmed file pair; never infer a lifecycle target from its ID."""
+    _discard_drafts_directory(project_root)
+    with rulesuite_lifecycle_lock(project_root), rulesuite_draft_lock(_resolve_never_active_draft(project_root, draft_path)):
+        receipt, snapshots = _draft_discard_snapshot(project_root, draft_path)
+        if receipt["revision"] != expected_revision or receipt["readiness_revision"] != expected_readiness_revision:
+            raise RuleSuiteError("draft_discard_revision_conflict")
+        quarantine: list[tuple[Path, Path]] = []
+        try:
+            for path, payload in snapshots.items():
+                if path.read_bytes() != payload:
+                    raise RuleSuiteError("draft_discard_revision_conflict")
+                backup = path.with_name(f".{path.name}.{uuid4().hex}.discarding")
+                os.replace(path, backup)
+                quarantine.append((path, backup))
+                if backup.read_bytes() != payload:
+                    raise RuleSuiteError("draft_discard_revision_conflict")
+            if any(path.exists() for path in snapshots):
+                raise RuleSuiteError("draft_discard_revision_conflict")
+            for _path, backup in quarantine:
+                _discard_quarantine(backup)
+        except Exception as exc:
+            _restore_quarantine(quarantine, snapshots)
+            raise RuleSuiteError("draft_discard_failed") from exc
+        return {"status": "discarded", **receipt, "readiness_removed": receipt["readiness_revision"] is not None}

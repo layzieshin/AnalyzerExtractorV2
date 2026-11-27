@@ -8,16 +8,12 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-CURRENT_ANALYSIS_ID = "arev2-qc-analysis-v5"
-SUPPORTED_MODEL_VERSIONS = frozenset({
-    (1, algorithm, renderer)
-    for algorithm in ("arev2-qc-analysis-v1", "arev2-qc-analysis-v2")
-    for renderer in ("arev2-qc-pdf-v1", "arev2-qc-pdf-v2")
-} | {(2, "arev2-qc-analysis-v3", "arev2-qc-pdf-v3"),
-     (3, "arev2-qc-analysis-v4", "arev2-qc-pdf-v4"), (4, CURRENT_ANALYSIS_ID, "arev2-qc-pdf-v5")})
+CURRENT_ANALYSIS_ID = "arev2-qc-analysis-v2"
+SUPPORTED_ANALYSIS_IDS = frozenset({"arev2-qc-analysis-v1", CURRENT_ANALYSIS_ID})
+SUPPORTED_RENDERER_IDS = frozenset({"arev2-qc-pdf-v1", "arev2-qc-pdf-v2"})
 
 
-def sd_parameter_definition(profile: object, control_id: str, *, device_id: str | None = None) -> dict[str, str] | None:
+def sd_parameter_definition(profile: object, control_id: str) -> dict[str, str] | None:
     """Only the identity, value interpretation and unit of the SD's variable.
 
     Names, dates, grouping, SOLL and manufacturer limits do not define SD.
@@ -33,14 +29,10 @@ def sd_parameter_definition(profile: object, control_id: str, *, device_id: str 
     if not isinstance(fields, Mapping):
         return None
     result = {key: profile.get(key) for key in ("profile_id", "device_id", "assay_key", "numeric_grammar")}
-    if not result["device_id"] and profile.get("profile_schema_version") == 2:
-        result["device_id"] = device_id
     result.update(control_id=control_id, ist_field=fields.get("IST"), unit=control.get("unit") or profile.get("unit"),
                   unit_field=control.get("unit_field", ""))
-    if profile.get("dimensionless") is True:
-        result.update(unit="1", unit_field="")
     if (any(not isinstance(value, str) or not value.strip() for key, value in result.items() if key != "unit_field")
-            or not isinstance(result["unit_field"], str) or result["numeric_grammar"] not in {"auto", "decimal_dot", "decimal_comma"}):
+            or not isinstance(result["unit_field"], str) or result["numeric_grammar"] not in {"decimal_dot", "decimal_comma"}):
         return None
     return result
 
@@ -94,32 +86,9 @@ class QCAnalysis:
     @property
     def is_supported(self) -> bool:
         model = self.to_dict()
-        version, algorithm, renderer = (model.get(key) for key in ("analysis_model_version", "algorithm_id", "renderer_id"))
-        return (type(version) is int and isinstance(algorithm, str) and isinstance(renderer, str)
-                and (version, algorithm, renderer) in SUPPORTED_MODEL_VERSIONS)
-
-
-@dataclass(frozen=True)
-class QCUsageSnapshot:
-    """Canonical read-only usage evidence, independent of statistical eligibility."""
-
-    snapshot_json: str
-    snapshot_sha256: str
-
-    def __post_init__(self):
-        try:
-            value = json.loads(self.snapshot_json)
-        except (TypeError, ValueError) as exc:
-            raise QCConfigurationError("Der Nutzungsnachweis ist unlesbar.") from exc
-        if not isinstance(value, dict) or canonical_json(value) != self.snapshot_json or content_hash(value) != self.snapshot_sha256:
-            raise QCConfigurationError("Der Nutzungsnachweis oder seine Prüfsumme ist ungültig.")
-
-    @classmethod
-    def freeze(cls, value):
-        return cls(canonical_json(value), content_hash(value))
-
-    def to_dict(self):
-        return json.loads(self.snapshot_json)
+        algorithm, renderer = model.get("algorithm_id"), model.get("renderer_id")
+        return (model.get("analysis_model_version") == 1 and isinstance(algorithm, str) and algorithm in SUPPORTED_ANALYSIS_IDS
+                and isinstance(renderer, str) and renderer in SUPPORTED_RENDERER_IDS)
 
 
 @dataclass(frozen=True)
@@ -129,28 +98,6 @@ class QCPdfReport:
     model_sha256: str
     renderer_id: str
     page_count: int
-
-
-@dataclass(frozen=True)
-class ConfigurationContext:
-    """Configuration edits have technical provenance without requiring a person.
-
-    This context is deliberately separate from the mandatory actor carried by
-    result validation and clinical lot decisions. Empty means not provided.
-    """
-
-    request_id: str
-    operator_initials: str = ""
-    reason: str = ""
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.request_id, str) or not self.request_id.strip():
-            raise QCConfigurationError("Anfragekennung fehlt.")
-        for key in ("request_id", "operator_initials", "reason"):
-            value = getattr(self, key)
-            if not isinstance(value, str):
-                raise QCConfigurationError("Konfigurationskontext muss Text enthalten.")
-            object.__setattr__(self, key, value.strip())
 
 
 @dataclass(frozen=True)

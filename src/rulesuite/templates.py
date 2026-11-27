@@ -18,6 +18,12 @@ from .required_fields import REQUIRED_HEADER_FIELD_KEYS
 HEADER_FIELD_KEYS = REQUIRED_HEADER_FIELD_KEYS
 
 
+def blank_draft_data(assay_key: str, assay_name: str) -> Dict[str, Any]:
+    return {"assay_name": assay_name, "assay_key": assay_key, "lot_rule": {"regex": ""},
+            "extract_rules": {"fields": [], "dedupe_fields": []},
+            "excel_rules": {"excel_filename_template": "{assay_name}.xlsx", "sheetname_template": "{lot_id}", "column_mapping": {}}}
+
+
 def _load_template_fields_and_mapping(project_root: str) -> Tuple[List[Dict[str, Any]], Dict[str, str], Any]:
     template_path = Path(project_root) / "rules" / "template.json"
     if not template_path.exists():

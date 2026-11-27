@@ -35,6 +35,7 @@ def map_ingestion_display_status(
     archive_status: str,
     *,
     queue_status: str = "",
+    technical_detail: str = "",
 ) -> str:
     proc = derive_effective_processing_status(processing_status, queue_status)
     arch = str(archive_status or "").strip().upper()
@@ -44,6 +45,8 @@ def map_ingestion_display_status(
     if arch == _ARCH_FAILED:
         return "Verarbeitet - Archivierung fehlgeschlagen"
     if proc == _PROC_FAILED:
+        if technical_detail == "assay_identity_change_pending":
+            return "Kennung klären"
         return "Verarbeitung fehlgeschlagen"
     if proc in {_PROC_REGISTERED, _PROC_PENDING}:
         return "Wartet"
@@ -66,10 +69,18 @@ def friendly_processing_message(technical_detail: str) -> str:
         return "Die PDF-Datei wurde nicht gefunden."
     if detail == "no_assay_detected":
         return "Im PDF wurde kein passender Assay erkannt."
+    if detail == "assay_identity_change_pending":
+        return "Neue Herstellerkennung – bitte unter Änderungen zuordnen."
     if detail == "validation_failed":
         return "Die PDF-Validierung ist fehlgeschlagen."
-    if detail == "source_changed_since_ingest":
+    if detail.startswith("source_changed_since_ingest"):
         return "Die Quelldatei hat sich seit dem Import geaendert."
+    if detail == "identity_case_queue_job_missing":
+        return "Für diesen ursprünglichen Direktimport fehlt ein Queueauftrag; der Fall bleibt offen."
+    if detail.startswith("identity_case_source_"):
+        return "Quelle, Gerät oder ursprünglicher Verarbeitungsnachweis passen nicht mehr. Bitte den Fall prüfen."
+    if detail == "identity_case_store_changed":
+        return "Der Ergebnisspeicher wurde gewechselt. Bitte den Fall neu laden."
     if detail == "watch_backup_path_missing":
         return "Der Archiv-Ordner ist nicht konfiguriert."
     if detail.startswith("excel_write_failed_after_save:"):

@@ -85,10 +85,12 @@ def annotate_assay_candidates(
     return annotated
 
 
-def load_known_assay_keys(rules_index_path: str) -> set[str] | None:
+def load_known_assay_keys(rules_index_path: str, *, index_bytes: bytes | None = None) -> set[str] | None:
     try:
-        payload = json.loads(Path(rules_index_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(index_bytes.decode("utf-8") if index_bytes is not None else Path(rules_index_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
         return None
     assays = payload.get("assays")
     if not isinstance(assays, list):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 import math
 from decimal import Decimal
 from datetime import datetime, timedelta
@@ -8,7 +9,8 @@ from collections.abc import Callable, Sequence
 from tkinter import ttk
 
 from interfaces.tk.view_models import format_timestamp
-from interfaces.tk.widgets.common import Card, SectionHeader, create_scrollable_tree
+from interfaces.tk.scroll_helpers import bind_mousewheel
+from interfaces.tk.widgets.common import Card, MultiSelectFilter, ScrollableFrame, StatusBadge, create_scrollable_tree
 from src.application.api import QCAnalysisView, QCLotCase, QCLotDetail, QCReportVersion
 
 
@@ -39,61 +41,125 @@ class StatisticsView(ttk.Frame):
         self._qc_chart_hits = {}
         self._qc_cases: dict[str, QCLotCase] = {}
         self._qc_detail: QCLotDetail | None = None
+        self._layout_after_id = None
+        self._compact = None
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+        self._configure_styles()
         self._build_qc_panel()
 
+    def _configure_styles(self) -> None:
+        style = ttk.Style(self)
+        style.configure("Statistics.TButton", font=("Segoe UI", 9), padding=(8, 5), background="#ffffff",
+            foreground="#21486f", bordercolor="#cbdbea", lightcolor="#ffffff", darkcolor="#ffffff", borderwidth=1, relief="solid")
+        style.map("Statistics.TButton", background=[("active", "#eef5fd")], foreground=[("disabled", "#8b9bad")],
+            bordercolor=[("focus", "#8bb2df")])
+        style.configure("Ghost.Statistics.TButton", bordercolor="#ffffff")
+        style.configure("Statistics.Primary.TButton", font=("Segoe UI", 9, "bold"), padding=(10, 5))
+        style.configure("Statistics.TMenubutton", font=("Segoe UI", 9), padding=(8, 5), background="#ffffff",
+            foreground="#21486f", bordercolor="#cbdbea")
+        style.configure("Statistics.TCombobox", font=("Segoe UI", 9), padding=(6, 5), arrowsize=14, bordercolor="#cbdbea")
+        style.map("Statistics.TCombobox", fieldbackground=[("disabled", "#edf1f5"), ("readonly", "#ffffff")],
+            background=[("disabled", "#edf1f5"), ("readonly", "#ffffff")],
+            foreground=[("disabled", "#8b9bad"), ("readonly", "#16293c")])
+        style.configure("Statistics.Muted.TLabel", font=("Segoe UI", 9), background="#ffffff", foreground="#53677a")
+        style.configure("Statistics.Title.TLabel", font=("Segoe UI", 12, "bold"), background="#ffffff", foreground="#16293c")
+        style.configure("Statistics.Metrics.TLabel", font=("Segoe UI", 10), background="#f0f6fd", foreground="#16293c", padding=(10, 8))
+        style.configure("Statistics.Treeview", rowheight=36, font=("Segoe UI", 9), bordercolor="#dbe4ed")
+        style.configure("Statistics.Treeview.Heading", font=("Segoe UI", 9, "bold"), padding=(8, 6), background="#f0f5fb")
+        style.map("Statistics.Treeview", background=[("selected", "#eaf3fd")], foreground=[("selected", "#175ba4")])
+        style.configure("Statistics.TNotebook", background="#ffffff", borderwidth=0)
+        style.configure("Statistics.TNotebook.Tab", font=("Segoe UI", 9, "bold"), padding=(10, 7))
+
     def _build_qc_panel(self) -> None:
-        self._qc_panel = ttk.Frame(self, style="Content.TFrame")
-        self._qc_panel.grid(row=0, column=0, sticky="nsew")
-        card = Card(self._qc_panel)
-        card.pack(fill="both", expand=True)
-        footer = ttk.Frame(card.body, style="CardInner.TFrame")
-        footer.pack(side="bottom", fill="x", pady=(8, 0))
-        scroll = ttk.Scrollbar(card.body, orient="vertical")
-        scroll.pack(side="right", fill="y")
-        outer = tk.Canvas(card.body, highlightthickness=0, yscrollcommand=scroll.set)
-        outer.pack(fill="both", expand=True)
-        scroll.configure(command=outer.yview)
-        body = ttk.Frame(outer, style="CardInner.TFrame")
-        window = outer.create_window((0, 0), window=body, anchor="nw")
-        body.bind("<Configure>", lambda _event: outer.configure(scrollregion=outer.bbox("all")))
-        outer.bind("<Configure>", lambda event: outer.itemconfigure(window, width=event.width))
-        header = ttk.Frame(body, style="CardInner.TFrame")
-        header.pack(fill="x", pady=(0, 8))
-        ttk.Button(header, text="Neu laden", command=self._on_open_qc).pack(side="left", padx=8)
-        ttk.Label(body, text="Chargen und Qualitätskontrolle", style="SectionTitle.TLabel").pack(anchor="w")
-        frame, self._qc_tree = create_scrollable_tree(body, ("device", "assay", "lot", "state", "usage", "offer"),
-            ("Gerät", "Assay", "Kit-Charge", "Stand", "Letzte Nutzung", "Abschlussangebot / Klärung"), height=3)
-        frame.pack(fill="both", expand=True, pady=6)
+        self._page_header = ttk.Frame(self, style="Content.TFrame", padding=(12, 12, 12, 10))
+        self._page_header.grid(row=0, column=0, sticky="ew")
+        self._eyebrow = ttk.Label(self._page_header, text="QUALITÄTSKONTROLLE", style="Eyebrow.TLabel")
+        self._eyebrow.pack(anchor="w")
+        self._page_title = ttk.Label(self._page_header, text="Statistik", style="PageTitle.TLabel")
+        self._page_title.pack(anchor="w", pady=(4, 2))
+        self._page_subtitle = ttk.Label(self._page_header, text="Chargen, Kontrollverläufe und nachvollziehbare PDF-Nachweise.", style="PageSubtitle.TLabel")
+        self._page_subtitle.pack(anchor="w")
+        self._qc_panel = ScrollableFrame(self, autohide=True)
+        self._qc_panel.grid(row=1, column=0, sticky="nsew", pady=(0, 12))
+        self._qc_panel.body.configure(style="Content.TFrame")
+        self._qc_panel._canvas.configure(background="#f3f6fa", takefocus=True)
+        self._lots_card = Card(self._qc_panel.body, padding=16, rounded=True)
+        self._lots_card.pack(fill="x", padx=12, pady=(0, 12))
+        body = self._lots_card.body
+        heading = ttk.Frame(body, style="CardInner.TFrame")
+        heading.pack(fill="x", pady=(0, 10))
+        heading.columnconfigure(0, weight=1)
+        ttk.Label(heading, text="Chargen", style="Statistics.Title.TLabel").grid(row=0, column=0, sticky="w")
+        self._lot_count = ttk.Label(heading, text="Keine Chargen geladen", style="Statistics.Muted.TLabel")
+        self._lot_count.grid(row=1, column=0, sticky="w", pady=(3, 0))
+        ttk.Button(heading, text="Neu laden", command=self._on_open_qc, style="Statistics.TButton").grid(row=0, column=1, rowspan=2, sticky="ne")
+        self._filter_row = ttk.Frame(body, style="CardInner.TFrame")
+        self._filter_row.pack(fill="x", pady=(0, 10))
+        self._filters = {key: MultiSelectFilter(self._filter_row, title, on_change=self._apply_qc_filters)
+            for key, title in (("device", "Gerät"), ("assay", "Assay"))}
+        for column, widget in enumerate(self._filters.values()):
+            widget.configure(style="Statistics.TMenubutton")
+            widget.grid(row=0, column=column, sticky="nsew", padx=(0, 8))
+        ttk.Button(self._filter_row, text="Filter löschen", command=self._reset_qc_filters, style="Ghost.Statistics.TButton").grid(row=0, column=2, sticky="nsew")
+        frame, self._qc_tree = create_scrollable_tree(body, ("device", "assay", "lot", "state"),
+            ("Gerät", "Assay", "Charge", "Stand"), height=1, autohide=True)
+        frame.pack(fill="x")
+        self._qc_tree.configure(displaycolumns=("lot", "assay", "device", "state"))
         self._qc_tree.bind("<<TreeviewSelect>>", self._select_qc_case)
-        self._qc_tree.column("assay", width=260, minwidth=200, stretch=True)
+
+        self._empty_card = Card(self._qc_panel.body, padding=16, rounded=True)
+        ttk.Label(self._empty_card.body, text="Keine Charge ausgewählt.", style="Statistics.Title.TLabel").pack(anchor="w")
+        self._empty_hint = ttk.Label(self._empty_card.body, text="Charge auswählen, um Kontrollen und Nachweise zu sehen.",
+            style="Statistics.Muted.TLabel", wraplength=550)
+        self._empty_hint.pack(anchor="w", pady=(5, 0))
+
+        self._detail_card = Card(self._qc_panel.body, padding=16, rounded=True)
+        self._detail_card.pack(fill="x", padx=12, pady=(0, 12))
+        body = self._detail_card.body
+        context = ttk.Frame(body, style="CardInner.TFrame")
+        context.pack(fill="x", pady=(0, 10))
+        context.columnconfigure(0, weight=1)
+        self._qc_title = ttk.Label(context, text="Charge auswählen", style="Statistics.Title.TLabel")
+        self._qc_title.grid(row=0, column=0, sticky="w")
+        self._qc_status = StatusBadge(context, "")
+        self._qc_status.grid(row=0, column=1, sticky="ne", padx=(10, 0))
+        self._qc_device = ttk.Label(context, text="", style="Statistics.Muted.TLabel")
+        self._qc_device.grid(row=1, column=0, sticky="w", pady=(3, 0))
         profile_row = ttk.Frame(body, style="CardInner.TFrame")
-        profile_row.pack(fill="x", pady=4)
-        ttk.Label(profile_row, text="Prüfprofil").pack(side="left")
+        self._profile_row = profile_row
+        profile_row.pack(fill="x", pady=(0, 8))
+        profile_row.columnconfigure(1, weight=1)
+        ttk.Label(profile_row, text="Prüfprofil", style="Statistics.Muted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self._qc_profile = tk.StringVar()
-        self._qc_profile_combo = ttk.Combobox(profile_row, textvariable=self._qc_profile, state="readonly", width=45)
-        self._qc_profile_combo.pack(side="left", padx=8)
+        self._qc_profile_combo = ttk.Combobox(profile_row, textvariable=self._qc_profile, state="readonly", width=1, style="Statistics.TCombobox", font=("Segoe UI", 9))
+        self._qc_profile_combo.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
         self._qc_profile_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_qc_selected())
-        ttk.Button(profile_row, text="Quellen anzeigen", command=self._on_qc_selected).pack(side="left")
-        self._qc_summary = ttk.Label(body, text="Charge auswählen. Prüfprofile werden in den Einstellungen verwaltet.", wraplength=800)
-        self._qc_summary.pack(anchor="w", pady=6)
-        self._qc_change_hint = ttk.Label(body, text="", wraplength=800)
-        self._qc_change_hint.pack(anchor="w", pady=4)
+        self._qc_sources_button = ttk.Button(profile_row, text="Quellen und Ausschlüsse", command=self._show_qc_sources, style="Statistics.TButton")
+        self._qc_sources_button.grid(row=0, column=2, sticky="nsew")
+        self._qc_summary = ttk.Label(body, text="Charge auswählen. Prüfprofile werden in den Einstellungen verwaltet.", style="Statistics.Muted.TLabel", wraplength=800)
+        self._qc_summary.pack(anchor="w", pady=(0, 10))
         control_row = ttk.Frame(body, style="CardInner.TFrame")
-        control_row.pack(fill="x", pady=4)
-        ttk.Label(control_row, text="Kontrolle").pack(side="left")
+        self._control_row = control_row
+        control_row.pack(fill="x", pady=(0, 8))
+        control_row.columnconfigure(1, weight=1)
+        ttk.Label(control_row, text="Kontrolle", style="Statistics.Muted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self._qc_control = tk.StringVar()
-        self._qc_control_combo = ttk.Combobox(control_row, textvariable=self._qc_control, state="readonly", width=45)
-        self._qc_control_combo.pack(side="left", padx=8)
+        self._qc_control_combo = ttk.Combobox(control_row, textvariable=self._qc_control, state="readonly", width=1, style="Statistics.TCombobox", font=("Segoe UI", 9))
+        self._qc_control_combo.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
         self._qc_control_combo.bind("<<ComboboxSelected>>", lambda _event: self._render_qc_control())
-        ttk.Button(control_row, text="Diagramm zurücksetzen", command=self._reset_qc_chart).pack(side="left")
-        self._qc_statistics = ttk.Label(body, text="", wraplength=700)
-        self._qc_statistics.pack(anchor="w", pady=4)
-        self._qc_legend = ttk.Label(body, text="", wraplength=850)
-        self._qc_legend.pack(anchor="w", pady=4)
-        self._qc_canvas = tk.Canvas(body, height=230, background="white", highlightthickness=1, highlightbackground="#d8dde6")
-        self._qc_canvas.pack(fill="x", pady=4)
+        self._qc_reset = ttk.Button(control_row, text="Diagramm zurücksetzen", command=self._reset_qc_chart, style="Statistics.TButton")
+        self._qc_reset.grid(row=0, column=2, sticky="nsew")
+        self._qc_statistics = ttk.Label(body, text="", style="Statistics.Metrics.TLabel", wraplength=700)
+        self._qc_statistics.pack(fill="x", pady=(0, 10))
+        self._qc_tabs = ttk.Notebook(body, style="Statistics.TNotebook")
+        self._qc_tabs.pack(fill="x", pady=(0, 10))
+        chart, values, westgard = (ttk.Frame(self._qc_tabs, style="CardInner.TFrame") for _ in range(3))
+        self._qc_chart_tab, self._qc_values_tab, self._qc_westgard_tab = chart, values, westgard
+        for panel, title in ((chart, "Diagramm"), (values, "Einzelwerte"), (westgard, "Westgard")):
+            self._qc_tabs.add(panel, text=title)
+        self._qc_canvas = tk.Canvas(chart, height=230, background="#fbfdff", highlightthickness=1, highlightbackground="#dbe4ed")
+        self._qc_canvas.pack(fill="x", pady=(8, 4))
         self._qc_canvas.bind("<Configure>", lambda _event: self._draw_qc_chart())
         self._qc_canvas.bind("<MouseWheel>", self._zoom_qc_chart)
         self._qc_canvas.bind("<ButtonPress-1>", self._begin_qc_pan)
@@ -101,66 +167,202 @@ class StatisticsView(ttk.Frame):
         self._qc_canvas.bind("<Motion>", self._hover_qc_chart)
         self._qc_canvas.bind("<Leave>", lambda _event: self._qc_tooltip.place_forget())
         self._qc_tooltip = ttk.Label(self._qc_canvas, text="", padding=5, wraplength=270)
-        self._qc_point_info = ttk.Label(body, text="Messpunkt anklicken; Mausrad zoomt, Ziehen verschiebt.", wraplength=700)
+        self._qc_point_info = ttk.Label(chart, text="Messpunkt anklicken; Mausrad zoomt, Ziehen verschiebt.", style="Statistics.Muted.TLabel", wraplength=700)
         self._qc_point_info.pack(anchor="w", pady=4)
-        frame, self._qc_findings = create_scrollable_tree(body, ("rule", "status", "reason"), ("Regel", "Befund", "Verfügbarkeit / Grund"), height=3)
-        frame.pack(fill="x", pady=4)
-        ttk.Label(body, text="Quellen und Ausschlüsse", style="SectionTitle.TLabel").pack(anchor="w", pady=(8, 0))
-        frame, self._qc_source_tree = create_scrollable_tree(body, ("date", "control", "actual", "target", "min", "max", "state"),
-            ("Messdatum", "Kontrolle", "IST", "SOLL", "Hersteller-MIN", "Hersteller-MAX", "Eignung / Klärgrund"), height=3)
-        frame.pack(fill="both", expand=True, pady=6)
-        actions = ttk.Frame(footer, style="CardInner.TFrame")
-        actions.pack(fill="x", pady=6)
-        self._qc_configure = ttk.Button(actions, text="Charge einrichten / Referenzen", state="disabled", command=self._on_configure_qc)
-        self._qc_configure.pack(side="left")
-        self._qc_reopen = ttk.Button(actions, text="Charge wieder öffnen", state="disabled", command=self._on_reopen_qc)
-        self._qc_reopen.pack(side="left", padx=8)
-        self._qc_close = ttk.Button(actions, text="Abschluss prüfen", state="disabled", command=self._on_close_qc)
-        self._qc_close.pack(side="left")
-        history_row = ttk.Frame(footer, style="CardInner.TFrame")
-        history_row.pack(fill="x", pady=4)
-        ttk.Label(history_row, text="Auswertung / Nachweis").pack(side="left")
-        self._qc_version = tk.StringVar()
-        self._qc_version_combo = ttk.Combobox(history_row, textvariable=self._qc_version, state="readonly", width=38)
-        self._qc_version_combo.pack(side="left", padx=8)
-        self._qc_version_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_qc_report_selected())
-        self._qc_export = ttk.Button(history_row, text="PDF speichern", state="disabled", command=self._on_export_qc)
-        self._qc_export.pack(side="left")
-        self._qc_include_explanations = tk.BooleanVar(value=False)
-        ttk.Checkbutton(footer, text="Erläuterungen und zusätzliche Nachweise mitdrucken", variable=self._qc_include_explanations).pack(anchor="w", pady=4)
+        frame, self._qc_findings = create_scrollable_tree(westgard, ("rule", "status", "reason"), ("Regel", "Befund", "Verfügbarkeit / Grund"), height=5, autohide=True)
+        frame.pack(fill="both", expand=True, pady=(8, 0))
+        frame, self._qc_source_tree = create_scrollable_tree(values, ("date", "control", "actual", "target", "state"),
+            ("Messdatum", "Kontrolle", "IST", "SOLL", "Eignung / Klärgrund"), height=5, autohide=True)
+        frame.pack(fill="both", expand=True, pady=(8, 0))
+        self._qc_actions = ttk.Frame(body, style="CardInner.TFrame")
+        self._qc_actions.pack(fill="x")
+        self._qc_configure = ttk.Button(self._qc_actions, text="Charge einrichten / Referenzen", state="disabled", command=self._on_configure_qc, style="Statistics.TButton")
+        self._qc_reopen = ttk.Button(self._qc_actions, text="Charge wieder öffnen", state="disabled", command=self._on_reopen_qc, style="Statistics.TButton")
+        self._qc_close = ttk.Button(self._qc_actions, text="Mit PDF abschließen", state="disabled", command=self._on_close_qc, style="Statistics.Primary.TButton")
 
-    def render_qc_lots(self, cases: Sequence[QCLotCase]) -> None:
-        self._qc_panel.grid(row=0, column=0, sticky="nsew")
-        self._qc_cases = {case.lot_key: case for case in cases}
+        self._reports_card = Card(self._qc_panel.body, padding=16, rounded=True)
+        self._reports_card.pack(fill="x", padx=12, pady=(0, 12))
+        footer = self._reports_card.body
+        ttk.Label(footer, text="Berichte und Nachweise", style="Statistics.Title.TLabel").pack(anchor="w", pady=(0, 10))
+        history_row = ttk.Frame(footer, style="CardInner.TFrame")
+        self._history_row = history_row
+        history_row.pack(fill="x", pady=(0, 8))
+        history_row.columnconfigure(1, weight=1)
+        self._qc_version_label = ttk.Label(history_row, text="Auswertung / Nachweis", style="Statistics.Muted.TLabel")
+        self._qc_version_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self._qc_version = tk.StringVar()
+        self._qc_version_combo = ttk.Combobox(history_row, textvariable=self._qc_version, state="readonly", width=1, style="Statistics.TCombobox", font=("Segoe UI", 9))
+        self._qc_version_combo.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
+        self._qc_version_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_qc_report_selected())
+        self._qc_export = ttk.Button(history_row, text="PDF speichern", state="disabled", command=self._on_export_qc, style="Statistics.TButton")
+        self._qc_export.grid(row=0, column=2, sticky="nsew")
+        self._qc_include_explanations = tk.BooleanVar(value=False)
+        ttk.Checkbutton(footer, text="Erläuterungen zur Diagrammauswertung mitdrucken", variable=self._qc_include_explanations).pack(anchor="w")
+        for tree in (self._qc_tree, self._qc_source_tree, self._qc_findings):
+            tree.configure(style="Statistics.Treeview")
+            for column in tree.cget("columns"):
+                tree.heading(column, anchor="w")
+            tree.bind("<Configure>", self._schedule_layout)
+        def bind_page_scroll(widget):
+            if widget is self._qc_canvas or isinstance(widget, (ttk.Treeview, ttk.Combobox)):
+                return
+            bind_mousewheel(widget, self._qc_panel._canvas)
+            for child in widget.winfo_children():
+                bind_page_scroll(child)
+        bind_page_scroll(self._qc_panel)
+        self.bind("<Configure>", self._schedule_layout)
+        self.bind("<Destroy>", self._cancel_layout)
+        self._clear_qc_detail()
+        self._schedule_layout()
+
+    def _schedule_layout(self, _event=None) -> None:
+        if self._layout_after_id is None:
+            self._layout_after_id = self.after_idle(self._layout_statistics)
+
+    def _cancel_layout(self, event) -> None:
+        if event.widget is self and self._layout_after_id is not None:
+            self.after_cancel(self._layout_after_id)
+            self._layout_after_id = None
+
+    def _layout_statistics(self) -> None:
+        self._layout_after_id = None
+        width = self.winfo_width() - 56
+        if width < 40:
+            return
+        compact = width < 900
+        if compact != self._compact:
+            self._page_header.configure(padding=(12, 4, 12, 6) if compact else (12, 12, 12, 10))
+            self._page_title.configure(style="CompactPageTitle.TLabel" if compact else "PageTitle.TLabel")
+            self._page_title.pack_configure(pady=(0, 2) if compact else (4, 2))
+            if compact:
+                self._eyebrow.pack_forget()
+            else:
+                self._eyebrow.pack(anchor="w", before=self._page_title)
+            self._qc_canvas.configure(height=210 if compact else 230)
+            self._compact = compact
+        self._page_subtitle.configure(wraplength=width)
+        self._qc_title.configure(wraplength=max(150, width - 170))
+        for label in (self._qc_summary, self._qc_statistics, self._qc_point_info):
+            label.configure(wraplength=width - 20)
+        right_width = max(self._qc_sources_button.winfo_reqwidth(), self._qc_reset.winfo_reqwidth())
+        label_width = max(row.winfo_children()[0].winfo_reqwidth() for row in (self._profile_row, self._control_row))
+        for row in (self._profile_row, self._control_row):
+            row.columnconfigure(0, minsize=label_width + 8)
+            row.columnconfigure(2, minsize=right_width)
+        used = column = row = 0
+        for button in (self._qc_configure, self._qc_reopen, self._qc_close):
+            needed = button.winfo_reqwidth() + 8
+            if used and used + needed > width:
+                row, column, used = row + 1, 0, 0
+            button.grid(row=row, column=column, sticky="nsew", padx=(0, 8), pady=(0, 6))
+            used += needed
+            column += 1
+        if compact:
+            self._qc_version_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 5))
+            self._qc_version_combo.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=(0, 8))
+            self._qc_export.grid(row=1, column=2, sticky="nsew")
+        else:
+            self._qc_version_label.grid(row=0, column=0, columnspan=1, sticky="w", pady=0)
+            self._qc_version_combo.grid(row=0, column=1, columnspan=1, sticky="nsew", padx=(0, 8))
+            self._qc_export.grid(row=0, column=2, sticky="nsew")
+        font = tkfont.Font(self, font=ttk.Style(self).lookup("Statistics.Treeview", "font"))
+        heading_font = tkfont.Font(self, font=ttk.Style(self).lookup("Statistics.Treeview.Heading", "font"))
+        for tree, flexible in ((self._qc_tree, "assay"), (self._qc_source_tree, "state"), (self._qc_findings, "reason")):
+            if tree.winfo_width() < 10:
+                continue
+            columns = tuple(tree.cget("columns"))
+            values = [tree.item(item, "values") for item in tree.get_children()]
+            minima = {column: heading_font.measure(tree.heading(column, "text")) + 24 for column in columns}
+            desired = {column: max(minima[column], min(320 if column == flexible else 220,
+                max((font.measure(str(value[index])) + 24 for value in values), default=minima[column]))) for index, column in enumerate(columns)}
+            available = tree.winfo_width() - 4
+            if sum(desired.values()) > available:
+                desired[flexible] = max(minima[flexible], desired[flexible] - (sum(desired.values()) - available))
+            extra = max(0, available - sum(desired.values()))
+            if tree is self._qc_tree and not compact:
+                remaining = extra
+                for column, share in (("lot", .2), ("assay", .4), ("device", .2)):
+                    growth = int(extra * share)
+                    desired[column] += growth
+                    remaining -= growth
+                desired["state"] += remaining
+            else:
+                desired[flexible] += extra
+            for column in columns:
+                tree.column(column, width=desired[column], minwidth=desired[column], stretch=column == flexible)
+
+    def _show_qc_sources(self) -> None:
+        self._qc_tabs.select(self._qc_values_tab)
+        self._on_qc_selected()
+
+    def _reset_qc_filters(self) -> None:
+        for widget in self._filters.values():
+            widget.select_values(())
+        self._apply_qc_filters()
+
+    def _apply_qc_filters(self) -> None:
+        previous = self._qc_tree.selection()
+        devices, assays = (self._filters[key].selected_values for key in ("device", "assay"))
+        cases = [case for case in self._qc_cases.values() if (not devices or case.device_name in devices)
+            and (not assays or (case.assay_name or "Assayname fehlt") in assays)]
         self._qc_tree.delete(*self._qc_tree.get_children())
         for case in cases:
             state = {"open": "Offen", "closed": "Abgeschlossen", "unconfigured": "Noch nicht eingerichtet"}.get(case.state, case.state)
-            self._qc_tree.insert("", "end", iid=case.lot_key, values=(case.device_name, case.assay_name or "Assayname fehlt", case.kit_lot, state,
-                case.last_usage or "nicht bestimmbar", "Abschluss prüfen" if case.close_available else case.close_reason))
+            self._qc_tree.insert("", "end", iid=case.lot_key, values=(case.device_name, case.assay_name or "Assayname fehlt", case.kit_lot, state))
+        self._qc_tree.configure(height=max(1, min(4, len(cases))))
+        self._lot_count.configure(text=f"{len(cases)} in dieser Auswahl")
+        if previous and self._qc_tree.exists(previous[0]):
+            self._qc_tree.selection_set(previous[0])
+            self._qc_tree.focus(previous[0])
+        elif previous:
+            self._clear_qc_detail()
+        self._schedule_layout()
+
+    def _show_qc_case_context(self, case: QCLotCase | None) -> None:
+        self._qc_title.configure(text=f"{case.kit_lot} · {case.assay_name or 'Assayname fehlt'}" if case else "Charge auswählen")
+        self._qc_device.configure(text=case.device_name if case else "")
+        state = {"open": "Offen", "closed": "Abgeschlossen", "unconfigured": "Noch nicht eingerichtet"}.get(case.state, case.state) if case else ""
+        self._qc_status.set_status(state, kind="success" if case and case.state == "closed" else "neutral")
+
+    def _show_qc_cards(self, visible: bool) -> None:
+        if visible:
+            self._empty_card.pack_forget()
+            self._detail_card.pack(fill="x", padx=12, pady=(0, 12))
+            self._reports_card.pack(fill="x", padx=12, pady=(0, 12))
+        else:
+            self._detail_card.pack_forget()
+            self._reports_card.pack_forget()
+            self._empty_card.pack(fill="x", padx=12, pady=(0, 12))
+
+    def render_qc_lots(self, cases: Sequence[QCLotCase]) -> None:
+        self._qc_panel.grid()
+        self._qc_cases = {case.lot_key: case for case in cases}
+        self._filters["device"].set_options(tuple(case.device_name for case in cases))
+        self._filters["assay"].set_options(tuple(case.assay_name or "Assayname fehlt" for case in cases))
+        self._apply_qc_filters()
         self._clear_qc_detail()
-        self._qc_profile.set("")
-        self._qc_profile_combo.configure(values=(), state="disabled")
         self._qc_summary.configure(text="Charge auswählen. Prüfprofile werden in den Einstellungen verwaltet." if cases else "Noch keine extrahierten Kit-Chargen vorhanden.")
 
-    def _clear_qc_detail(self) -> None:
+    def _clear_qc_detail(self, *, preserve_profile: bool = False) -> None:
+        self._show_qc_cards(False)
+        self._show_qc_case_context(None)
         self._qc_detail = None
         self._qc_analysis = None
         self._qc_model = None
         self._qc_tooltip.place_forget()
         self._qc_canvas.delete("all")
         self._qc_statistics.configure(text="")
-        self._qc_legend.configure(text="")
-        self._qc_change_hint.configure(text="")
-        self._qc_control_ids = {}
+        self._qc_control_ids, self._qc_version_ids = {}, {}
         self._qc_control.set("")
-        self._qc_control_combo.configure(values=(), state="disabled")
-        self._qc_version_ids = {}
         self._qc_version.set("")
-        self._qc_version_combo.configure(values=(), state="disabled")
+        self._qc_control_combo.configure(values=())
+        self._qc_version_combo.configure(values=())
+        if not preserve_profile:
+            self._qc_profile.set("")
+            self._qc_profile_combo.configure(values=())
         self._qc_chart_range = None
-        self._qc_pan_start = None
         self._qc_chart_hits = {}
-        self._qc_point_info.configure(text="Charge auswählen, um Messpunkte und Nachweise anzuzeigen.")
+        self._qc_point_info.configure(text="Messpunkt anklicken; Mausrad zoomt, Ziehen verschiebt.")
         self._qc_findings.delete(*self._qc_findings.get_children())
         self._qc_close.configure(state="disabled")
         self._qc_export.configure(state="disabled")
@@ -171,12 +373,9 @@ class StatisticsView(ttk.Frame):
     def _select_qc_case(self, _event) -> None:
         self._clear_qc_detail()
         case = self.selected_qc_case()
-        if case is None:
-            self._qc_profile.set("")
-            self._qc_profile_combo.configure(values=(), state="disabled")
-            self._qc_summary.configure(text="Charge auswählen. Prüfprofile werden in den Einstellungen verwaltet." if self._qc_cases else "Noch keine extrahierten Kit-Chargen vorhanden.")
-            return
-        options = case.profile_options
+        self._show_qc_cards(case is not None)
+        self._show_qc_case_context(case)
+        options = case.profile_options if case else ()
         labels = [f"{name} · Fassung {identifier}" for identifier, name in options]
         self._qc_profile_combo.configure(values=labels)
         self._qc_profile_combo.configure(state="disabled" if case and case.state == "closed" else "readonly")
@@ -202,24 +401,27 @@ class StatisticsView(ttk.Frame):
         return self._qc_detail
 
     def set_qc_loading(self) -> None:
-        self._clear_qc_detail()
+        self._clear_qc_detail(preserve_profile=True)
+        case = self.selected_qc_case()
+        self._show_qc_cards(case is not None)
+        self._show_qc_case_context(case)
         self._qc_summary.configure(text="Lade vollständige Mess- und Validierungsnachweise …")
 
     def render_qc_detail(self, detail: QCLotDetail) -> None:
+        self._show_qc_cards(True)
         self._qc_detail = detail
+        self._show_qc_case_context(detail.case)
         manifest = detail.source_manifest
         self._render_qc_sources(manifest)
-        start = self._qc_measured_label(manifest["start_date"], profile=manifest["profile_snapshot"]) if manifest["start_date"] else "nicht bestimmbar"
-        message = f"Beginn: {start} · {manifest['population_count']} gespeicherte Messungen · {manifest['included_count']} geeignete Kontrollwerte · {manifest['excluded_count']} ausgeschlossen."
+        message = f"Beginn: {manifest['start_date'] or 'nicht bestimmbar'} · {manifest['population_count']} gespeicherte Messungen · {manifest['included_count']} geeignete Kontrollwerte · {manifest['excluded_count']} ausgeschlossen."
         if detail.case.state == "closed":
             message += " Abgeschlossene Nachweise bleiben eingefroren; spätere Werte brauchen eine Wiederöffnung."
-        elif not detail.sd_references and manifest["profile_snapshot"].get("enabled_rules"):
+        elif not detail.sd_references:
             message += " Keine SD-Referenz: SD-Auswertung nicht verfügbar."
-        message += " " + detail.case.close_reason
         self._qc_summary.configure(text=message)
-        self._qc_change_hint.configure(text="Aktuelle Quellen, Validierungen oder Konfiguration weichen vom gespeicherten Nachweis ab. Dieser Bericht bleibt unverändert; neue Werte benötigen eine ausdrückliche Wiederöffnung." if detail.source_changed else "")
         self._qc_configure.configure(state="normal" if detail.case.state != "closed" and manifest["included"] else "disabled")
         self._qc_reopen.configure(state="normal" if detail.case.state == "closed" and manifest["included"] else "disabled")
+        self._schedule_layout()
 
     def _render_qc_sources(self, manifest) -> None:
         self._qc_source_tree.delete(*self._qc_source_tree.get_children())
@@ -229,24 +431,12 @@ class StatisticsView(ttk.Frame):
             "measurement_time_missing": "Extrahierte Messzeit fehlt", "measurement_time_invalid": "Messzeit passt nicht zum festgelegten Format",
             "device_incomplete_or_inactive": "Gerät unvollständig / inaktiv", "target_conflict": "Unterschiedliche Zielwerte: Profil klären",
             "unit_conflict": "Einheitenkonflikt: Profil klären", "unit_missing": "Einheit fehlt", "analytical_run_group_missing": "Analysenlauf fehlt"}
-        labels.update(manufacturer_min_conflict="Unterschiedliche Hersteller-MIN-Werte: Profil klären",
-                      manufacturer_max_conflict="Unterschiedliche Hersteller-MAX-Werte: Profil klären",
-                      manufacturer_limits_reversed="Hersteller-MIN ist größer als MAX")
-        labels.update(unit_unconfirmed="Einheit im QK-Profil ergänzen oder ausdrücklich dimensionslos wählen",
-            measurement_date_missing="Messdatum nicht erfasst", measurement_date_conflict="Datumsquellen widersprechen sich",
-            measurement_time_conflict="Zeitquellen widersprechen sich")
-        profile = manifest["profile_snapshot"]
         for point in (*manifest["included"], *manifest["excluded"]):
             reasons = []
             for reason in point["reasons"]:
                 reasons.append(labels.get(reason, f"{reason[:-8].upper()}-Wert klären" if reason.endswith("_invalid") else "Nachweis klären"))
-            for reason in point.get("feature_reasons", {}).get("time", []):
-                reasons.append(labels.get(reason, "Zeitangabe klären") + " (Kennzahlen unabhängig davon)")
-            interpreted = point.get("measurement")
-            measured = ((interpreted["date"] or "Datum ungeklärt") + (" " + interpreted["time"] if interpreted["time"] else "")) if interpreted else self._qc_measured_label(point["measured_at"], profile=profile) if point["measured_at"] else None
-            self._qc_source_tree.insert("", "end", values=(measured or "Unlesbar", point["control_name"],
-                str(point["raw"].get("IST") or ""), str(point["raw"].get("SOLL") or ""),
-                str(point["raw"].get("MIN") or ""), str(point["raw"].get("MAX") or ""), "; ".join(reasons) or "Eindeutig validiert"))
+            self._qc_source_tree.insert("", "end", values=(point["measured_at"] or "Unlesbar", point["control_name"],
+                str(point["raw"].get("IST") or ""), str(point["raw"].get("SOLL") or ""), "; ".join(reasons) or "Eindeutig validiert"))
 
     def selected_qc_analysis(self) -> QCAnalysisView | None:
         return self._qc_analysis
@@ -261,24 +451,27 @@ class StatisticsView(ttk.Frame):
         self._qc_statistics.configure(text="Lade geprüfte Auswertung …")
 
     def render_qc_analysis(self, analysis: QCAnalysisView, versions: Sequence[QCReportVersion]) -> None:
+        self._show_qc_cards(True)
+        self._show_qc_case_context(analysis.case)
         self._qc_analysis = analysis
         self._qc_model = analysis.model
         self._qc_version_ids = {"Aktuelle Auswertung": None} if analysis.case.state != "closed" else {}
         for index, version in enumerate(versions, 1):
             self._qc_version_ids[f"Nachweis {index} · {format_timestamp(version.created_at_utc)}"] = version.version_id
-        self._qc_version_combo.configure(values=tuple(self._qc_version_ids), state="readonly" if self._qc_version_ids else "disabled")
+        self._qc_version_combo.configure(values=tuple(self._qc_version_ids))
         self._qc_version.set(next((label for label, value in self._qc_version_ids.items() if value == analysis.evidence_lot_version_id), ""))
         self._qc_control_ids = {series["control_name"]: series["control_id"] for series in self._qc_model["computed_series"]}
-        self._qc_control_combo.configure(values=tuple(self._qc_control_ids), state="readonly" if self._qc_control_ids else "disabled")
+        self._qc_control_combo.configure(values=tuple(self._qc_control_ids))
         if self._qc_control.get() not in self._qc_control_ids:
             self._qc_control.set(next(iter(self._qc_control_ids), ""))
         source = self._qc_model["source_manifest"]
         if analysis.evidence_lot_version_id is not None:
             self._render_qc_sources(source)
             self._qc_summary.configure(text=f"Gespeicherter Nachweis · Profilfassung {source['profile_version_id']} · {source['population_count']} eingefrorene Messungen. Heutige Quellen ändern diesen Nachweis nicht.")
-        self._qc_close.configure(state="normal" if analysis.case.state != "closed" and analysis.evidence_lot_version_id is None and analysis.case.close_available else "disabled")
+        self._qc_close.configure(state="normal" if analysis.case.state == "open" and analysis.evidence_lot_version_id is None and source["included"] else "disabled")
         self._qc_export.configure(state="normal" if analysis.evidence_lot_version_id is not None else "disabled")
         self._render_qc_control()
+        self._schedule_layout()
 
     @staticmethod
     def _qc_reason(value: str) -> str:
@@ -291,8 +484,7 @@ class StatisticsView(ttk.Frame):
             "baseline_insufficient": "Zu wenig eingefrorene Referenzwerte", "positive_target_required": "Positiver SOLL erforderlich",
             "classic_2sd_trigger_absent": "Aktuelles klassisches 2-SD-Prüfsignal fehlt", "eligible_values_missing": "Keine geeigneten Werte",
             "sd_or_group_incomplete": "SD oder Kontrollgruppe unvollständig", "within_run_controls_or_sd_unavailable": "Gemeinsamer Lauf oder SD nicht belegt",
-            "target_or_unit_conflict": "Zielwerte oder Einheiten klären", "target_unavailable": "SOLL für diese Bewertung ergänzen",
-            "unit_unconfirmed": "Einheit im QK-Profil ergänzen"}.get(value, "Nachweis klären" if value else "")
+            "target_or_unit_conflict": "Zielwerte oder Einheiten klären"}.get(value, "Nachweis klären" if value else "")
 
     def _qc_series(self):
         identifier = self._qc_control_ids.get(self._qc_control.get())
@@ -306,40 +498,14 @@ class StatisticsView(ttk.Frame):
         actual = f"{Decimal(qmma['value']):.6g} {series['unit']}" if qmma["available"] else self._qc_reason(qmma["reason"])
         relative = f"{Decimal(qmma['relative_percent']):.6g} %" if qmma["relative_percent"] is not None else self._qc_reason(qmma["relative_reason"])
         sd_text = f"SD {Decimal(sd['sd']):.6g} · Referenzmitte {Decimal(sd['center']):.6g}" if sd["available"] else self._qc_reason(sd["reason"])
-        qmma_limit = self._qc_model["source_manifest"]["profile_snapshot"].get("relative_limit_percent")
-        limit_status = {"exceeded": "Grenze überschritten", "within_limit": "Innerhalb der Grenze",
-            "not_applicable": "Nicht anwendbar", "not_configured": "Keine Grenze konfiguriert", "unavailable": "Nicht verfügbar"}[qmma["limit_status"]]
-        self._qc_statistics.configure(text=f"QMMA: {actual} · relativ: {relative} · n = {qmma['n']}\n"
-            f"QMMA-Grenze (relativ): {str(qmma_limit) + ' %' if qmma_limit is not None else 'nicht konfiguriert'} · QMMA-Bewertung: {limit_status}\n"
-            f"{sd_text}. Menschliche Validierung bleibt getrennt.")
-        descriptive = series.get("descriptive")
-        profile = self._qc_model["source_manifest"]["profile_snapshot"]
-        modern = self._qc_model.get("analysis_model_version", 1) >= 4
-        control = next(row for row in profile["controls"] if row["control_id"] == series["control_id"])
-        if modern and not control["fields"].get("SOLL"):
-            self._qc_statistics.configure(text=f"Einheit: {series['unit']} · n = {descriptive['n']} bestätigte geeignete Einzelwerte.")
-        if descriptive is not None:
-            def shown(metric):
-                return format(Decimal(metric["value"]), ".6g") if metric["available"] else "nicht verfügbar"
-            cv = shown(descriptive["cv_percent"]) + (" %" if descriptive["cv_percent"]["available"] else "")
-            self._qc_statistics.configure(text=self._qc_statistics.cget("text") +
-                f"\nMessreihe: Mittelwert {shown(descriptive['mean'])} · empirische SD (n-1) {shown(descriptive['sample_sd'])} · VK {cv}." + (" Diese SD ist keine Westgard-Referenz." if profile["enabled_rules"] else ""))
-        lines = series["chart"].get("reference_lines")
-        if lines is not None:
-            values = "; ".join(f"{line['label']}: {line['value']} {series['unit']}" for line in lines if line["kind"] != "sd")
-            unavailable = "; ".join(f"{label}: {self._qc_limit_reason(limit['reason'])}" for kind, label in
-                (("manufacturer", "Herstellergrenzen"), ("single_value", "Einzelwert-Prozentgrenzen"))
-                if (not modern or (kind == "manufacturer" and control["fields"].get("MIN") and control["fields"].get("MAX")) or (kind == "single_value" and profile.get("single_value_limits_enabled"))) and not (limit := series["limits"][kind])["available"])
-            self._qc_legend.configure(text="; ".join(value for value in (values, unavailable,
-                "Grau punktiert: Mittelwert." if modern and not control["fields"].get("SOLL") and not profile.get("single_value_limits_enabled") and not control["fields"].get("MIN") else "Grün: SOLL · Grau punktiert: Mittelwert · Violett gestrichelt: Hersteller · Orange: Einzelwert-Prozentgrenzen · Graublau: SD. Orange Ringe: Grenzüberschreitung;" + (" Punktfarbe: Westgard." if profile["enabled_rules"] else "")) if value))
-        else:
-            self._qc_legend.configure(text="Gespeichertes Altmodell: SOLL und vorhandene SD-Linien. Einzelwertgrenzen wurden damals nicht berechnet.")
+        self._qc_statistics.configure(text=f"QMMA: {actual} · relativ: {relative} · n = {qmma['n']}\n{sd_text}. Menschliche Validierung bleibt getrennt.")
         self._qc_chart_range = tuple(map(float, (*series["chart"]["x_range"], *series["chart"]["y_range"])))
         self._qc_findings.delete(*self._qc_findings.get_children())
         self._qc_point_info.configure(text="Keine geeigneten auswählbaren Messpunkte." if not series["chart"]["points"] else "Messpunkt anklicken; Mausrad zoomt, Ziehen verschiebt.")
         self._draw_qc_chart()
         if series["chart"]["points"]:
             self._show_qc_point(series["chart"]["points"][-1])
+        self._schedule_layout()
 
     def _reset_qc_chart(self) -> None:
         self._render_qc_control()
@@ -364,24 +530,14 @@ class StatisticsView(ttk.Frame):
             return xlo <= float(point["x"]) <= xhi and ylo <= float(point["y"]) <= yhi
         canvas.create_rectangle(left, top, left + width, top + height, outline="#7c8794")
         chart = series["chart"]
-        for band in (() if "reference_lines" in chart else chart["bands"]):
+        for band in chart["bands"]:
             y = xy(xlo, band["value"])[1]
             if top <= y <= top + height:
                 canvas.create_line(left, y, left + width, y, fill="#aebbcf")
                 canvas.create_text(left + width + 4, y, text=f"{band['sd_multiple']:+d} SD", anchor="w", font=("Segoe UI", 8))
-        if "reference_lines" not in chart and chart["target"] is not None and ylo <= float(chart["target"]) <= yhi:
+        if chart["target"] is not None and ylo <= float(chart["target"]) <= yhi:
             y = xy(xlo, chart["target"])[1]
             canvas.create_line(left, y, left + width, y, fill="#287b51", width=2)
-        line_colors = {"target": "#287b51", "mean": "#72777d", "manufacturer": "#7a52a3", "single_value": "#e67a14", "sd": "#aebbcf"}
-        for line in chart.get("reference_lines", []):
-            y = xy(xlo, line["value"])[1]
-            if top <= y <= top + height:
-                canvas.create_line(left, y, left + width, y, fill=line_colors[line["kind"]],
-                    width=1 if line["kind"] == "sd" else 2,
-                    dash={"manufacturer": (5, 3), "mean": (1, 3), "single_value": (6, 2, 1, 2), "sd": (2, 3)}.get(line["kind"], ()),
-                    tags=("qc-reference-line", f"qc-reference-{line['kind']}",))
-                if line["kind"] == "sd":
-                    canvas.create_text(left + width + 4, y, text=line["label"], anchor="w", font=("Segoe UI", 8))
         points = {point["point_key"]: point for point in chart["points"]}
         for segment in chart["segments"]:
             selected = [points[key] for key in segment if key in points]
@@ -393,8 +549,6 @@ class StatisticsView(ttk.Frame):
                 continue
             x, y = xy(point["x"], point["y"])
             color = "#ba3030" if point["run_status"] == "reject" else ("#b87016" if point["run_status"] == "warning" else "#356ab4")
-            if any(finding["status"] == "exceeded" for finding in point.get("limit_findings", {}).values()):
-                canvas.create_oval(x - 7, y - 7, x + 7, y + 7, outline="#e67a14", width=2, tags=("qc-limit-exceeded",))
             marker = canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill=color, outline=color)
             self._qc_chart_hits[marker] = point
         canvas.create_text(left - 6, top, text=f"{yhi:.4g}", anchor="ne")
@@ -404,7 +558,7 @@ class StatisticsView(ttk.Frame):
                 try:
                     ordinal = math.floor(bound)
                     measured = datetime.fromordinal(ordinal) + timedelta(seconds=round((bound - ordinal) * 86400))
-                    label = self._qc_measured_label(measured.isoformat(), localized=True)
+                    label = format_timestamp(measured.isoformat())
                 except (ValueError, OverflowError):
                     label = "Datum nicht darstellbar"
                 canvas.create_text(x, top + height + 7, text=label, anchor=anchor, font=("Segoe UI", 8), tags=("qc-x-axis",))
@@ -412,51 +566,14 @@ class StatisticsView(ttk.Frame):
     def _qc_hit(self, event):
         return next((self._qc_chart_hits[item] for item in reversed(self._qc_canvas.find_overlapping(event.x - 5, event.y - 5, event.x + 5, event.y + 5)) if item in self._qc_chart_hits), None)
 
-    def _qc_measured_label(self, value, *, localized=False, profile=None):
-        profile = profile if profile is not None else (self._qc_model["source_manifest"]["profile_snapshot"] if self._qc_model else {})
-        clock_format = profile.get("measurement_time_format") if profile.get("measurement_time_field") else profile.get("measurement_date_format", "")
-        try:
-            measured = datetime.fromisoformat(value)
-            precision = "day"
-            for token, name in (("%H", "hours"), ("%M", "minutes"), ("%S", "seconds")):
-                if token not in clock_format:
-                    break
-                precision = name
-            if precision == "day":
-                return measured.strftime("%d.%m.%Y") if localized else measured.date().isoformat()
-            if localized:
-                return measured.strftime("%d.%m.%Y %H" if precision == "hours" else "%d.%m.%Y %H:%M")
-            return measured.isoformat(sep=" ", timespec=precision)
-        except (ValueError, TypeError):
-            return value
-
     def _show_qc_point(self, point) -> None:
         shown_z = format(Decimal(point['z']), ".6g") if point['z'] is not None else "nicht verfügbar"
-        self._qc_point_info.configure(text=f"Messung {point['run_id']} · {self._qc_measured_label(point['measured_at'])} · IST {point['raw'].get('IST', '–')} / SOLL {point['raw'].get('SOLL', '–')} · z {shown_z} · Revision {point['revision_id']} · Validierung {point.get('validation_id')}" + (" · Messreihenfolge mehrdeutig" if point["order_ambiguous"] else ""))
-        if "limit_findings" in point:
-            self._qc_point_info.configure(text=self._qc_point_info.cget("text") + "\n" + self._qc_limit_summary(point))
+        self._qc_point_info.configure(text=f"Messung {point['run_id']} · {point['measured_at']} · IST {point['raw'].get('IST', '–')} / SOLL {point['raw'].get('SOLL', '–')} · z {shown_z} · Revision {point['revision_id']} · Validierung {point.get('validation_id')}" + (" · Messreihenfolge mehrdeutig" if point["order_ambiguous"] else ""))
         self._qc_findings.delete(*self._qc_findings.get_children())
         statuses = {"reject": "Ablehnungsbefund", "warning": "Warnung", "unavailable": "Nicht verfügbar", "pass": "Kein Befund", "disabled": "Nicht ausgewählt", "not_triggered": "Prüfsignal fehlt"}
         for finding in point["findings"]:
-            if self._qc_model.get("analysis_model_version", 1) >= 4 and finding["rule"] not in self._qc_model["source_manifest"]["profile_snapshot"]["enabled_rules"]:
-                continue
             self._qc_findings.insert("", "end", values=(finding["rule"], statuses[finding["status"]], self._qc_reason(finding["reason"])))
-
-    @staticmethod
-    def _qc_limit_reason(reason):
-        return {"not_configured": "Nicht konfiguriert", "eligible_values_missing": "Keine geeigneten Werte",
-            "percentage_limits_reversed": "SOLL × (1 ± Prozent / 100) ergibt vertauschte Grenzen",
-            "manufacturer_min_conflict": "Unterschiedliche Hersteller-MIN-Werte",
-            "manufacturer_max_conflict": "Unterschiedliche Hersteller-MAX-Werte",
-            "manufacturer_limits_reversed": "Hersteller-MIN ist größer als MAX",
-            "point_ineligible": "Messpunkt nicht geeignet", "min_invalid": "MIN unlesbar", "max_invalid": "MAX unlesbar"}.get(reason, "Nachweis klären")
-
-    @classmethod
-    def _qc_limit_summary(cls, point):
-        statuses = {"within_limit": "Innerhalb der Grenzen", "exceeded": "Grenze überschritten"}
-        return " · ".join(f"{label}: {statuses.get(finding['status'], cls._qc_limit_reason(finding['reason']))}"
-            for kind, label in (("manufacturer", "Hersteller"), ("single_value", "Einzelwert"))
-            if (finding := point.get("limit_findings", {}).get(kind)) is not None)
+        self._schedule_layout()
 
     def _hover_qc_chart(self, event) -> None:
         point = self._qc_hit(event)
@@ -464,11 +581,8 @@ class StatisticsView(ttk.Frame):
             self._qc_tooltip.place_forget()
             return
         shown_z = format(Decimal(point['z']), ".6g") if point['z'] is not None else "nicht verfügbar"
-        self._qc_tooltip.configure(text=f"{self._qc_measured_label(point['measured_at'])}\nIST {point['raw'].get('IST', '–')} · SOLL {point['raw'].get('SOLL', '–')}\nz {shown_z}")
-        if "limit_findings" in point:
-            self._qc_tooltip.configure(text=self._qc_tooltip.cget("text") + "\n" + self._qc_limit_summary(point))
-        self._qc_tooltip.place(x=max(0, min(event.x + 10, self._qc_canvas.winfo_width() - self._qc_tooltip.winfo_reqwidth())),
-            y=max(0, min(event.y + 10, self._qc_canvas.winfo_height() - self._qc_tooltip.winfo_reqheight())))
+        self._qc_tooltip.configure(text=f"{point['measured_at']}\nIST {point['raw'].get('IST', '–')} · SOLL {point['raw'].get('SOLL', '–')}\nz {shown_z}")
+        self._qc_tooltip.place(x=max(0, min(event.x + 10, self._qc_canvas.winfo_width() - 280)), y=max(0, min(event.y + 10, self._qc_canvas.winfo_height() - 65)))
 
     def _begin_qc_pan(self, event) -> None:
         point = self._qc_hit(event)

@@ -1,0 +1,168 @@
+{
+  "assay_name": "Anti-ENA PoolPlus IgG",
+  "assay_key": "(8750)",
+  "lot_rule": {
+    "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
+  },
+  "extract_rules": {
+    "fields": [
+      {
+        "key": "DATUM",
+        "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "required": true
+      },
+      {
+        "key": "ZEIT",
+        "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
+        "required": true
+      },
+      {
+        "key": "ANWENDER",
+        "regex": "Anwender:\\s*([^\\s]+)",
+        "required": true
+      },
+      {
+        "key": "PLATTE",
+        "regex": "Plattenname:\\s*(.+?)\\s+Zeit:",
+        "required": true
+      },
+      {
+        "key": "TEST",
+        "regex": "Test:[^\\n]*?[\\\\/]([^\\\\/]+\\.asy)\\s*\\(",
+        "required": true
+      },
+      {
+        "key": "CHARGE",
+        "regex": "Kit\\s+(E[0-9A-Za-z]+)\\s+\\d{6}",
+        "required": true
+      },
+      {
+        "key": "HALTBARKEIT",
+        "regex": "Kit\\s+E[0-9A-Za-z]+\\s+(\\d{6})",
+        "required": true
+      },
+      {
+        "key": "VALIDATION",
+        "regex": "(Validationskriterien\\s+(?:nicht\\s+)?erfüllt)",
+        "required": true,
+        "search_from": {
+          "line": 0
+        }
+      },
+      {
+        "key": "C1_MINIMUM",
+        "regex": "O\\.D\\.\\s*(\\S+)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 6
+        }
+      },
+      {
+        "key": "C1_SOLL",
+        "regex": "\\bC1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*O\\.D\\.",
+        "required": false,
+        "search_from": {
+          "line": 6
+        }
+      },
+      {
+        "key": "C1_IST",
+        "regex": "\\bC1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 35
+        }
+      },
+      {
+        "key": "PCQ1_LOW",
+        "regex": "\\bPCQ1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*\\-",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "PCQ1_HIGH",
+        "regex": "\\bPCQ1\\b[^\\n]*?\\-\\s*(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "PCQ1SOLL",
+        "regex": "\\bPCQ1\\b[^\\n]*?(?<![\\d.,])((?=[\\d.,]{1,3}(?![\\d.,]))\\d+(?:[\\.,]\\d+)?)(?![\\d.,])",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "PCQ1_IST",
+        "regex": "\\bPCQ1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 38
+        }
+      },
+      {
+        "key": "NCQ1_LOW",
+        "regex": "\\bNCQ1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)\\s*\\-",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "NCQ1_HIGH",
+        "regex": "\\bNCQ1\\b[^\\n]*?\\-\\s*(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      },
+      {
+        "key": "NCQ1_IST",
+        "regex": "\\bNCQ1\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": false,
+        "search_from": {
+          "line": 41
+        }
+      },
+      {
+        "key": "NCQ1_SOLL",
+        "regex": "\\bNCQ1\\b[^\\n]*?(?<![\\d.,])((?=[\\d.,]{1,3}(?![\\d.,]))\\d+(?:[\\.,]\\d+)?)(?![\\d.,])",
+        "required": false,
+        "search_from": {
+          "line": 7
+        }
+      }
+    ],
+    "dedupe_fields": []
+  },
+  "excel_rules": {
+    "excel_filename_template": "{assay_name}.xlsx",
+    "sheetname_template": "{lot_id}",
+    "column_mapping": {
+      "DATUM": "DATUM",
+      "ZEIT": "ZEIT",
+      "ANWENDER": "ANWENDER",
+      "PLATTE": "PLATTE",
+      "TEST": "TEST",
+      "CHARGE": "CHARGE",
+      "HALTBARKEIT": "Haltbarkeit",
+      "VALIDATION": "VALIDATION",
+      "C1_MINIMUM": "C1_MINIMUM",
+      "C1_SOLL": "C1_SOLL",
+      "C1_IST": "C1_IST",
+      "PCQ1_LOW": "PCQ1_LOW",
+      "PCQ1_HIGH": "PCQ1_HIGH",
+      "PCQ1SOLL": "PCQ1SOLL",
+      "PCQ1_IST": "PCQ1_IST",
+      "NCQ1_LOW": "NCQ1_LOW",
+      "NCQ1_HIGH": "NCQ1_HIGH",
+      "NCQ1_IST": "NCQ1_IST",
+      "NCQ1_SOLL": "NCQ1_SOLL"
+    }
+  }
+}

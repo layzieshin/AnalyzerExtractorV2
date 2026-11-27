@@ -270,8 +270,6 @@ class ReportRunOccurrence:
     reanalysis_pending: bool = False
     missing_fields: tuple[str, ...] = ()
     assay_name: str = ""
-    device_name: str = ""
-    revalidation_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -304,7 +302,7 @@ class ReportSummaryItem:
     validation_status: str = ""
     report_status: str = ""
     assay_names: tuple[str, ...] = ()
-    device_names: tuple[str, ...] = ()
+    lot_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -321,7 +319,6 @@ class RunValidationItem:
     revision_id: int = 0
     selection_id: int | None = None
     selection_token: str = ""
-    device_assignment_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -339,7 +336,7 @@ class ReportPdfPage:
 
 @dataclass(frozen=True)
 class ValidationQueueItem:
-    """One assay run awaiting an effective human validation."""
+    """A store-bound assay run for the work queue or exact read/correction context."""
 
     report_id: str
     run_id: int
@@ -359,14 +356,9 @@ class ValidationQueueItem:
     missing_fields: tuple[str, ...] = ()
     revision_error: str = ""
     assay_name: str = ""
-    candidate_id: int | None = None
-    device_assignment_id: int = 0
-    device_context_token: str = ""
-    device_options: tuple[tuple[str, str], ...] = ()
-    suggested_device_id: str = ""
-    revalidation_required: bool = False
-    validation_current: bool = False
-    device_impact: tuple[str, ...] = ()
+    current_validation: RunValidationItem | None = None
+    validation_history: tuple[RunValidationItem, ...] = ()
+    activation_blocked_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -431,7 +423,6 @@ class ReportDetail:
     validation_status: str = ""
     report_status: str = ""
     store_path: str = ""
-    device_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -546,32 +537,12 @@ class DeviceInventoryStatus:
 
 
 @dataclass(frozen=True)
-class QCAssayConfigurationItem:
-    assay_key: str
-    assay_name: str
-    device_id: str = ""
-    device_name: str = ""
-    profile_id: str = ""
-    profile_name: str = ""
-    profile_version_id: int = 0
-    level_count: int = 0
-    status: str = "QK noch nicht eingerichtet"
-    issues: tuple[str, ...] = ()
-    draft_id: str = ""
-
-
-@dataclass(frozen=True)
 class QCConfigurationState:
     store_path: str
     inventory: dict[str, Any]
     profiles: tuple[dict[str, Any], ...]
     legacy_source_sha256: str = ""
     legacy_message: str = ""
-    assays: tuple[tuple[str, str], ...] = ()
-    field_choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    assay_rows: tuple[QCAssayConfigurationItem, ...] = ()
-    catalog_error: str = ""
-    retained_drafts: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -588,10 +559,6 @@ class QCLotCase:
     profile_options: tuple[tuple[int, str], ...]
     start_date: str = ""
     assay_name: str = ""
-    last_usage: str = ""
-    chronology_status: str = "unavailable"
-    close_available: bool = False
-    close_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -599,9 +566,6 @@ class QCLotDetail:
     case: QCLotCase
     source_manifest: dict[str, Any]
     sd_references: dict[str, Any]
-    chronology_json: str = ""
-    chronology_sha256: str = ""
-    source_changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -618,21 +582,6 @@ class QCAnalysisView:
 
 
 @dataclass(frozen=True)
-class QCLotClosePreview:
-    detail: QCLotDetail
-    analysis: QCAnalysisView
-    chronology_json: str
-    chronology_sha256: str
-    witness_kit_lot: str
-    witness_source_token: str
-    pdf_bytes: bytes
-    pdf_sha256: str
-    renderer_id: str
-    page_count: int
-    block_reason: str = ""
-
-
-@dataclass(frozen=True)
 class QCReportVersion:
     store_path: str
     lot_key: str
@@ -642,3 +591,50 @@ class QCReportVersion:
     model_sha256: str
     pdf_sha256: str
     source_count: int
+
+
+@dataclass(frozen=True)
+class AssayIdentityCandidateItem:
+    assay_key: str
+    assay_name: str
+    rule_sha256: str
+
+
+@dataclass(frozen=True)
+class AssayIdentitySourceItem:
+    source_id: str
+    job_id: str
+    pdf_path: str
+    file_name: str
+    pdf_sha256: str
+    device_id: str
+    status: str
+    message: str = ""
+    done: bool = False
+    available: bool = False
+
+
+@dataclass(frozen=True)
+class AssayIdentityCaseItem:
+    case_id: str
+    store_path: str
+    identity_token: str
+    assay_name: str
+    assay_key: str
+    status: str
+    candidates: tuple[AssayIdentityCandidateItem, ...]
+    sources: tuple[AssayIdentitySourceItem, ...]
+    draft_path: str = ""
+    source_assay_key: str = ""
+    initialization: str = ""
+    can_retry: bool = False
+    completed: bool = False
+
+
+@dataclass(frozen=True)
+class AssayIdentityRetryResult:
+    case_id: str
+    store_path: str
+    cases: tuple[AssayIdentityCaseItem, ...]
+    outcomes: tuple[ProcessingOutcome, ...] = ()
+    errors: tuple[tuple[str, str], ...] = ()

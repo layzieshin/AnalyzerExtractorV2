@@ -15,6 +15,7 @@ def _write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
 
 
 def _write_bytes_atomic(path: Path, payload: bytes) -> None:
+    """Publish exact already-validated bytes through the same atomic file owner."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
@@ -41,12 +42,7 @@ def _read_json_object(path: Path) -> Dict[str, Any]:
 
 
 def _safe_key(assay_key: str) -> str:
-    key = str(assay_key)
-    cleaned = key.replace("(", "").replace(")", "")
-    if (not cleaned.strip() or any(char in key for char in ("/", "\\", ":", "\x00"))
-            or ".." in key or cleaned in {".", ".."}):
-        raise RuleSuiteError("path_outside_allowed_directory: invalid_assay_key")
-    return cleaned
+    return assay_key.replace("(", "").replace(")", "").replace("/", "_")
 
 
 def _safe_filename(name: str) -> str:

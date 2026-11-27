@@ -1,0 +1,69 @@
+{
+  "assay_name": "Anti-Parvovirus B19 IgG",
+  "assay_key": "(c5fe)",
+  "lot_rule": {
+    "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
+  },
+  "extract_rules": {
+    "fields": [
+      {
+        "key": "DATUM",
+        "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "required": true
+      },
+      {
+        "key": "ZEIT",
+        "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
+        "required": true
+      },
+      {
+        "key": "ANWENDER",
+        "regex": "Anwender:\\s*([^\\s]+)",
+        "required": true
+      },
+      {
+        "key": "PLATTE",
+        "regex": "Plattenname:\\s*(.+?)\\s+Zeit:",
+        "required": true
+      },
+      {
+        "key": "TEST",
+        "regex": "Test:[^\\n]*?\\\\\\s*([^\\\\/]+\\.asy)\\s*\\(",
+        "required": true
+      },
+      {
+        "key": "CHARGE",
+        "regex": "Kit\\s+(E[0-9A-Za-z]+)\\s+\\d{6}",
+        "required": true
+      },
+      {
+        "key": "HALTBARKEIT",
+        "regex": "\\bBuffer\\b[^\\n]*?(\\d+(?:[\\.,]\\d+)?)",
+        "required": true,
+        "search_from": {
+          "line": 5
+        }
+      },
+      {
+        "key": "VALIDATION",
+        "regex": "(Validationskriterien\\s+(?:nicht\\s+)?erf(?:ü|ue)llt)",
+        "required": true
+      }
+    ],
+    "dedupe_fields": []
+  },
+  "excel_rules": {
+    "excel_filename_template": "{assay_name}.xlsx",
+    "sheetname_template": "{lot_id}",
+    "column_mapping": {
+      "DATUM": "DATUM",
+      "ZEIT": "ZEIT",
+      "ANWENDER": "ANWENDER",
+      "PLATTE": "PLATTE",
+      "TEST": "TEST",
+      "CHARGE": "CHARGE",
+      "HALTBARKEIT": "HALTBARKEIT",
+      "VALIDATION": "VALIDATION"
+    }
+  }
+}

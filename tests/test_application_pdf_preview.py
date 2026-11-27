@@ -22,6 +22,68 @@ def _pdf(path: Path, sizes: tuple[tuple[int, int], ...] = ((200, 300), (300, 200
         document.save(path)
 
 
+
+
+def test_rule_pdf_text_and_image_parse_exact_bounded_snapshots_not_live_aba_path(tmp_path, monkeypatch):
+    import hashlib
+    import src.application.rules_controller as owner
+    from src.application.api import RuleSuiteController
+    live = tmp_path / "selected.pdf"
+    live.write_bytes(b"source-A")
+    expected = hashlib.sha256(b"source-A").hexdigest()
+    parsed, rendered = [], []
+    def text(_root, path, _key, _name, *, draft_path, strict):
+        assert strict and Path(path) != live and Path(path).read_bytes() == b"source-A"
+        live.write_bytes(b"source-B")
+        parsed.append(Path(path).read_bytes())
+        live.write_bytes(b"source-A")
+        return {"assay_block": "A"}
+    def render(report_id, path, *, page_index, zoom):
+        assert report_id == "" and Path(path) != live
+        live.write_bytes(b"source-B")
+        rendered.append(Path(path).read_bytes())
+        live.write_bytes(b"source-A")
+        return ReportPdfPage("", page_index, 2, zoom, 1, 1, b"P6\n1 1\n255\n\xff\xff\xff")
+    monkeypatch.setattr(owner, "get_assay_text", text)
+    monkeypatch.setattr(pdf_preview, "render_pdf_page", render)
+    rules = RuleSuiteController(tmp_path)
+    result = rules.get_assay_text(str(live), "(1111)", "A", draft_path="draft")
+    assert result["source_sha256"] == expected and result["pdf_path"] == str(live.resolve())
+    image = rules.render_rule_pdf_page(str(live), page_index=1, expected_sha256=expected)
+    assert image["source_sha256"] == expected and image["source_path"] == str(live.resolve())
+    assert parsed == rendered == [b"source-A"]
+    live.write_bytes(b"source-B")
+    with pytest.raises(PdfPreviewError, match="geändert"):
+        rules.render_rule_pdf_page(str(live), expected_sha256=expected)
+    assert len(rendered) == 1 and not list(tmp_path.glob("*.sqlite*"))
+
+
+@pytest.mark.parametrize("image_only", [False, True])
+def test_rule_original_multipage_works_without_report_or_recognized_assay(tmp_path, image_only):
+    import hashlib
+    from src.application.api import RuleSuiteController
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+    (rules_dir / "index.json").write_text('{"assays":[]}', encoding="utf-8")
+    rules = RuleSuiteController(tmp_path)
+    draft = rules.create_blank_draft("(1111)", "Target")
+    path = tmp_path / "image.pdf"
+    with fitz.open() as document:
+        for _index in range(2):
+            page = document.new_page(width=200, height=300)
+            if not image_only:
+                page.insert_text((15, 30), "Other assay (2222)" if _index == 0 else "Continuation")
+        document.save(path)
+    before = path.read_bytes()
+    text = rules.get_assay_text(str(path), "(1111)", "Target", draft_path=draft)
+    assert text["assay_block"] == "" and text["text_error"] == "authoring_pdf_assay_header_missing_or_ambiguous"
+    assert text["source_sha256"] == hashlib.sha256(before).hexdigest()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        image = pool.submit(rules.render_rule_pdf_page, str(path), page_index=1, expected_sha256=text["source_sha256"]).result(timeout=15)
+    assert image["page"].report_id == "" and image["page"].page_index == 1 and image["page"].page_count == 2
+    assert path.read_bytes() == before and not list(tmp_path.glob("*.sqlite*"))
+
+
 def test_spawned_render_from_worker_thread_has_page_count_index_and_bounded_zoom(tmp_path, monkeypatch) -> None:
     path = tmp_path / "multi.pdf"
     _pdf(path)
@@ -192,23 +254,51 @@ def test_worker_empty_pdf_and_page_count_limit_fail_without_rendering(tmp_path, 
 
 @pytest.mark.parametrize("path_status,present,message", [("ambiguous", True, "nicht eindeutig"), ("resolved", False, "nicht gefunden")])
 def test_controller_rejects_missing_or_ambiguous_report_pdf(tmp_path, monkeypatch, path_status, present, message) -> None:
+    from src.application import results_controller
+
     path = tmp_path / "file.pdf"
     if present:
         path.write_bytes(b"dummy")
-    controller = ResultsController(tmp_path, settings_provider=lambda: DesktopSettings("both", ""))
-    monkeypatch.setattr(controller, "get_report_detail", lambda _: SimpleNamespace(report_id="r", path_status=path_status, current_pdf_path=str(path), pdf_path=""))
-    with pytest.raises(PdfPreviewError, match=message):
-        controller.render_report_pdf_page("r")
+    displayed_store = str(tmp_path / "displayed.sqlite3")
+    current_store = str(tmp_path / "other-current.sqlite3")
+    controller = ResultsController(tmp_path, settings_provider=lambda: DesktopSettings("sqlite", current_store))
+    resolved = []
+    def get_detail(report_id, *, store_path):
+        assert (report_id, store_path) == ("r", displayed_store)
+        resolved.append((report_id, store_path))
+        return SimpleNamespace(report_id="r", path_status=path_status, current_pdf_path=str(path), pdf_path="")
+    def unexpected_render(report_id, pdf_path, *, page_index, zoom):
+        pytest.fail("A missing or ambiguous PDF source must never reach the renderer")
+    monkeypatch.setattr(controller, "get_report_detail", get_detail)
+    monkeypatch.setattr(results_controller, "render_pdf_page", unexpected_render)
+    for page_index in (0, 1):
+        with pytest.raises(PdfPreviewError, match=message):
+            controller.render_report_pdf_page("r", page_index=page_index, store_path=displayed_store)
+    assert resolved == [("r", displayed_store), ("r", displayed_store)]
 
 
 def test_controller_uses_current_archived_path_for_every_page(tmp_path, monkeypatch) -> None:
     from src.application import results_controller
 
-    archived = tmp_path / "archive.pdf"
-    archived.write_bytes(b"dummy")
-    controller = ResultsController(tmp_path, settings_provider=lambda: DesktopSettings("both", ""))
-    calls = []
-    monkeypatch.setattr(controller, "get_report_detail", lambda _: SimpleNamespace(report_id="r", path_status="resolved", current_pdf_path=str(archived), pdf_path="missing-original.pdf"))
-    monkeypatch.setattr(results_controller, "render_pdf_page", lambda *args, **kwargs: calls.append((args, kwargs)) or "page")
-    assert controller.render_report_pdf_page("r", page_index=1, zoom=1.5) == "page"
-    assert calls == [(("r", str(archived)), {"page_index": 1, "zoom": 1.5})]
+    archived, relocated = tmp_path / "archive.pdf", tmp_path / "archive-current.pdf"
+    for path in (archived, relocated):
+        path.write_bytes(b"dummy")
+    displayed_store = str(tmp_path / "displayed.sqlite3")
+    current_store = str(tmp_path / "other-current.sqlite3")
+    controller = ResultsController(tmp_path, settings_provider=lambda: DesktopSettings("sqlite", current_store))
+    source, resolved, calls = [archived], [], []
+    pages = tuple(ReportPdfPage("r", index, 2, zoom, 1, 1, b"P6\n1 1\n255\n\x00\x00\x00") for index, zoom in ((0, 1.0), (1, 1.5)))
+    def get_detail(report_id, *, store_path):
+        assert (report_id, store_path) == ("r", displayed_store)
+        resolved.append((report_id, store_path))
+        return SimpleNamespace(report_id="r", path_status="resolved", current_pdf_path=str(source[0]), pdf_path=str(tmp_path / "missing-original.pdf"))
+    def render(report_id, pdf_path, *, page_index, zoom):
+        calls.append((report_id, pdf_path, page_index, zoom))
+        return pages[page_index]
+    monkeypatch.setattr(controller, "get_report_detail", get_detail)
+    monkeypatch.setattr(results_controller, "render_pdf_page", render)
+    assert controller.render_report_pdf_page("r", page_index=0, zoom=1.0, store_path=displayed_store) is pages[0]
+    source[0] = relocated
+    assert controller.render_report_pdf_page("r", page_index=1, zoom=1.5, store_path=displayed_store) is pages[1]
+    assert resolved == [("r", displayed_store), ("r", displayed_store)]
+    assert calls == [("r", str(archived), 0, 1.0), ("r", str(relocated), 1, 1.5)]

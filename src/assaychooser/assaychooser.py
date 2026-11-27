@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from typing import Dict, List, Tuple
 
+from src.assaycandidate.api import canonical_assay_key
+from src.contentsplitter.api import AssaySection
+
 from .model import AssayMatch
 
 
@@ -12,9 +15,10 @@ class AssayChooserError(RuntimeError):
 
 
 class AssayChooser:
-    def detect_assays(self, norm_text: str, rules_index_path: str) -> List[AssayMatch]:
+    def detect_assays(self, norm_text: str, rules_index_path: str, *, sections: List[AssaySection] | None = None,
+                      index_bytes: bytes | None = None) -> List[AssayMatch]:
         try:
-            index = json.loads(Path(rules_index_path).read_text(encoding="utf-8"))
+            index = json.loads(index_bytes.decode("utf-8") if index_bytes is not None else Path(rules_index_path).read_text(encoding="utf-8"))
         except Exception as e:
             raise AssayChooserError(f"Cannot read index.json: {e}") from e
 
@@ -22,6 +26,16 @@ class AssayChooser:
         keys: List[str] = [a.get("assay_key") for a in assays if a.get("assay_key")]
         if not keys:
             raise AssayChooserError("index.json contains no assay_key entries")
+
+        if sections is not None:
+            configured: Dict[str, str] = {}
+            for key in keys:
+                canonical = canonical_assay_key(key)
+                if canonical in configured:
+                    raise AssayChooserError("assay_key_ambiguous_in_index")
+                configured[canonical] = key
+            return [AssayMatch(assay_key=configured[section.assay_key], occurrence_index=1)
+                    for section in sections if section.assay_key in configured]
 
         hits: List[Tuple[int, str]] = []
         for key in keys:

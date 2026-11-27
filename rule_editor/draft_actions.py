@@ -28,10 +28,10 @@ class DraftMixin:
         display = self.var_assay.get().strip()
         return self.assay_display_to_key.get(display)
 
-    def _reload_assays(self) -> None:
+    def _reload_assays(self, *, items=None) -> None:
         combo = getattr(self, "cmb_assay", None)
         try:
-            items = self._rules.list_inventory(kind="active")
+            items = self._rules.list_inventory(kind="active") if items is None else tuple(item for item in items if item.kind == "active")
         except Exception as exc:
             if _index_json_missing(exc):
                 if combo is not None:
@@ -111,9 +111,13 @@ class DraftMixin:
             self.var_draft_path.set(p)
 
     def on_pick_pdf(self) -> None:
-        p = filedialog.askopenfilename(title="PDF wählen", filetypes=[("PDF", "*.pdf")])
+        if self._busy:
+            self._set_hint("Bitte den laufenden Vorgang zuerst beenden.")
+            return
+        p = filedialog.askopenfilename(title="Test-PDF laden", filetypes=[("PDF", "*.pdf")], parent=self._dialog_parent())
         if p:
             self.var_pdf.set(p)
+            self.on_load_text()
 
     def _guard_before_editor_load(self, target_path: str) -> str:
         guard = getattr(self, "_confirm_draft_switch", None)
@@ -264,6 +268,6 @@ class DraftMixin:
             self._selected_field_key = None
         if hasattr(self, "_field_form_is_new"):
             self._field_form_is_new = False
-        refresh = getattr(self, "_refresh_authoring_status", None)
-        if callable(refresh):
-            refresh(adopt_paths=True)
+        sync = getattr(self, "_sync_authoring_controls", None)
+        if callable(sync):
+            sync()

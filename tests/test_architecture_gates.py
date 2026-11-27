@@ -42,6 +42,7 @@ EXPECTED_PHASE3_UI_FILES = frozenset(
         "interfaces/tk/view_models.py",
         "interfaces/tk/views/__init__.py",
         "interfaces/tk/views/dashboard_view.py",
+        "interfaces/tk/views/changes_view.py",
         "interfaces/tk/views/diagnostics_view.py",
         "interfaces/tk/views/results_view.py",
         "interfaces/tk/views/statistics_view.py",

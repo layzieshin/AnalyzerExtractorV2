@@ -75,6 +75,8 @@ class RegexMixin:
     def _set_field_preview_text(self, text: str, span: tuple[int, int] | None = None) -> None:
         self._write_preview_text(self.txt_field_preview, text, span)
         self._write_preview_text(getattr(self, "txt_marking_regex_preview", None), text, span)
+        if hasattr(self, "var_regex_short"):
+            self.var_regex_short.set("Bereit zum Regex-Test" if self.assay_block_text.strip() else "Noch nicht getestet")
 
     def _build_regex_result_record(
         self,
@@ -130,6 +132,9 @@ class RegexMixin:
 
     def _render_regex_record_preview(self, record: dict[str, object]) -> None:
         self._set_field_preview_text(str(record.get("preview_text", "")), record.get("preview_span"))
+        if hasattr(self, "var_regex_short"):
+            status = str(record.get("status", ""))
+            self.var_regex_short.set("Treffer · " + str(record.get("result_text", "")) if status == "HIT" else "Fehler · Details ansehen" if status == "ERROR" else "Kein Treffer")
 
     def _log_regex_result(self, record: dict[str, object]) -> None:
         regex = str(record.get("regex", ""))

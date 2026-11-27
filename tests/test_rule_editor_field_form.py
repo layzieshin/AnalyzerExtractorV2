@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import ttk
 from pathlib import Path
 
 import pytest
@@ -315,6 +316,15 @@ def test_field_guard_cancel_restores_tree_and_release_stops(monkeypatch: pytest.
     release._resolve_dirty_field_form = lambda: False
     release.current_draft_path = "draft.json"
     release._rules = _Rules()
+    release._busy = False
+    release._dirty = False
+    release._field_form_dirty = True
+    release.var_new_assay_key, release.var_new_assay_name = _Var("(test)"), _Var("Test")
+    release._authoring_target = lambda: ("draft.json", "(test)", "test.pdf")
+    release.authoring_target_ready = lambda *_a, **_k: True
+    release._invalidate_authoring_test = lambda: None
+    release._set_hint = lambda _text: None
+    release._guard_field_form = lambda: pytest.fail("Activation must never save a dirty field form")
     called: list[str] = []
     release._quick_validate = lambda *_a, **_k: called.append("validate") or True
     release.on_activate()
@@ -529,12 +539,15 @@ def test_field_editor_visible_contract(tmp_path: Path, monkeypatch: pytest.Monke
         pytest.skip(f"Tk not available: {exc}")
     try:
         headings = [editor.tree_fields.heading(column)["text"] for column in editor.tree_fields["columns"]]
-        assert headings == ["Feldschlüssel", "Suchmuster (Regex)", "Suchbereich"]
+        assert headings == ["Feldschlüssel", "Suchmuster (Regex)", "Suchbereich", "Status"]
+        assert tuple(editor.tree_fields["displaycolumns"]) == ("status",)
+        assert editor.tree_marking_legend is None
+        assert "Regex-Baukasten öffnen ↗" in _widget_texts(editor)
         texts = _widget_texts(editor)
-        assert texts.count("Neues Feld") == 1
+        assert texts.count("Neu") == 1
         assert "Markiertes Feld ersetzen" in texts
-        assert "Bearbeitung abbrechen" in texts
-        assert "In die Dublettenprüfung einbeziehen" in texts
+        assert "Abbrechen" in texts
+        assert "In Dublettenprüfung einbeziehen" in texts
         for blocked in (
             "Pflichtfeld",
             "Pflicht",
@@ -545,7 +558,7 @@ def test_field_editor_visible_contract(tmp_path: Path, monkeypatch: pytest.Monke
             "Feld hinzufuegen",
         ):
             assert blocked not in texts
-        assert texts.count("Regex-Bibliothek …") == 1
+        assert texts.count("Bibliothek") == 1
         assert "Alle Felder testen" in texts
         assert "Bib" not in texts
         assert str(editor.btn_field_commit.cget("state")) == tk.DISABLED
@@ -564,7 +577,7 @@ def test_field_editor_visible_contract(tmp_path: Path, monkeypatch: pytest.Monke
 def _widget_texts(widget: tk.Misc) -> list[str]:
     texts: list[str] = []
     for child in widget.winfo_children():
-        if isinstance(child, (tk.Button, tk.Checkbutton, tk.Label)):
+        if isinstance(child, (tk.Button, ttk.Button, tk.Checkbutton, ttk.Checkbutton, tk.Label, ttk.Label)):
             texts.append(str(child.cget("text")))
         texts.extend(_widget_texts(child))
     return texts

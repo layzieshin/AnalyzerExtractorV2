@@ -23,11 +23,13 @@ _REMOVED_LABELS = (
     "Als Entwurf bearbeiten",
 )
 _MAIN_ACTIONS = (
-    "Neue Regel aus PDF …",
-    "Aktion für Auswahl",
-    "Weitere Aktionen …",
+    "Regel auswählen",
+    "Weitere Aktionen",
     "Aktualisieren",
-    "Alle Zustände anzeigen",
+    "Integrität prüfen",
+    "Zustände · 5",
+    "Filter löschen",
+    "Suchen",
 )
 _FILTER_LABELS = ("Aktiv", "Entwürfe", "Inaktiv", "Historie", "Papierkorb")
 
@@ -59,7 +61,7 @@ def _bound_entries(widget: tk.Misc, variable: tk.Variable) -> list[tk.Entry]:
 def _widget_texts(widget: tk.Misc) -> list[str]:
     texts: list[str] = []
     for child in widget.winfo_children():
-        if isinstance(child, (tk.Button, ttk.Button, tk.Checkbutton, tk.Label)):
+        if isinstance(child, (tk.Button, ttk.Button, tk.Checkbutton, ttk.Checkbutton, tk.Label, ttk.Label)):
             texts.append(str(child.cget("text")))
         texts.extend(_widget_texts(child))
     return texts
@@ -81,11 +83,35 @@ class _Item:
         self.read_only = kind in {"history", "trash"}
 
 
-def test_rule_editor_window_exposes_multiselect_inventory_filters() -> None:
+@pytest.fixture
+def editor(tmp_path):
+    project = tmp_path / "project"
+    (project / "rules" / "drafts").mkdir(parents=True)
+    (project / "rules" / "index.json").write_text('{"assays": []}', encoding="utf-8")
     try:
-        app = rule_editor_main.RuleEditorWindow()
+        window = rule_editor_main.RuleEditorWindow(project_root=project)
     except tk.TclError as exc:
         pytest.skip(f"Tk not available: {exc}")
+    try:
+        yield window.workspace
+    finally:
+        window.destroy()
+
+
+def _settle(app):
+    import time
+    root = app.winfo_toplevel()
+    root.update()
+    deadline = time.monotonic() + 5
+    while app._task_runner.active_keys() and time.monotonic() < deadline:
+        root.update()
+        time.sleep(.01)
+    root.update()
+    assert not app._task_runner.active_keys()
+
+
+def test_rule_editor_window_exposes_multiselect_inventory_filters(editor) -> None:
+    app = editor
     try:
         assert hasattr(app, "on_manage_deactivate_selected")
         assert hasattr(app, "on_delete_never_active_selected")
@@ -98,6 +124,7 @@ def test_rule_editor_window_exposes_multiselect_inventory_filters() -> None:
         assert columns == ("type", "key", "name", "fields", "modified", "status")
         assert tuple(app.tree_rulesets["displaycolumns"]) == ("type", "name", "fields", "modified", "status")
         texts = _widget_texts(app.page_inventory)
+        assert _widget_texts(app).count("Neue Regel aus PDF") == 1
         for label in _MAIN_ACTIONS:
             assert label in texts
         for label in _FILTER_LABELS:
@@ -122,11 +149,8 @@ def test_rule_editor_window_exposes_multiselect_inventory_filters() -> None:
         app.destroy()
 
 
-def test_inventory_filters_apply_locally_after_one_all_read() -> None:
-    try:
-        app = rule_editor_main.RuleEditorWindow()
-    except tk.TclError as exc:
-        pytest.skip(f"Tk not available: {exc}")
+def test_inventory_filters_apply_locally_after_one_all_read(editor) -> None:
+    app = editor
     items = [
         _Item("active", "(a)"),
         _Item("draft", "(d)"),
@@ -143,24 +167,25 @@ def test_inventory_filters_apply_locally_after_one_all_read() -> None:
     try:
         app._rules.list_inventory = list_inventory  # type: ignore[method-assign]
         app._refresh_ruleset_overview()
+        _settle(app)
         assert calls == ["all"]
         assert len(app.tree_rulesets.get_children()) == 5
 
         app.inventory_filter_vars["draft"].set(False)
         app.inventory_filter_vars["trash"].set(False)
         app._on_inventory_filter_changed()
-        assert calls == ["all", "all"]
+        assert calls == ["all"]
         shown = {app.tree_rulesets.set(row_id, "key") for row_id in app.tree_rulesets.get_children()}
         assert shown == {"(a)", "(i)", "(h)"}
 
         for variable in app.inventory_filter_vars.values():
             variable.set(False)
-        app._refresh_ruleset_overview()
-        assert calls == ["all", "all", "all"]
+        app._on_inventory_filter_changed()
+        assert calls == ["all"]
         assert app.tree_rulesets.get_children() == ()
 
         app._select_all_inventory_filters()
-        assert calls == ["all", "all", "all", "all"]
+        assert calls == ["all"]
         assert all(variable.get() for variable in app.inventory_filter_vars.values())
         assert len(app.tree_rulesets.get_children()) == 5
         assert "file" not in app.tree_rulesets["columns"]
@@ -183,11 +208,8 @@ def test_inventory_primary_action_matches_context_command() -> None:
     assert isinstance(SimpleNamespace(kind="active"), SimpleNamespace)
 
 
-def test_inventory_primary_button_uses_context_action_label() -> None:
-    try:
-        app = rule_editor_main.RuleEditorWindow()
-    except tk.TclError as exc:
-        pytest.skip(f"Tk not available: {exc}")
+def test_inventory_primary_button_uses_context_action_label(editor) -> None:
+    app = editor
     items = [
         _Item("active", "(a)"),
         _Item("draft", "(d)"),
@@ -198,9 +220,10 @@ def test_inventory_primary_button_uses_context_action_label() -> None:
     try:
         app._rules.list_inventory = lambda kind="all": list(items)  # type: ignore[method-assign]
         app._refresh_ruleset_overview()
+        _settle(app)
         expected = {
             "(a)": "Als Entwurf bearbeiten",
-            "(d)": "Entwurf weiterbearbeiten",
+            "(d)": "Entwurf bearbeiten",
             "(i)": "Als Entwurf wiederherstellen …",
             "(h)": "Als Entwurf wiederherstellen …",
             "(t)": "Details anzeigen",
@@ -211,16 +234,13 @@ def test_inventory_primary_button_uses_context_action_label() -> None:
             key = app.tree_rulesets.set(row_id, "key")
             assert str(app.btn_inventory_primary.cget("text")) == expected[key]
             actions = app._inventory_context_actions(app._inventory_by_iid[row_id])
-            assert actions[0][0] == expected[key]
+            assert actions[0][0] == ("Entwurf weiterbearbeiten" if key == "(d)" else expected[key])
     finally:
         app.destroy()
 
 
-def test_clear_loaded_draft_empties_disabled_preview_and_residues() -> None:
-    try:
-        app = rule_editor_main.RuleEditorWindow()
-    except tk.TclError as exc:
-        pytest.skip(f"Tk not available: {exc}")
+def test_clear_loaded_draft_empties_disabled_preview_and_residues(editor) -> None:
+    app = editor
     try:
         app.txt_field_preview.configure(state="normal")
         app.txt_field_preview.insert("1.0", "preview-residue")
@@ -244,7 +264,7 @@ def test_clear_loaded_draft_empties_disabled_preview_and_residues() -> None:
         app._visible_marking_keys = {"A"}
         app._active_marking_key = "A"
         app.txt_block.tag_add("field::A", "1.0", "1.1")
-        app.tree_marking_legend.insert("", "end", text="A", values=("HIT", "ja", "alt"))
+        assert app.tree_marking_legend is None  # unified field grid is the only list owner
         app.tree_fields.insert("", "end", values=("A", "a", "Gesamter Assay-Text"))
         app.tree_cols.insert("", "end", values=("A", "A"))
         app.list_validation.insert("end", "alt")
@@ -260,7 +280,7 @@ def test_clear_loaded_draft_empties_disabled_preview_and_residues() -> None:
         assert app._field_marking_tags == set()
         assert app._visible_marking_keys == set()
         assert app._active_marking_key is None
-        assert app.tree_marking_legend.get_children() == ()
+        assert app.tree_marking_legend is None
         assert app.tree_fields.get_children() == ()
         assert app.tree_cols.get_children() == ()
         assert app.list_validation.size() == 0
@@ -276,3 +296,82 @@ def test_clear_loaded_draft_empties_disabled_preview_and_residues() -> None:
         assert app._active_page == "inventory"
     finally:
         app.destroy()
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_saved_draft_discard_has_one_confirmation_and_no_save(tmp_path, monkeypatch, dirty, confirmed):
+    from rule_editor.history_actions import HistoryMixin
+    host = manage_actions.ManageMixin()
+    saved = tmp_path / "selected.draft.json"
+    saved.write_bytes(b"saved-before-confirmation")
+    receipt = {"draft_path": str(saved), "assay_name": "Selected", "assay_key": "(1111)", "revision": "draft-hash", "readiness_revision": "proof-hash"}
+    pending, writes, questions, cleared = [], [], [], []
+    def prepare(path, *, expected_revision=None):
+        assert path == receipt["draft_path"]
+        return dict(receipt)
+    def discard(path, *, expected_revision, expected_readiness_revision):
+        writes.append((path, expected_revision, expected_readiness_revision))
+        return {"status": "discarded", **receipt}
+    host._rules = SimpleNamespace(prepare_draft_discard=prepare, discard_draft=discard)
+    host.current_draft_path = receipt["draft_path"]
+    host._context_generation = host._proof_generation = 0
+    host._dirty = host._field_form_dirty = dirty
+    host._busy = host._dialog_guard = False
+    host._task_runner = SimpleNamespace(submit=lambda key, work, **callbacks: pending.append((work, callbacks)) or True)
+    host._discard_operation_busy = lambda value, _status: setattr(host, "_busy", value)
+    host._dialog_parent = lambda: None
+    host._set_hint = lambda _text: None
+    host._invalidate_authoring_test = lambda: cleared.append("proof")
+    host._clear_loaded_draft = lambda: cleared.append("draft")
+    host._refresh_ruleset_overview = lambda: None
+    host.var_autosave = SimpleNamespace(get=lambda: True)
+    host._save_meta_to_draft = lambda **kwargs: saved.write_bytes(b"must-not-autosave")
+    host._schedule_autosave = lambda: None
+    host._log = lambda _text: None
+    def confirm(title, message, **kwargs):
+        assert host._dialog_guard
+        # Native message boxes run Tk's timer loop while open.
+        HistoryMixin._autosave_tick(host)
+        questions.append((title, message))
+        return confirmed
+    monkeypatch.setattr(manage_actions.messagebox, "askyesno", confirm)
+    host.on_discard_current_draft()
+    assert not questions and not writes
+    work, callbacks = pending.pop(0)
+    callbacks["on_success"](work())
+    assert len(questions) == 1
+    assert ("ungespeicherten Eingaben" in questions[0][1]) is dirty
+    assert "selected.draft.json" in questions[0][1]
+    assert saved.read_bytes() == b"saved-before-confirmation"
+    assert not host._dialog_guard
+    if confirmed:
+        work, callbacks = pending.pop(0)
+        callbacks["on_success"](work())
+        assert writes == [(receipt["draft_path"], "draft-hash", "proof-hash")]
+        assert cleared == ["proof", "draft"]
+    else:
+        assert not pending and not writes and not cleared
+        assert host._dirty is dirty and host._field_form_dirty is dirty
+        assert host.current_draft_path == receipt["draft_path"]
+
+
+def test_discard_draft_busy_or_stale_context_never_confirms(monkeypatch):
+    host = manage_actions.ManageMixin()
+    host._busy = True
+    hints, pending = [], []
+    host._set_hint = hints.append
+    monkeypatch.setattr(manage_actions.messagebox, "askyesno", lambda *args, **kwargs: pytest.fail("no stale or busy confirmation"))
+    host._request_draft_discard("selected.draft.json")
+    assert hints
+    host._busy = host._dirty = host._field_form_dirty = False
+    host._dialog_guard = False
+    host._context_generation = host._proof_generation = 0
+    host.current_draft_path = "selected.draft.json"
+    host._rules = SimpleNamespace(prepare_draft_discard=lambda *args, **kwargs: {})
+    host._task_runner = SimpleNamespace(submit=lambda key, work, **callbacks: pending.append(callbacks) or True)
+    host._discard_operation_busy = lambda value, _status: setattr(host, "_busy", value)
+    host._request_draft_discard("selected.draft.json")
+    host._context_generation += 1
+    pending[0]["on_success"]({})
+    assert not host._busy

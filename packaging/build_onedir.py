@@ -146,7 +146,7 @@ def _product_inputs() -> list[dict[str, object]]:
                      and not any(part.casefold() in runtime_dirs for part in path.relative_to(PROJECT_ROOT).parts[:-1])
                      and path.suffix not in {".pyc", ".pyo"})
     paths.update(path for path in RULES_SOURCE.rglob("*") if path.is_file()
-                 and not any(part.lower() in {"drafts", "__pycache__"} for part in path.relative_to(RULES_SOURCE).parts)
+                 and not any(part.lower() in {"drafts", "inactive", "trash", "__pycache__"} for part in path.relative_to(RULES_SOURCE).parts)
                  and path.suffix not in {".pyc", ".pyo"})
     result = []
     root = PROJECT_ROOT.resolve()
@@ -289,7 +289,7 @@ def _prepare_runtime_tree() -> None:
     shutil.copytree(
         RULES_SOURCE,
         rules_target,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "drafts"),
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "drafts", "inactive", "trash"),
     )
 
     for rel in ("jobs", "output/final", "input/watch"):

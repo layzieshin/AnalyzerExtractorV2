@@ -5,23 +5,25 @@ from .sqlite_store import (
     compute_report_id,
     get_report_runs,
     get_result_run,
+    get_processing_output_evidence,
     get_result_store_status,
     list_report_summaries,
     list_result_assays,
     list_result_charges,
     list_result_runs,
+    iter_original_report_sources,
 )
-from .report_devices import get_report_device_context, list_pending_report_candidates
 
 __all__ = [
     "LEGACY_REPORT_TIME_WINDOW_S",
     "compute_report_id",
     "get_report_runs",
     "get_result_run",
+    "get_processing_output_evidence",
     "get_result_store_status",
     "list_report_summaries",
     "list_result_assays",
     "list_result_charges",
     "list_result_runs",
-    "get_report_device_context", "list_pending_report_candidates",
+    "iter_original_report_sources",
 ]

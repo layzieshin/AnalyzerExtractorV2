@@ -29,24 +29,29 @@ def create_scrollable_treeview(
     *,
     horizontal: bool = False,
     mousewheel: bool = True,
+    autohide: bool = False,
     **treeview_kwargs: Any,
 ) -> tuple[ttk.Treeview, tk.Frame]:
-    frame = tk.Frame(parent)
+    from interfaces.tk.widgets.common import OverflowScrollbar
+    frame = ttk.Frame(parent, style="CardInner.TFrame") if autohide else tk.Frame(parent)
     frame.rowconfigure(0, weight=1)
     frame.columnconfigure(0, weight=1)
 
     tree = ttk.Treeview(frame, **treeview_kwargs)
-    yscroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+    scrollbar = OverflowScrollbar if autohide else ttk.Scrollbar
+    yscroll = scrollbar(frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=yscroll.set)
     tree.grid(row=0, column=0, sticky="nsew")
-    yscroll.grid(row=0, column=1, sticky="ns")
+    if not autohide:
+        yscroll.grid(row=0, column=1, sticky="ns")
 
     if horizontal:
-        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        xscroll = scrollbar(frame, orient="horizontal", command=tree.xview)
         tree.configure(xscrollcommand=xscroll.set)
         frame.rowconfigure(1, weight=0)
         frame.columnconfigure(0, weight=1)
-        xscroll.grid(row=1, column=0, sticky="ew")
+        if not autohide:
+            xscroll.grid(row=1, column=0, sticky="ew")
 
     if mousewheel:
         bind_mousewheel(tree, tree)

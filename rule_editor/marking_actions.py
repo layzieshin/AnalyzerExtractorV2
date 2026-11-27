@@ -25,16 +25,19 @@ class MarkingsMixin:
 
     def _toggle_marking_panel(self) -> None:
         self._ensure_marking_state()
+        if getattr(self, "_unified_field_grid", False):
+            self._set_all_markings_visible(not bool(self._visible_marking_keys))
+            return
         if self.frame_marking_panel is None or self.btn_toggle_markings is None:
             return
         if self._marking_panel_visible:
             self.frame_marking_panel.grid_remove()
             self._marking_panel_visible = False
-            self.btn_toggle_markings.config(text="Markierungen einblenden")
+            self.btn_toggle_markings.config(text="Markierungen", style="RuleSuite.Secondary.TButton")
         else:
             self.frame_marking_panel.grid()
             self._marking_panel_visible = True
-            self.btn_toggle_markings.config(text="Markierungen ausblenden")
+            self.btn_toggle_markings.config(text="Markierungen", style="RuleSuite.Selected.TButton")
             self._render_field_markings()
 
     def _maybe_refresh_field_markings(self) -> None:
@@ -128,9 +131,20 @@ class MarkingsMixin:
         self._set_hint("Regex-Vorschlag aus Auswahl übernommen. Feldschlüssel prüfen und speichern." + suffix)
 
     def on_open_regex_builder(self) -> None:
+        if getattr(self, "_dialog_guard", False) or getattr(self, "_busy", False):
+            self._set_hint("Bitte den laufenden Vorgang zuerst beenden.")
+            return
         selection = self._get_block_selection()
+        def form_identity():
+            return (getattr(self, "_context_generation", 0), getattr(self, "_proof_generation", 0),
+                    getattr(self, "current_draft_path", None), getattr(self, "_selected_field_key", None),
+                    self.var_field_key.get(), self.var_field_regex.get())
+        signature = form_identity()
 
         def _accept(regex: str, search_from: dict[str, object] | None) -> None:
+            if getattr(self, "_closed", False) or signature != form_identity():
+                self._set_hint("Baustein nicht übernommen: Der Feldkontext wurde geändert.")
+                return
             self.var_field_regex.set(regex)
             if search_from and "line" in search_from:
                 self._set_search_mode("line", line=str(search_from.get("line", "")), after="")
@@ -138,13 +152,18 @@ class MarkingsMixin:
                 self._set_search_mode("after", after=str(search_from.get("after", "")), line="")
             self._set_hint("Regex-Baustein übernommen. Feldschlüssel prüfen und speichern.")
 
-        RegexBuilderPopup(
-            self,
-            rules=self._rules,
-            assay_text=self.assay_block_text,
-            selection=selection,
-            on_accept=_accept,
-        )
+        self._dialog_guard = True
+        try:
+            popup = RegexBuilderPopup(self, rules=self._rules, assay_text=self.assay_block_text,
+                selection=selection, on_accept=_accept, field_key=self.var_field_key.get().strip())
+        except Exception:
+            self._dialog_guard = False
+            raise
+        self._regex_builder_popup = popup
+        if hasattr(popup, "bind"):
+            popup.bind("<Destroy>", lambda event: setattr(self, "_dialog_guard", False) if event.widget is popup else None, add="+")
+        else:
+            self._dialog_guard = False
 
     def on_marking_set_search_line(self) -> None:
         sel = self._get_block_selection()
@@ -292,6 +311,19 @@ class MarkingsMixin:
 
         if self._active_marking_key:
             self._emphasize_field_marking(self._active_marking_key)
+        refresh = getattr(self, "_refresh_field_grid", None)
+        if callable(refresh):
+            refresh()
+
+    def toggle_field_marking(self, key):
+        self._ensure_marking_state()
+        if not self._is_matched_marking(key):
+            return
+        if key in self._visible_marking_keys:
+            self._visible_marking_keys.remove(key)
+        else:
+            self._visible_marking_keys.add(key)
+        self._apply_marking_visibility()
 
     def _set_all_markings_visible(self, visible: bool) -> None:
         self._ensure_marking_state()
@@ -353,13 +385,39 @@ class MarkingsMixin:
         except ValueError:
             group = 1
 
-        try:
-            out = self._rules.locate_fields(self.current_draft_path, self.assay_block_text, group=group)
-        except Exception as e:
-            self._clear_field_markings()
-            self.var_marking_status.set(f"Markierungen fehlgeschlagen: {e}")
-            return
+        self._marking_generation = getattr(self, "_marking_generation", 0) + 1
+        self._marking_pending = (self._marking_generation, self._context_generation, self.current_draft_path,
+                                 self.assay_block_text, group, self._proof_generation)
+        self._start_marking_load()
 
+    def _start_marking_load(self) -> None:
+        if self._closed or self._task_runner.is_active("editor-markings"):
+            return
+        request = self._marking_pending
+        if request is None:
+            return
+        self._marking_pending = None
+        generation, context, draft, text, group, proof_generation = request
+        rules = self._rules
+
+        def finish(result=None, error=None):
+            if self._closed:
+                return
+            if (generation == self._marking_generation and context == self._context_generation
+                    and rules is self._rules and draft == self.current_draft_path and text == self.assay_block_text
+                    and proof_generation == self._proof_generation and self._marking_panel_visible):
+                if error is None:
+                    self._apply_field_markings(result)
+                else:
+                    self._clear_field_markings()
+                    self.var_marking_status.set(f"Markierungen fehlgeschlagen: {error}")
+            self._start_marking_load()
+
+        self._task_runner.submit("editor-markings", lambda: rules.locate_fields(draft, text, group=group),
+                                 on_success=lambda out: finish(result=out), on_error=lambda error: finish(error=error))
+
+    def _apply_field_markings(self, out: dict) -> None:
+        """Apply a current worker result; this presentation step performs no I/O."""
         previous_visible = set(self._visible_marking_keys)
         previous_keys = set(self._field_marking_data.keys())
         active_key = self.var_field_key.get().strip() or self._active_marking_key
@@ -377,7 +435,7 @@ class MarkingsMixin:
             if not key:
                 continue
 
-            color = _FIELD_MARKING_COLORS[idx % len(_FIELD_MARKING_COLORS)]
+            color = "#cdece0" if getattr(self, "_unified_field_grid", False) else _FIELD_MARKING_COLORS[idx % len(_FIELD_MARKING_COLORS)]
             tag = self._field_marking_tag(key)
             self.txt_block.tag_config(tag, background=color)
             self._field_marking_tags.add(tag)
@@ -420,6 +478,8 @@ class MarkingsMixin:
             self._set_hint("Bitte zuerst ein Feld auswaehlen.")
             return
         self._select_tab("pdf")
+        if hasattr(self, "show_document_view"):
+            self.show_document_view("text")
         if not self._marking_panel_visible:
             self._toggle_marking_panel()
         else:

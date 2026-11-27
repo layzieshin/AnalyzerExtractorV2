@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -15,3 +15,5 @@ class QueueJob:
     attempts: int = 0
     last_error: str = ""
     content_sha256: str = ""
+    attempt_id: str = ""
+    identity_binding: dict = field(default_factory=dict)

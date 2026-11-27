@@ -139,7 +139,7 @@ class RegexLibraryPopup(tk.Toplevel):
         super().__init__(master)
         self.title("Regex-Bibliothek")
         self.geometry("640x420")
-        self.transient(master)
+        self.transient(master.winfo_toplevel())
         self._target_entry = target_entry
 
         tk.Label(

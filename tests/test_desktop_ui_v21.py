@@ -4,11 +4,13 @@ import inspect
 from dataclasses import replace
 import threading
 import tkinter as tk
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import pytest
 
 from interfaces.tk import test_app
+from interfaces.tk.views.dashboard_view import DashboardView
 from interfaces.tk.desktop_theme import (
     DEFAULT_HEIGHT,
     DEFAULT_WIDTH,
@@ -22,12 +24,15 @@ from interfaces.tk.views.settings_view import SettingsView
 from interfaces.tk.views.validation_view import ValidationView
 from interfaces.tk.view_models import (
     DASHBOARD_RECENT_LIMIT,
+    BatchFileStatus,
+    DashboardRecentRow,
     GENERIC_ACTION_FAILED_MESSAGE,
     build_batch_file_statuses,
     build_dashboard_recent_rows,
     format_duplicate_detail_lines,
     format_user_error_message,
     format_watch_cycle_summary,
+    import_device_label,
     occurrence_field_rows,
     occurrence_id,
     rules_inventory_item_id,
@@ -45,6 +50,9 @@ from src.application.api import (
     IngestionInstanceItem,
     ProcessingEnqueueOutcome,
     ProcessingOutcome,
+    PathOpenError,
+    ReportNotFoundError,
+    ValidationConflictError,
     ReportAssayGroup,
     ReportDetail,
     ReportFieldValue,
@@ -113,12 +121,15 @@ def test_shell_reanalysis_captures_all_selected_cases_without_human_validation()
     app = _make_app_stub(current_view="validation")
     app._validation_badge = None
     first, focused = _validation_item(), _pending_validation_item()
+    app._settings.sqlite_path = "results.sqlite"
+    first = replace(first, store_path="results.sqlite")
     selection = [(first, focused)]
     busy, calls, rendered = [], [], []
-    app._views["validation"] = SimpleNamespace(selected_items=lambda: selection[0],
-        validation_initials=lambda: " RR ", set_reanalysis_busy=busy.append, render_cases=lambda items: rendered.append(items))
+    app._views["validation"] = SimpleNamespace(selected_items=lambda: selection[0], selected_item=lambda: selection[0][-1],
+        validation_initials=lambda: " RR ", set_reanalysis_busy=busy.append, render_cases=lambda items: rendered.append(items),
+        reconcile_cases=lambda items: rendered.append(items))
     app._services.results.reanalyze_selected_cases = lambda cases, initials, **kwargs: calls.append((cases, initials, kwargs)) or SimpleNamespace(items=())
-    app._services.results.list_open_validation_cases = lambda: [focused]
+    app._services.results.list_open_validation_cases = lambda **binding: [focused]
     app._services.results.validate_report_run = lambda *_a, **_k: pytest.fail("reanalysis must not validate")
     test_app.AnalyzerDesktopApp._reanalyze_validation_cases(app)
     assert busy == [True] and calls == []
@@ -132,13 +143,14 @@ def test_shell_choice_uses_focused_snapshot_and_separate_validation_token():
     app = _make_app_stub(current_view="validation")
     app._validation_badge = None
     case = _pending_validation_item()
+    app._settings.sqlite_path = case.store_path
     selection = [case]
     busy, calls = [], []
     app._views["validation"] = SimpleNamespace(selected_item=lambda: selection[0],
         validation_initials=lambda: " RR ", validation_comment=lambda: " note ", set_reanalysis_busy=busy.append,
-        render_cases=lambda *_: None, clear_comment=lambda: None)
+        render_cases=lambda *_a, **_k: None, reconcile_cases=lambda *_: None, clear_comment=lambda: None)
     app._services.results.choose_reanalysis_result = lambda *args, **kwargs: calls.append((args, kwargs))
-    app._services.results.list_open_validation_cases = lambda: []
+    app._services.results.list_open_validation_cases = lambda **binding: []
     app._services.results.validate_report_run = lambda *_a, **_k: pytest.fail("choice must not validate")
     test_app.AnalyzerDesktopApp._choose_validation_result(app, "accept_new")
     selection[0] = _validation_item()
@@ -157,7 +169,7 @@ def test_shell_choice_uses_focused_snapshot_and_separate_validation_token():
     assert validation_calls[0][1]["store_path"] == "results.sqlite"
 
 
-def test_results_view_binding_is_from_displayed_occurrence_and_pending_blocks_validation():
+def test_results_view_binding_is_from_displayed_occurrence_and_pending_only_navigates():
     root, view = _open_results_view()
     try:
         detail = _report_detail("report", "a.pdf")
@@ -169,32 +181,35 @@ def test_results_view_binding_is_from_displayed_occurrence_and_pending_blocks_va
         view._occ_tree.selection_set(first)
         view._handle_occurrence_select(None)
         assert view.validation_result_binding() == ("displayed-token", "displayed.sqlite")
-        assert str(view._btn_save_validation.cget("state")) == "disabled"
+        assert view.selected_validation_target() == ("report", 1, "displayed.sqlite", "displayed-token")
+        assert str(view._btn_open_validation.cget("state")) == "normal"
+        assert not hasattr(view, "_btn_save_validation")
+        assert not hasattr(view, "_btn_correct_validation")
     finally:
         root.destroy()
 
 
 @pytest.mark.parametrize("correct", [False, True])
-def test_results_validation_and_correction_capture_the_displayed_binding(correct):
-    app = _make_app_stub()
-    item = replace(_validation_item(), selection_token="displayed-token", store_path="displayed.sqlite", validation_current=correct,
-        device_assignment_id=7, device_context_token="displayed-report-context")
-    selection = [item]
-    app._views["validation"] = SimpleNamespace(selected_item=lambda: selection[0], validation_initials=lambda: "RR",
-        validation_comment=lambda: "note", validation_device=lambda: item.device_id, validation_device_confirmed=lambda: True,
-        clear_comment=lambda: None, render_cases=lambda _items: None)
+def test_workplace_validation_and_correction_capture_the_displayed_binding(workplace, correct):
+    app, view = workplace
+    app._settings.sqlite_path = "displayed.sqlite"
+    previous = RunValidationItem(1, 1, "AB", "2026-01-01T00:00:00Z", "first", None, None)
+    item = replace(_validation_item(run_id=1), report_id="report", store_path="displayed.sqlite",
+                   selection_token="displayed-token", current_validation=previous if correct else None)
+    view.render_cases((), direct_case=item)
+    view._var_initials.set(" RR ")
+    view._var_comment.set(" note ")
     calls = []
     app._services.results.validate_report_run = lambda *args, **kwargs: calls.append(("validate", args, kwargs))
     app._services.results.correct_report_run = lambda *args, **kwargs: calls.append(("correct", args, kwargs))
-    app._services.results.confirm_report_device = lambda *_args, **kwargs: {"assignment_id": 7, "runs": []}
-    app._services.results.list_open_validation_cases = lambda: []
-    test_app.AnalyzerDesktopApp._save_pending_validation(app)
-    selection[0] = replace(item, selection_token="new-screen-token", store_path="other-store.sqlite")
+    app._services.results.get_validation_case = lambda *_a, **_k: item
+    app._save_pending_validation()
+    view.render_cases((replace(item, selection_token="new-screen-token", store_path="other-store.sqlite"),))
     app._task_runner.submissions[-1][1]()
     assert calls[0][0] == ("correct" if correct else "validate")
+    assert calls[0][1] == ("report", 1, "RR", "note")
     assert calls[0][2]["expected_selection_token"] == "displayed-token"
     assert calls[0][2]["store_path"] == "displayed.sqlite"
-    assert calls[0][2]["expected_device_assignment_id"] == 7
 
 
 class _FakeVar:
@@ -302,8 +317,8 @@ def _fake_services() -> SimpleNamespace:
             get_device_inventory=lambda: SimpleNamespace(devices=()),
             get_watch_timing=lambda: SimpleNamespace(scan_interval_s=3.0, stable_window_s=2.0),
             get_build_info=lambda: {"version": "2.0.0", "status": "available"},
-            get_qc_assay_configuration=lambda: SimpleNamespace(store_path="db.sqlite3", assay_rows=(), assays=(), catalog_error=""),
             reload_device_inventory=lambda: SimpleNamespace(devices=()),
+            get_qc_configuration=lambda: SimpleNamespace(store_path=str(Path("db.sqlite3").resolve()), inventory={"snapshot": {"devices": []}}, profiles=()),
             open_output_folder=lambda: "/output",
         ),
         extraction=SimpleNamespace(
@@ -322,17 +337,18 @@ def _fake_services() -> SimpleNamespace:
             retry_excel_export=lambda _job_id: ProcessingOutcome(processed=True, submit_status="DONE"),
         ),
         results=SimpleNamespace(
-            list_recent_reports=lambda limit=50: [],
+            list_recent_reports=lambda limit=50, **_binding: [],
             list_qc_lots=lambda: (),
-            list_open_validation_cases=lambda limit=500: [],
-            get_report_detail=lambda _report_id: None,
-            open_report_pdf=lambda _report_id: "/pdf/path.pdf",
-            list_duplicate_candidates=lambda status="pending": [],
-            get_duplicate_candidate_detail=lambda _candidate_id: None,
-            discard_duplicate_candidate=lambda _candidate_id: object(),
+            list_open_validation_cases=lambda limit=None, **_binding: [],
+            get_report_detail=lambda _report_id, **_binding: None,
+            open_report_pdf=lambda _report_id, **_binding: "/pdf/path.pdf",
+            list_duplicate_candidates=lambda status="pending", store_path=None: [],
+            get_duplicate_candidate_detail=lambda _candidate_id, *, store_path=None: None,
+            discard_duplicate_candidate=lambda _candidate_id, *, store_path=None: object(),
         ),
         rules=SimpleNamespace(
-            list_inventory=lambda: [],
+            get_identity_case_count=lambda *, store_path: 0,
+            list_inventory=lambda kind="all": [],
             validate_rules_integrity=lambda: {},
             discover_assay_candidates_for_job=lambda _job_id: (),
             create_draft_from_template_if_missing=lambda _k, _n: {},
@@ -343,17 +359,28 @@ def _fake_services() -> SimpleNamespace:
 def _make_app_stub(*, current_view: str = "results", services: object | None = None) -> test_app.AnalyzerDesktopApp:
     app = test_app.AnalyzerDesktopApp.__new__(test_app.AnalyzerDesktopApp)
     app._current_view = current_view
-    app._validation_report_scope = None
-    app._validation_store_scope = None
     app._bootstrapped = True
     app._services = services or _fake_services()
     app._settings = app._services.settings.load()
+    app._store_generation = 0
+    app._navigation_generation = 0
+    app._report_detail_generation = 0
+    app._report_detail_request = None
+    app._validation_direct_target = None
+    app._validation_direct_request = None
+    app._validation_navigation_generation = 0
+    app._validation_pdf_pending = None
+    app._validation_pdf_binding = None
+    app._validation_badge = None
+    app._view_store_paths = {"results": str(Path(app._settings.sqlite_path).resolve()), "dashboard": str(Path(app._settings.sqlite_path).resolve())}
     app._last_watch_summary = None
     app._last_watch_error = ""
     app._WatchCycleSummary = WatchCycleSummary
     app._ApplicationWatchError = ApplicationWatchError
     app._SettingsValidationError = SettingsValidationError
     app._SettingsSaveError = SettingsSaveError
+    app._PathOpenError = PathOpenError
+    app._ReportNotFoundError = ReportNotFoundError
     app._dashboard_report_join_limit = 250
     app._device_label_map = {}
     app._watch_after_id = None
@@ -367,6 +394,8 @@ def _make_app_stub(*, current_view: str = "results", services: object | None = N
     app._scheduled_after: list[tuple[int, object]] = []
     app._views = {
         "dashboard": SimpleNamespace(
+            render_import_device=lambda *_a, **_k: None,
+            render_open_case_count=lambda *_a, **_k: None,
             render_watch_settings=lambda *_a, **_k: None,
             render_recent_rows=lambda *_a, **_k: None,
             render_watch_session_summary=lambda *_a, **_k: None,
@@ -375,11 +404,15 @@ def _make_app_stub(*, current_view: str = "results", services: object | None = N
             set_activity_message=lambda *_a, **_k: None,
             set_actions_enabled=lambda *_a, **_k: None,
         ),
-        "results": SimpleNamespace(render_report_list=lambda items: setattr(app, "_rendered_reports", items)),
+        "results": SimpleNamespace(render_report_list=lambda items, **_binding: setattr(app, "_rendered_reports", items),
+                                   invalidate_store_context=lambda: setattr(app, "_invalidated_results", True)),
         "statistics": SimpleNamespace(render_qc_lots=lambda items: setattr(app, "_rendered_qc_lots", items)),
         "validation": SimpleNamespace(
             set_default_operator_initials=lambda _value: None,
-            render_cases=lambda items: setattr(app, "_rendered_validation_cases", items),
+            render_cases=lambda items, **_binding: setattr(app, "_rendered_validation_cases", items),
+            begin_direct_loading=lambda **intent: setattr(app, "_direct_loading", intent),
+            end_direct_loading=lambda message: setattr(app, "_direct_error", message),
+            invalidate_store_context=lambda: setattr(app, "_invalidated_validation", True),
         ),
         "rules": SimpleNamespace(),
         "settings": SimpleNamespace(
@@ -387,12 +420,12 @@ def _make_app_stub(*, current_view: str = "results", services: object | None = N
             mark_saved_generation=lambda _generation: None,
             collect_settings=lambda **_kwargs: SimpleNamespace(watch_enabled=False),
             set_status_message=lambda _message: None,
-            selected_qc_configuration=lambda: None,
-            render_qc_configuration=lambda _state: None,
+            render_qc_configuration=lambda state, **kwargs: setattr(app, "_rendered_qc_configuration", (state, kwargs)),
         ),
         "diagnostics": SimpleNamespace(),
     }
     app._show_error_dialog = lambda *_a, **_k: setattr(app, "_error_shown", True)
+    app._show_info_dialog = lambda *_a, **_k: setattr(app, "_info_shown", True)
     app._show_confirm_dialog = lambda *_a, **_k: True
     app._task_runner = _RecordingRunner()
     app.after = lambda delay_ms, callback: app._scheduled_after.append((delay_ms, callback)) or f"after-{len(app._scheduled_after)}"
@@ -408,6 +441,264 @@ def _make_app_stub(*, current_view: str = "results", services: object | None = N
         test_app.AnalyzerDesktopApp,
     )
     return app
+
+
+def _bound_results_stub(app, *, report_id="a", store="db.sqlite3"):
+    state = {"selected": report_id, "store": store, "detail": None, "shown": 0}
+
+    def render(detail):
+        state["detail"] = detail
+
+    def invalidate():
+        state.update(selected="", store="", detail=None)
+
+    view = SimpleNamespace(selected_report_descriptor=lambda: (state["selected"], state["store"]),
+        current_detail_descriptor=lambda: (state["detail"].report_id, state["detail"].store_path) if state["detail"] else ("", ""),
+        render_report_detail=render, show_detail=lambda: state.__setitem__("shown", state["shown"] + 1),
+        invalidate_store_context=invalidate,
+        render_report_list=lambda items, **binding: state.update(rows=tuple(items), store=binding.get("store_path", "")))
+    app._views["results"] = view
+    return view, state
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_report_detail_context_keeps_latest_selected_report_in_both_completion_orders(reverse):
+    app = _make_app_stub()
+    view, state = _bound_results_stub(app)
+    app._services.results.get_report_detail = lambda report, **binding: replace(_report_detail(report, report + ".pdf"), store_path=binding["store_path"])
+    app._open_selected_report()
+    first = app._task_runner.submissions[0][1]()
+    state["selected"] = "b"
+    app._open_selected_report()
+    second = app._task_runner.submissions[1][1]()
+    results = [first, second]
+    for index in ((1, 0) if reverse else (0, 1)):
+        app._task_runner.invoke_success(index=index, result=results[index])
+    assert state["detail"].report_id == "b" and state["detail"].store_path == "db.sqlite3"
+    assert state["shown"] == 1 and len(app._task_runner.submissions) == 2
+
+
+@pytest.mark.parametrize("change", ["selection", "navigation", "store"])
+@pytest.mark.parametrize("error", [False, True])
+def test_report_detail_context_discards_stale_reply_or_error(change, error):
+    app = _make_app_stub()
+    _view, state = _bound_results_stub(app)
+    app._services.results.get_report_detail = lambda report, **binding: replace(_report_detail(report, report + ".pdf"), store_path=binding["store_path"])
+    app._open_selected_report()
+    detail = app._task_runner.submissions[0][1]()
+    if change == "selection":
+        state["selected"] = "b"
+    elif change == "navigation":
+        app._current_view = "settings"
+        app._navigation_generation += 1
+    else:
+        app._settings.sqlite_path = "other.sqlite3"
+    if error:
+        app._task_runner.invoke_error(exc=RuntimeError("stale"))
+    else:
+        app._task_runner.invoke_success(result=detail)
+    assert state["detail"] is None and not app.__dict__.get("_error_shown")
+    assert app._report_detail_request is None and len(app._task_runner.submissions) == 1
+
+
+def test_report_pdf_descriptor_uses_displayed_store_and_cancels_replaced_detail():
+    app = _make_app_stub()
+    _view, state = _bound_results_stub(app, report_id="other-list-selection")
+    state["detail"] = replace(_report_detail("displayed", "a.pdf"), store_path="db.sqlite3")
+    calls = []
+    app._services.results.open_report_pdf = lambda report, **binding: calls.append((report, binding)) or "a.pdf"
+    app._open_report_pdf()
+    app._task_runner.invoke_success()
+    assert calls == [("displayed", {"store_path": "db.sqlite3"})]
+    app._open_report_pdf()
+    state["detail"] = replace(_report_detail("same-id-in-another-store", "b.pdf"), store_path="other.sqlite3")
+    app._task_runner.invoke_success()
+    assert len(calls) == 1
+
+
+def test_direct_context_error_clears_target_loading_and_allows_generic_refresh():
+    app = _make_app_stub(current_view="validation")
+    target = ("a", 7, "db.sqlite3", "original:7")
+    app._begin_direct_validation(target)
+    app._task_runner.invoke_error(exc=ValidationConflictError("changed"))
+    assert app._validation_direct_target is None and app._validation_direct_request is None
+    assert app._validation_pdf_pending is None and app._direct_error
+    app.refresh_current_view()
+    assert app._task_runner.submissions[-1][0] == app.TASK_REFRESH
+    app._task_runner.invoke_success()
+    assert app._rendered_validation_cases == [] and app._validation_direct_target is None
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("old_error", [False, True])
+def test_refresh_direct_context_cannot_be_overwritten_or_restarted_by_old_queue_reply(reverse, old_error):
+    app = _make_app_stub(current_view="validation")
+    store = "db.sqlite3"
+    direct = replace(_validation_item(), report_id="a", store_path=store, selection_token="original:7")
+    open_case = replace(_validation_item(run_id=8), report_id="b", store_path=store)
+    app._services.results.list_open_validation_cases = lambda **_binding: [open_case]
+    calls, rendered = [], []
+    app._services.results.get_validation_case = lambda report, run, **binding: calls.append((report, run, binding)) or direct
+    app._views["validation"].render_cases = lambda items, **binding: rendered.append((tuple(items), binding))
+    app.refresh_current_view()
+    old_payload = app._task_runner.submissions[0][1]()
+    app._navigation_generation += 2
+    app._begin_direct_validation(("a", 7, store, "original:7"))
+    direct_payload = app._task_runner.submissions[1][1]()
+
+    def finish_old():
+        if old_error:
+            app._task_runner.invoke_error(index=0, exc=RuntimeError("old queue refresh"))
+        else:
+            app._task_runner.invoke_success(index=0, result=old_payload)
+
+    if reverse:
+        app._task_runner.invoke_success(index=1, result=direct_payload)
+        finish_old()
+    else:
+        finish_old()
+        app._task_runner.invoke_success(index=1, result=direct_payload)
+    assert len(app._task_runner.submissions) == 2 and len(calls) == 1
+    assert rendered == [((open_case,), {"direct_case": direct})]
+    assert app._validation_direct_target == ("a", 7, store, "original:7")
+    assert not app.__dict__.get("_error_shown")
+
+
+def test_manual_queue_selection_cancels_direct_context_and_old_callback():
+    app = _make_app_stub(current_view="validation")
+    direct = replace(_validation_item(), report_id="a", store_path="db.sqlite3", selection_token="original:7")
+    app._services.results.get_validation_case = lambda *_a, **_k: direct
+    app._begin_direct_validation(("a", 7, "db.sqlite3", "original:7"))
+    payload = app._task_runner.submissions[0][1]()
+    app._validation_queue_selected()
+    app._task_runner.invoke_success(result=payload)
+    assert app._validation_direct_target is None and app._validation_direct_request is None
+    assert "_rendered_validation_cases" not in app.__dict__
+    assert len(app._task_runner.submissions) == 1
+
+
+@pytest.mark.parametrize("old_error", [False, True])
+def test_store_snapshot_pins_reads_and_late_refresh_never_reinstalls_old_settings(old_error):
+    app = _make_app_stub(current_view="results")
+    _view, state = _bound_results_stub(app)
+    first = app._settings
+    second = SimpleNamespace(**{**vars(first), "sqlite_path": "second.sqlite3"})
+    live = [first]
+    reads = []
+    app._services.settings.load = lambda: live[0]
+    app._services.results.list_open_validation_cases = lambda **binding: reads.append(("queue", binding["store_path"])) or []
+    app._services.results.list_recent_reports = lambda **binding: reads.append(("reports", binding["store_path"])) or [_report_summary("same-id", "a.pdf" if live[0] is first else "b.pdf")]
+    app.refresh_current_view()
+    old_payload = app._task_runner.submissions[0][1]()
+    expected_first = str(Path(first.sqlite_path).resolve())
+    assert reads == [("queue", expected_first), ("reports", expected_first)]
+    app._views["settings"].collect_settings = lambda **_kwargs: second
+    app._services.settings.save = lambda _settings: second
+    app._reschedule_watch = lambda: None
+    live[0] = second
+    app._save_settings()
+    app._task_runner.invoke_success(index=1)
+    assert app._settings is second and state["detail"] is None
+    assert app._invalidated_validation
+    assert state["store"] == "" and state["detail"] is None
+    if old_error:
+        app._task_runner.invoke_error(index=0, exc=RuntimeError("old store"))
+    else:
+        app._task_runner.invoke_success(index=0, result=old_payload)
+    assert app._settings is second and not app.__dict__.get("_error_shown")
+    app._task_runner.invoke_success(index=2)
+    expected_second = str(Path(second.sqlite_path).resolve())
+    assert state["store"] == expected_second and state["rows"][0].file_name == "b.pdf"
+    assert reads[-2:] == [("queue", expected_second), ("reports", expected_second)]
+
+
+def test_store_snapshot_alias_uses_controller_resolved_path_semantics(monkeypatch):
+    original_resolve = Path.resolve
+    canonical = Path("I:/canonical/results.sqlite3")
+
+    def resolve(path, *args, **kwargs):
+        return canonical if str(path) in {"alias.sqlite3", "canonical.sqlite3"} else original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    app = _make_app_stub()
+    app._settings.sqlite_path = "alias.sqlite3"
+    assert app._ui_store_matches("canonical.sqlite3")
+    before = app._refresh_scope()
+    same_store = SimpleNamespace(**{**vars(app._settings), "sqlite_path": "canonical.sqlite3"})
+    assert app._accept_settings_snapshot(same_store) is False
+    assert app._refresh_scope() == before and not app.__dict__.get("_invalidated_validation")
+
+
+def test_direct_context_only_case_save_releases_generic_refresh_for_new_incoming_case():
+    app = _make_app_stub(current_view="validation")
+    first = replace(_validation_item(), report_id="a", store_path="db.sqlite3", selection_token="original:7")
+    following = replace(_validation_item(run_id=8), report_id="b", store_path="db.sqlite3")
+    items, selected = [[first]], [None]
+    view = app._views["validation"]
+
+    def render(cases, **binding):
+        selected[0] = binding.get("direct_case") or (cases[0] if cases else None)
+
+    view.render_cases = render
+    view.selected_item = lambda: selected[0]
+    view.validation_initials = lambda: "AB"
+    view.validation_comment = lambda: ""
+    view.clear_comment = lambda: None
+    app._services.results.get_validation_case = lambda *_a, **_k: first
+    app._services.results.list_open_validation_cases = lambda **_binding: items[0]
+    calls = []
+
+    def validate(*args, **binding):
+        calls.append((args, binding))
+        items[0] = []
+
+    app._services.results.validate_report_run = validate
+    app._begin_direct_validation(("a", 7, "db.sqlite3", "original:7"))
+    app._task_runner.invoke_success()
+    assert selected[0] is first and app._validation_direct_request is None
+    app._save_pending_validation()
+    app._task_runner.invoke_success()
+    assert len(calls) == 1 and selected[0] is None
+    assert app._validation_direct_target is None and app._validation_direct_request is None
+    items[0] = [following]
+    app.refresh_current_view()
+    assert app._task_runner.submissions[-1][0] == app.TASK_REFRESH
+    app._task_runner.invoke_success()
+    assert selected[0] is following
+
+
+def test_store_snapshot_coalesced_persisted_B_survives_failed_C_and_held_A():
+    app = _make_app_stub(current_view="results")
+    _view, state = _bound_results_stub(app)
+    first = app._settings
+    second = SimpleNamespace(**{**vars(first), "sqlite_path": "second.sqlite3"})
+    third = SimpleNamespace(**{**vars(first), "sqlite_path": "third.sqlite3"})
+    live, drafts, marked = [first], [second, third], []
+    app._services.settings.load = lambda: live[0]
+    app._views["settings"].collect_settings = lambda **_kwargs: drafts.pop(0)
+    app._views["settings"].mark_saved_generation = marked.append
+    app._reschedule_watch = lambda: None
+
+    def persist(settings):
+        if settings is third:
+            raise SettingsSaveError("third failed")
+        live[0] = settings
+        return settings
+
+    app._services.settings.save = persist
+    app.refresh_current_view()
+    held_first = app._task_runner.submissions[0][1]()
+    app._save_settings()
+    app._save_settings()
+    app._task_runner.invoke_success(index=1)
+    assert app._settings is second and live[0] is second and marked == []
+    assert app._invalidated_validation and state["store"] == ""
+    app._task_runner.invoke_error(index=2, exc=SettingsSaveError("third failed"))
+    assert app._settings is second and live[0] is second and marked == []
+    app._task_runner.invoke_success(index=0, result=held_first)
+    assert app._settings is second
+    app._task_runner.invoke_success(index=3)
+    assert app._settings is second and state["store"] == str(Path(second.sqlite_path).resolve())
 
 
 def test_legacy_alias_points_to_test_app() -> None:
@@ -546,34 +837,17 @@ def test_run_entry_passes_resolved_root_to_main(monkeypatch, tmp_path) -> None:
     assert captured == [tmp_path.resolve()]
 
 
-def test_analyzer_desktop_open_rule_editor_uses_same_exe_in_frozen_mode(tmp_path, monkeypatch) -> None:
+def test_analyzer_desktop_open_rule_editor_uses_existing_view_even_when_frozen(tmp_path, monkeypatch) -> None:
     app = test_app.AnalyzerDesktopApp.__new__(test_app.AnalyzerDesktopApp)
     app.project_root = tmp_path.resolve()
-    calls: list[dict[str, object]] = []
-
-    def fake_popen(command, cwd=None, env=None):  # noqa: ANN001
-        calls.append({"command": command, "cwd": cwd, "env": env})
-
-        class _Proc:
-            pass
-
-        return _Proc()
+    calls: list[str] = []
+    app.show_view = calls.append
 
     monkeypatch.setattr(test_app.sys, "frozen", True, raising=False)
     monkeypatch.setattr(test_app.sys, "executable", str(tmp_path / "AnalyzerResultExtractorV2.exe"))
-    monkeypatch.setattr(test_app.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(test_app.subprocess, "Popen", lambda *_a, **_k: pytest.fail("embedded editor must not launch a process"))
     test_app.AnalyzerDesktopApp.open_rule_editor(app)
-    assert calls == [
-        {
-            "command": [str(tmp_path / "AnalyzerResultExtractorV2.exe")],
-            "cwd": str(tmp_path.resolve()),
-            "env": calls[0]["env"],
-        }
-    ]
-    env = calls[0]["env"]
-    assert isinstance(env, dict)
-    assert env["ARE_HOME"] == str(tmp_path.resolve())
-    assert env["ARE_START_RULE_EDITOR"] == "1"
+    assert calls == ["rules"]
 
 
 def test_rules_inventory_item_ids_are_unique_for_duplicate_assay_keys() -> None:
@@ -980,7 +1254,7 @@ def test_submit_processing_resets_busy_when_submit_rejected() -> None:
 
 def test_open_report_pdf_submits_runner_work() -> None:
     app = _make_app_stub()
-    app._views["results"] = SimpleNamespace(current_detail_report_id=lambda: "rep-1")
+    app._views["results"] = SimpleNamespace(current_detail_descriptor=lambda: ("rep-1", "db.sqlite3"))
     app._open_report_pdf()
     key, work, _ok, _err = app._task_runner.submissions[0]
     assert key == "open-pdf-rep-1"
@@ -1014,6 +1288,7 @@ def _report_detail(report_id: str, file_name: str) -> ReportDetail:
         ingestion_id="",
         path_status="ok",
         assay_groups=(),
+        store_path="db.sqlite3",
     )
 
 
@@ -1048,7 +1323,338 @@ def _validation_item(*, run_id: int = 7, ambiguous: bool = False) -> ValidationQ
         created_at="2026-01-01T10:00:00Z",
         fields=(ReportFieldValue("RESULT", "42"),),
         validation_ambiguous=ambiguous,
+        store_path="db.sqlite3",
+        selection_token=f"original:{run_id}",
     )
+
+
+@pytest.fixture
+def workplace():
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk not available: {exc}")
+    root.withdraw()
+    configure_desktop_theme(root)
+    app = _make_app_stub(current_view="validation")
+    view = ValidationView(root, on_refresh=app.refresh_current_view, on_save=app._save_pending_validation,
+                          on_open_pdf=app._open_validation_pdf, on_case_selected=app._validation_queue_selected)
+    app._views["validation"] = view
+    yield app, view
+    root.destroy()
+
+
+@pytest.mark.parametrize("eligible_next", [False, True])
+def test_workplace_first_save_advances_only_visible_eligible_case_and_keeps_initials(workplace, eligible_next):
+    app, view = workplace
+    first = _validation_item()
+    blocked = replace(_validation_item(run_id=8), missing_fields=("DATUM",))
+    hidden = replace(_validation_item(run_id=9), device_id="OTHER")
+    following = _validation_item(run_id=10)
+    items = (first, blocked, hidden, *((following,) if eligible_next else ()))
+    view.render_cases(items)
+    view._filters["device"].select_values((first.device_id,))
+    view._apply_filters()
+    view._var_initials.set(" AB ")
+    view._var_comment.set(" first only ")
+    calls, badge = [], []
+    app._validation_badge = SimpleNamespace(set_status=lambda text, **kwargs: badge.append(text))
+    app._show_confirm_dialog = lambda *_a, **_k: pytest.fail("first validation needs no correction confirmation")
+    app._services.results.validate_report_run = lambda *args, **binding: calls.append((args, binding))
+    remaining = items[1:]
+    app._services.results.list_open_validation_cases = lambda **binding: remaining
+    app._save_pending_validation()
+    app._task_runner.invoke_success()
+    assert len(calls) == 1 and calls[0][0] == (first.report_id, first.run_id, "AB", "first only")
+    assert view.validation_initials() == " AB " and view.validation_comment() == ""
+    assert tuple(view._tree.get_children()) == (("8", "10") if eligible_next else ("8",))
+    assert view.selected_item() == (following if eligible_next else None)
+    assert badge == [str(len(remaining))]
+    assert not view._focus_mode
+
+
+def test_workplace_held_save_reconciles_badge_without_hijacking_new_selection_pdf_or_draft(workplace):
+    app, view = workplace
+    first, second = _validation_item(), _validation_item(run_id=8)
+    view.render_cases((first, second))
+    view._var_initials.set("AB")
+    view._var_comment.set("A draft")
+    calls, badge = [], []
+    app._services.results.validate_report_run = lambda *args, **binding: calls.append((args, binding))
+    app._services.results.list_open_validation_cases = lambda **binding: (second,)
+    app._validation_badge = SimpleNamespace(set_status=lambda text, **kwargs: badge.append(text))
+    app._save_pending_validation()
+    payload = app._task_runner.submissions[0][1]()
+    view._tree.selection_set("8")
+    view._tree.focus("8")
+    view._on_select(None)
+    view._var_initials.set("CD")
+    view._var_comment.set("B draft")
+    view._set_pdf_zoom(1.5)
+    before_pdf, before_context = view.pdf_request(), view.selection_context()
+    app._task_runner.invoke_success(result=payload)
+    assert len(calls) == 1 and calls[0][0][1] == first.run_id
+    assert view.selected_item() == second and view.selected_items() == (second,)
+    assert tuple(view._tree.get_children()) == ("8",) and badge == ["1"]
+    assert view.validation_initials() == "CD" and view.validation_comment() == "B draft"
+    assert view.pdf_request() == before_pdf and view.selection_context() == before_context
+
+
+def test_workplace_last_filtered_case_save_keeps_empty_filter_scope(workplace):
+    app, view = workplace
+    first = replace(_validation_item(), assay_name="Assay A")
+    remaining = replace(_validation_item(run_id=8), assay_name="Assay B")
+    view.render_cases((first, remaining))
+    view._filters["assay"].select_values(("Assay A",))
+    view._var_initials.set("AB")
+    app._services.results.validate_report_run = lambda *_a, **_k: None
+    app._services.results.list_open_validation_cases = lambda **binding: (remaining,)
+    app._save_pending_validation()
+    app._task_runner.invoke_success()
+    assert view._filters["assay"].selected_values == frozenset({"Assay A"})
+    assert "Assay A" in view._filters["assay"]._variables
+    assert view.selected_item() is None and view._tree.get_children() == ()
+    assert view.validation_initials() == "AB"
+    view._filters["assay"].select_values(())
+    assert view.selected_item() == remaining
+
+
+def test_workplace_advance_without_eligible_case_clears_previous_multiselection(workplace):
+    app, view = workplace
+    first = _validation_item()
+    pending = replace(_pending_validation_item(), store_path=first.store_path)
+    blocked = replace(_validation_item(run_id=9), activation_blocked_reason="Quelle noch nicht abgeschlossen")
+    view.render_cases((first, pending, blocked))
+    view._tree.selection_set(("7", "8", "9"))
+    view._tree.focus("7")
+    view._on_select(None)
+    view._var_initials.set("AB")
+    app._services.results.validate_report_run = lambda *_a, **_k: None
+    app._services.results.list_open_validation_cases = lambda **binding: (pending, blocked)
+    app._save_pending_validation()
+    app._task_runner.invoke_success()
+    view._on_select(None)  # A queued native Treeview event must not revive an old row.
+    assert view._tree.selection() == () and view.selected_items() == () and view.selected_item() is None
+    assert str(view._btn_save.cget("state")) == "disabled"
+
+
+@pytest.mark.parametrize("old_refresh_first", [False, True])
+def test_workplace_write_serializes_queue_snapshot_and_drops_prewrite_refresh(workplace, old_refresh_first):
+    app, view = workplace
+    first, second = _validation_item(), _validation_item(run_id=8)
+    cases, calls, badge = [(first, second)], [], []
+    view.render_cases(cases[0])
+    view._var_initials.set("AB")
+    app._validation_badge = SimpleNamespace(set_status=lambda text, **kwargs: badge.append(text))
+    app._services.results.list_open_validation_cases = lambda **binding: cases[0]
+    app.refresh_current_view()
+    old_payload = app._task_runner.submissions[0][1]()
+
+    def save(report, run, initials, comment, **binding):
+        calls.append((report, run, initials, binding))
+        cases[0] = tuple(case for case in cases[0] if case.run_id != run)
+
+    app._services.results.validate_report_run = save
+    app._save_pending_validation()
+    saved_payload = app._task_runner.submissions[1][1]()
+    view._tree.selection_set("8")
+    view._tree.focus("8")
+    view._on_select(None)
+    view._var_comment.set("B draft")
+    assert str(view._btn_save.cget("state")) == "disabled"
+    app._save_pending_validation()  # Deliberate second intent has visible busy feedback, no second writer.
+    assert app.__dict__.get("_info_shown") and len(app._task_runner.submissions) == 2
+    for index in ((0, 1) if old_refresh_first else (1, 0)):
+        app._task_runner.invoke_success(index=index, result=old_payload if index == 0 else saved_payload)
+    assert len(app._task_runner.submissions) == 2 and len(calls) == 1
+    assert tuple(view._tree.get_children()) == ("8",) and view.selected_item() == second
+    assert view.validation_comment() == "B draft" and badge == ["1"]
+    assert str(view._btn_save.cget("state")) == "normal"
+    app._save_pending_validation()
+    app._task_runner.invoke_success()
+    assert [call[1] for call in calls] == [7, 8] and badge == ["1", "0"]
+    assert view.selected_item() is None and not view._tree.get_children()
+
+
+def test_workplace_direct_jump_during_save_defers_queue_read_until_fresh_write_reconciliation(workplace):
+    app, view = workplace
+    first, second = _validation_item(), _validation_item(run_id=8)
+    cases, reads, badge = [(first, second)], [], []
+    view.render_cases(cases[0])
+    view._var_initials.set("AB")
+    app._services.results.validate_report_run = lambda *_a, **_k: cases.__setitem__(0, (second,))
+    app._services.results.list_open_validation_cases = lambda **binding: reads.append(tuple(cases[0])) or cases[0]
+    app._services.results.get_validation_case = lambda *_a, **_k: second
+    app._validation_badge = SimpleNamespace(set_status=lambda text, **kwargs: badge.append(text))
+    app._save_pending_validation()
+    app._navigation_generation += 2  # Results -> explicit exact B intent.
+    app._begin_direct_validation((second.report_id, second.run_id, second.store_path, second.selection_token))
+    view.set_focus_mode(False)  # Explicit disclosure while the exact load waits remains respected.
+    assert len(app._task_runner.submissions) == 1 and reads == []
+    assert view.selected_item() is None and app._validation_direct_request is not None
+    app._task_runner.invoke_success(index=0)
+    assert len(app._task_runner.submissions) == 2 and app._task_runner.submissions[1][0] == "validation-direct"
+    app._task_runner.invoke_success(index=1)
+    assert reads == [(second,), (second,)] and badge == ["1", "1"]
+    assert view.selected_item() == second and tuple(view._tree.get_children()) == ("8",)
+    assert app._validation_direct_target[1] == second.run_id and app._validation_direct_request is None
+    assert not view._focus_mode
+
+
+def test_direct_context_epoch_change_reissues_once_without_applying_old_queue_or_badge():
+    app = _make_app_stub(current_view="validation")
+    case = _validation_item()
+    calls, rendered, badge = [], [], []
+    app._services.results.get_validation_case = lambda *_a, **_k: calls.append(True) or case
+    app._services.results.list_open_validation_cases = lambda **binding: (case,)
+    app._views["validation"].render_cases = lambda items, **binding: rendered.append((items, binding))
+    app._validation_badge = SimpleNamespace(set_status=lambda text, **kwargs: badge.append(text))
+    target = (case.report_id, case.run_id, case.store_path, case.selection_token)
+    app._begin_direct_validation(target)
+    old = app._task_runner.submissions[0][1]()
+    app._validation_write_epoch = 2  # A completed write invalidates a previously captured queue.
+    app._task_runner.invoke_success(index=0, result=old)
+    assert rendered == [] and badge == [] and app._validation_direct_target == target
+    assert len(app._task_runner.submissions) == 2 and len(calls) == 1
+    app._task_runner.invoke_success(index=1)
+    assert rendered == [((case,), {"direct_case": case})] and badge == ["1"]
+    assert app._validation_direct_request is None and len(calls) == 2
+
+
+@pytest.mark.parametrize("destination", ["validation", "results"])
+@pytest.mark.parametrize("old_refresh_first", [False, True])
+def test_workplace_write_keeps_genuine_newer_refresh_or_navigation_intent(workplace, destination, old_refresh_first):
+    app, view = workplace
+    first, second = _validation_item(), _validation_item(run_id=8)
+    cases = [(first, second)]
+    view.render_cases(cases[0])
+    view._var_initials.set("AB")
+    app._services.results.list_open_validation_cases = lambda **binding: cases[0]
+    app.refresh_current_view()
+    old_payload = app._task_runner.submissions[0][1]()
+    app._services.results.validate_report_run = lambda *_a, **_k: cases.__setitem__(0, (second,))
+    app._save_pending_validation()
+    app._current_view = destination
+    app._navigation_generation += int(destination == "results")
+    app._services.results.list_recent_reports = lambda **binding: (_report_summary("fresh", "fresh.pdf"),)
+    app.refresh_current_view()
+    assert len(app._task_runner.submissions) == 2
+    if old_refresh_first:
+        app._task_runner.invoke_success(index=0, result=old_payload)
+        app._task_runner.invoke_success(index=1)
+    else:
+        app._task_runner.invoke_success(index=1)
+        app._task_runner.invoke_success(index=0, result=old_payload)
+    assert len(app._task_runner.submissions) == 3 and app._task_runner.submissions[2][0] == app.TASK_REFRESH
+    app._task_runner.invoke_success(index=2)
+    if destination == "validation":
+        assert view.selected_item() == second and tuple(view._tree.get_children()) == ("8",)
+    else:
+        assert app._rendered_reports[0].report_id == "fresh" and app._current_view == "results"
+
+
+def test_workplace_mutation_does_not_block_separate_results_read(workplace):
+    app, view = workplace
+    view.render_cases((_validation_item(),))
+    view._var_initials.set("AB")
+    app._services.results.validate_report_run = lambda *_a, **_k: None
+    app._save_pending_validation()
+    app._current_view = "results"
+    app._navigation_generation += 1
+    _results, state = _bound_results_stub(app)
+    app._services.results.get_report_detail = lambda report, **binding: replace(_report_detail(report, "a.pdf"), store_path=binding["store_path"])
+    app._open_selected_report()
+    app._task_runner.invoke_success(index=1)
+    app._task_runner.invoke_success(index=0)
+    assert state["detail"].report_id == "a" and state["shown"] == 1
+
+
+def test_workplace_bulk_reanalysis_preserves_real_bindings_and_separate_focused_choice(workplace):
+    app, view = workplace
+    first, second = _validation_item(), _validation_item(run_id=8)
+    view.render_cases((first, second))
+    view._tree.selection_set(("7", "8"))
+    view._tree.focus("8")
+    view._on_select(None)
+    view._var_initials.set(" RR ")
+    pending_first = replace(_pending_validation_item(run_id=7), store_path=first.store_path)
+    pending_second = replace(_pending_validation_item(run_id=8), store_path=second.store_path)
+    calls, reads = [], []
+    app._services.results.validate_report_run = lambda *_a, **_k: pytest.fail("reanalysis/choice must not validate")
+    app._services.results.reanalyze_selected_cases = lambda cases, initials, **binding: calls.append((cases, initials, binding)) or SimpleNamespace(items=())
+    app._services.results.list_open_validation_cases = lambda **binding: reads.append(binding) or (pending_first, pending_second)
+    app._reanalyze_validation_cases()
+    app._task_runner.invoke_success()
+    assert calls[0][:2] == ((first, second), "RR") and calls[0][2]["request_id"]
+    assert [(case.run_id, case.selection_token, case.store_path) for case in calls[0][0]] == [
+        (7, "original:7", "db.sqlite3"), (8, "original:8", "db.sqlite3")]
+    assert reads == [{"store_path": "db.sqlite3"}]
+    assert view.selected_item() == pending_second and view.selected_items() == (pending_first, pending_second)
+    assert str(view._btn_save.cget("state")) == "disabled"
+    chosen = replace(pending_second, comparison=None, revision_id=20, selection_token="selection:30")
+    choices = []
+    view._var_comment.set("full-revision choice")
+    app._services.results.choose_reanalysis_result = lambda *args, **binding: choices.append((args, binding))
+    app._services.results.list_open_validation_cases = lambda **binding: (pending_first, chosen)
+    app._choose_validation_result("accept_new")
+    app._task_runner.invoke_success()
+    assert len(choices) == 1 and choices[0][0] == (pending_second, "accept_new", "RR")
+    assert choices[0][1]["note"] == "full-revision choice" and choices[0][1]["request_id"]
+    assert view.selected_item() == chosen and view.selected_item().revision_id == 20
+    assert view.validation_initials() == " RR " and view.validation_comment() == ""
+    assert str(view._btn_save.cget("state")) == "normal"
+
+
+def test_workplace_completed_write_from_before_store_ABA_cannot_repaint_same_ids(workplace):
+    app, view = workplace
+    first = _validation_item()
+    view.render_cases((first,))
+    view._var_initials.set("AB")
+    app._services.results.validate_report_run = lambda *_a, **_k: None
+    app._save_pending_validation()
+    old_payload = app._task_runner.submissions[0][1]()
+    settings_a = SimpleNamespace(**vars(app._settings))
+    app._accept_settings_snapshot(SimpleNamespace(**{**vars(settings_a), "sqlite_path": "other.sqlite3"}))
+    app._accept_settings_snapshot(settings_a)
+    fresh = replace(first, fields=(ReportFieldValue("RESULT", "99"),))
+    view.render_cases((fresh,))
+    view._var_comment.set("Fresh A draft")
+    badge = []
+    app._validation_badge = SimpleNamespace(set_status=lambda text, **kwargs: badge.append(text))
+    app._task_runner.invoke_success(result=old_payload)
+    assert app._store_generation == 2 and badge == []
+    assert view.selected_item() == fresh and view.validation_comment() == "Fresh A draft"
+
+
+@pytest.mark.parametrize("action", ["save", "reanalyze", "choose", "pdf"])
+@pytest.mark.parametrize("change_before_submit", [False, True])
+def test_workplace_store_switch_rejects_old_action_descriptor(workplace, action, change_before_submit):
+    app, view = workplace
+    case = replace(_pending_validation_item(), store_path="db.sqlite3") if action == "choose" else _validation_item()
+    view.render_cases((case,))
+    view._var_initials.set("AB")
+    calls = []
+    app._services.results.validate_report_run = lambda *_a, **_k: calls.append("save")
+    app._services.results.reanalyze_selected_cases = lambda *_a, **_k: calls.append("reanalyze")
+    app._services.results.choose_reanalysis_result = lambda *_a, **_k: calls.append("choose")
+    app._services.results.open_report_pdf = lambda *_a, **_k: calls.append("pdf")
+    if change_before_submit:
+        app._settings.sqlite_path = "other.sqlite3"
+    {"save": app._save_pending_validation, "reanalyze": app._reanalyze_validation_cases,
+     "choose": lambda: app._choose_validation_result("accept_new"), "pdf": app._open_validation_pdf}[action]()
+    if change_before_submit:
+        assert app._task_runner.submissions == [] and app.__dict__.get("_info_shown")
+    else:
+        app._settings.sqlite_path = "other.sqlite3"
+        work = app._task_runner.submissions[0][1]
+        if action == "pdf":
+            assert work() == ""
+        else:
+            with pytest.raises(ValidationConflictError, match="result_store_changed"):
+                work()
+        app._task_runner.invoke_error(exc=ValidationConflictError("result_store_changed"))
+        assert not app.__dict__.get("_error_shown")
+    assert calls == []
 
 
 def test_validation_view_renders_context_and_disables_ambiguous_case() -> None:
@@ -1072,7 +1678,7 @@ def test_validation_view_renders_context_and_disables_ambiguous_case() -> None:
         root.destroy()
 
 
-def test_assay_tables_show_full_or_missing_names_and_preserve_row_identity():
+def test_assay_tables_show_full_or_missing_names_and_preserve_row_identity(tmp_path):
     from interfaces.tk.views.diagnostics_view import DiagnosticsView
     from interfaces.tk.views.rules_view import RulesView
     root, results = _open_results_view()
@@ -1098,11 +1704,12 @@ def test_assay_tables_show_full_or_missing_names_and_preserve_row_identity():
         diagnostics.render_duplicates((DuplicateCandidateItem(9, "pending", "SECRET-KEY", "dedupe", 1, "now", assay_name=name),))
         assert diagnostics._dup_tree.item("9", "values")[0] == name
         rules.render_inventory((RulesetInventoryItem("active", "Aktiv", "SECRET-KEY", name, "rule.json", "rule.json", 1, True, None),))
-        assert rules._tree.item(rules._tree.get_children()[0], "values")[0] == name
+        rules.bind_editor(SimpleNamespace(project_root=tmp_path), tmp_path)
+        assert rules._tree.item(rules._tree.get_children()[0], "values")[2] == name
         statistics = StatisticsView(root, on_refresh=noop)
         assert statistics._qc_include_explanations.get() is False
         assert not hasattr(results, "_qc_panel")
-        for tree, column in ((results._tree, "assays"), (validation._tree, "assay"), (rules._tree, "assay")):
+        for tree, column in ((results._tree, "assays"), (validation._tree, "assay"), (rules._tree, "name")):
             assert tree.column(column, "width") >= 200 and tree.cget("xscrollcommand")
     finally:
         root.destroy()
@@ -1121,18 +1728,17 @@ def test_validation_view_save_uses_task_runner_and_refreshes_badge() -> None:
         validation_initials=lambda: " AB ",
         validation_comment=lambda: " note ",
         clear_comment=lambda: cleared.append(True),
-        render_cases=lambda items: rendered.append(tuple(items)),
+        render_cases=lambda items, **_intent: rendered.append(tuple(items)),
     )
     calls: list[tuple[object, ...]] = []
-    app._services.results.validate_report_run = lambda *args: calls.append(args)
-    app._validation_report_scope = "report-1"
-    app._services.results.list_open_validation_cases = lambda **kwargs: [replace(item, validation_current=True)] if kwargs.get("include_validated") else []
+    app._services.results.validate_report_run = lambda *args, **binding: calls.append(args)
+    app._services.results.list_open_validation_cases = lambda **binding: []
 
     test_app.AnalyzerDesktopApp._save_pending_validation(app)
     assert len(app._task_runner.submissions) == 1
     app._task_runner.invoke_success()
     assert calls == [("report-1", 7, "AB", "note")]
-    assert rendered == [(replace(item, validation_current=True),)]
+    assert rendered == [()]
     assert cleared == [True]
     assert badge == [("0", "good")]
 
@@ -1142,12 +1748,138 @@ def test_validation_view_opens_selected_report_pdf_via_task_runner() -> None:
     item = _validation_item()
     app._views["validation"] = SimpleNamespace(selected_item=lambda: item)
     opened: list[str] = []
-    app._services.results.open_report_pdf = lambda report_id: opened.append(report_id) or "/reports/report.pdf"
+    app._services.results.open_report_pdf = lambda report_id, **binding: opened.append(report_id) or "/reports/report.pdf"
 
     test_app.AnalyzerDesktopApp._open_validation_pdf(app)
     assert app._task_runner.submissions[0][0] == "open-pdf-report-1"
     app._task_runner.invoke_success()
     assert opened == ["report-1"]
+
+
+@pytest.mark.parametrize("width,height,scale", [(1420, 930, 1.0), (960, 620, 1.25)])
+def test_results_mockup_native_list_and_detail_keep_real_data_and_exact_target(width, height, scale, tmp_path):
+    from tkinter import ttk
+    import tkinter.font as tkfont
+    try:
+        root = test_app.AnalyzerDesktopApp(project_root=tmp_path, services=_fake_services())
+    except tk.TclError as exc:
+        pytest.skip(f"Tk not available: {exc}")
+    previous_scaling = None
+    try:
+        # Keep the actual shell geometry, without a late synthetic bootstrap
+        # refresh replacing the deliberately rendered report fixture.
+        root._task_runner.shutdown_runner()
+        view = root._views["results"]
+        previous_scaling = float(root.tk.call("tk", "scaling"))
+        root.tk.call("tk", "scaling", (4 / 3) * scale)
+        root.geometry(f"{width}x{height}")
+        root.show_view("results", refresh=False)
+        reports = tuple(replace(_report_summary(f"r-{index}", f"ANA_2026-11-26_{index}.pdf"),
+            assay_names=("ANA Screen IgG",), device_ids=("Analyzer 1",), lot_ids=("ANA-2406",), report_status="Offen") for index in range(3))
+        view.render_report_list(reports, store_path="displayed.sqlite")
+        root.deiconify()
+        for _ in range(5):
+            root.update()
+        assert view._list_card._rounded
+        assert tuple(view._tree.cget("displaycolumns")) == ("file", "assays", "device", "lot", "time", "status")
+        assert view._tree.item("r-0", "values")[5] == "ANA-2406"
+        assert view._search_entry.winfo_rooty() == view._search_button.winfo_rooty()
+        assert view._search_entry.winfo_height() == view._search_button.winfo_height()
+        assert view._search_entry.winfo_width() >= (220 if width == 1420 else 350)
+        whole_rows = [view._tree.bbox(row) for row in view._tree.get_children()]
+        whole_rows = [box for box in whole_rows if box and box[1] + box[3] <= view._tree.winfo_height()]
+        assert len(whole_rows) >= (3 if width == 1420 else 2)
+        assert view._list_actions.winfo_rooty() + view._list_actions.winfo_height() <= view._list_panel.winfo_rooty() + view._list_panel.winfo_height()
+        if width == 1420:
+            assert view._tree.xview() == (0.0, 1.0) and view._tree.yview() == (0.0, 1.0)
+        else:
+            heading_font = tkfont.Font(root, font=ttk.Style(root).lookup("Results.Treeview.Heading", "font"))
+            for column in view._tree.cget("displaycolumns"):
+                assert view._tree.column(column, "width") >= heading_font.measure(view._tree.heading(column, "text")) + 24
+            assert view._tree.xview() == (0.0, 1.0)
+        detail = _validated_report_detail()
+        group = detail.assay_groups[0]
+        occurrence = replace(group.occurrences[0], assay_name="ANA Screen IgG", device_id="Analyzer 1", charge="ANA-2406", lot_id="ANA-2406",
+            created_at="2026-11-25T08:14:00Z", selection_token="selection:30", store_path="displayed.sqlite",
+            fields=tuple(ReportFieldValue(key, value) for key, value in (("PLATTE", "P-039"), ("DATUM", "25.11.2026"), ("ZEIT", "16:03"), ("PC_IST", "98,4"))))
+        detail = replace(detail, file_name="ANA_2026-11-25.pdf", store_path="displayed.sqlite",
+            assay_groups=(replace(group, assay_display_label="ANA Screen IgG", occurrences=(occurrence,)),))
+        view.render_report_detail(detail)
+        view.show_detail()
+        for _ in range(5):
+            root.update()
+        assert view._detail_card._rounded and view._lbl_detail_title.cget("text") == "ANA Screen IgG"
+        assert view.selected_validation_target() == (detail.report_id, occurrence.run_id, "displayed.sqlite", "selection:30")
+        assert view.current_detail_descriptor() == (detail.report_id, "displayed.sqlite")
+        assert view._field_tree.item(view._field_tree.get_children()[3], "values") == ("PC_IST", "98,4")
+        if width == 1420:
+            assert view._values_panel.winfo_manager() == "grid" and view._history_panel.winfo_manager() == "grid"
+            assert view._values_panel.winfo_rootx() < view._history_panel.winfo_rootx()
+            for tree in (view._occ_tree, view._field_tree, view._validation_tree):
+                assert abs(sum(tree.column(column, "width") for column in tree.cget("columns")) - (tree.winfo_width() - 4)) <= 4
+                assert all(str(tree.heading(column, "anchor")) == "w" for column in tree.cget("columns"))
+            assert view._occ_tree.winfo_height() <= view._occ_tree.winfo_reqheight() + 2
+            assert int(view._occ_tree.cget("height")) == 1
+        else:
+            assert str(view._values_panel) in view._read_tabs.tabs() and str(view._history_panel) in view._read_tabs.tabs()
+            assert not view._occ_frame.winfo_manager() and not view._occ_label.winfo_manager()
+            assert view._occ_tree.selection() and view.validation_run_id() == occurrence.run_id
+        first = view._field_tree.bbox(view._field_tree.get_children()[0])
+        assert first and first[1] + first[3] <= view._field_tree.winfo_height()
+        assert view._field_tree.winfo_rooty() + first[1] + first[3] <= root.winfo_rooty() + height
+        for button in view._detail_action_buttons:
+            assert button.winfo_x() + button.winfo_width() <= view._detail_actions.winfo_width()
+            assert button.winfo_rooty() + button.winfo_height() < root.winfo_rooty() + height
+        if width == 960:
+            view._read_tabs.select(view._history_panel)
+            root.update()
+            history_first = view._validation_tree.bbox(view._validation_tree.get_children()[0])
+            assert history_first and history_first[1] + history_first[3] <= view._validation_tree.winfo_height()
+            assert view._validation_tree.winfo_rooty() + history_first[1] + history_first[3] <= root.winfo_rooty() + height
+            view._read_tabs.select(view._values_panel)
+            many = (occurrence, replace(occurrence, run_id=6, selection_token="selection:6"), replace(occurrence, run_id=7, selection_token="selection:7"))
+            view.render_report_detail(replace(detail, file_name="ANA_2026-11-25_Laborbericht_mit_mehreren_Messungen_und_vollstaendiger_Herkunftsangabe.pdf",
+                assay_groups=(replace(detail.assay_groups[0], occurrences=many),)))
+            for _ in range(5):
+                root.update()
+            assert view._occ_frame.winfo_manager() and int(view._occ_tree.cget("height")) == 2
+            assert view._occ_tree.yview()[1] < 1.0
+            assert view.selected_validation_target() == (detail.report_id, occurrence.run_id, "displayed.sqlite", "selection:30")
+            first = view._field_tree.bbox(view._field_tree.get_children()[0])
+            assert first and first[1] + first[3] <= view._field_tree.winfo_height()
+            assert view._field_tree.winfo_rooty() + first[1] + first[3] <= root.winfo_rooty() + height
+            assert view._detail_context._canvas.yview()[1] < 1.0
+            view._detail_context._canvas.yview_moveto(1)
+            root.update()
+            assert view._lbl_validation_status.winfo_rooty() + view._lbl_validation_status.winfo_height() <= view._detail_context.winfo_rooty() + view._detail_context.winfo_height()
+    finally:
+        try:
+            if previous_scaling is not None:
+                root.tk.call("tk", "scaling", previous_scaling)
+        finally:
+            root.destroy()
+
+
+def test_results_visual_filters_keep_existing_charge_date_search_and_reset():
+    root, view = _open_results_view()
+    try:
+        first = replace(_report_summary("first", "ANA.pdf"), assay_names=("ANA Screen IgG",), lot_ids=("LOT-A",), latest_created_at="2026-11-25T08:14:00")
+        second = replace(_report_summary("second", "MPO.pdf"), assay_names=("Anti-MPO IgG",), lot_ids=("LOT-B",), latest_created_at="2026-11-26T08:21:00")
+        view.render_report_list((first, second), store_path="displayed.sqlite")
+        view._var_search.set("MPO")
+        view._var_lot.set("LOT-B")
+        view._var_date_from.set("2026-11-26")
+        view._var_date_to.set("2026-11-26")
+        view._apply_filters()
+        assert view._tree.get_children() == ("second",)
+        view._tree.selection_set("second")
+        assert view.selected_report_descriptor() == ("second", "displayed.sqlite")
+        view._reset_filters()
+        assert set(view._tree.get_children()) == {"first", "second"}
+        assert view.selected_report_descriptor() == ("second", "displayed.sqlite")
+        assert all(variable.get() == "" for variable in (view._var_search, view._var_lot, view._var_date_from, view._var_date_to))
+    finally:
+        root.destroy()
 
 
 def test_results_view_keeps_live_selection_separate_from_rendered_detail() -> None:
@@ -1186,11 +1918,11 @@ def test_open_selected_report_and_pdf_do_not_confuse_prior_detail_with_watch_sel
         detail_calls: list[str] = []
         pdf_calls: list[str] = []
 
-        def get_report_detail(report_id: str) -> ReportDetail:
+        def get_report_detail(report_id: str, **binding) -> ReportDetail:
             detail_calls.append(report_id)
-            return _report_detail(report_id, f"{report_id}.pdf")
+            return replace(_report_detail(report_id, f"{report_id}.pdf"), store_path=binding["store_path"])
 
-        def open_report_pdf(report_id: str) -> str:
+        def open_report_pdf(report_id: str, **binding) -> str:
             pdf_calls.append(report_id)
             return f"/pdf/{report_id}.pdf"
 
@@ -1200,7 +1932,7 @@ def test_open_selected_report_and_pdf_do_not_confuse_prior_detail_with_watch_sel
             (
                 _report_summary(_MULTI_REPORT_ID, "multi.pdf"),
                 _report_summary(_WATCH_REPORT_ID, "watch.pdf"),
-            )
+            ), store_path="db.sqlite3",
         )
         view.render_report_detail(_report_detail(_MULTI_REPORT_ID, "multi.pdf"))
         view.show_list()
@@ -1217,7 +1949,7 @@ def test_open_selected_report_and_pdf_do_not_confuse_prior_detail_with_watch_sel
             (
                 _report_summary(_MULTI_REPORT_ID, "multi.pdf"),
                 _report_summary(_WATCH_REPORT_ID, "watch.pdf"),
-            )
+            ), store_path="db.sqlite3",
         )
         assert view.selected_report_id() == _WATCH_REPORT_ID
         assert view.current_detail_report_id() == _MULTI_REPORT_ID
@@ -1314,7 +2046,7 @@ def _validated_report_detail() -> ReportDetail:
     )
 
 
-def test_results_validation_panel_names_correction_and_shows_history() -> None:
+def test_results_validation_history_is_read_only_and_navigates_exact_case() -> None:
     root, view = _open_results_view()
     try:
         summary = ReportSummaryItem(
@@ -1333,58 +2065,77 @@ def test_results_validation_panel_names_correction_and_shows_history() -> None:
         listed = view._tree.item(summary.report_id, "values")
         assert listed[1] == "Teilweise validiert"
 
-        view.set_default_operator_initials("  AB ")
         view.render_report_detail(_validated_report_detail())
         assert "Validiert von CD" in view._lbl_validation_status.cget("text")
-        assert view._btn_save_validation.cget("text") == "In Validierung prüfen"
-        assert view._btn_correct_validation.cget("text") == "Validierung / Berichtgerät korrigieren"
-        assert str(view._btn_save_validation.cget("state")) == "disabled"
-        assert str(view._btn_correct_validation.cget("state")) == "normal"
+        assert str(view._btn_open_validation.cget("state")) == "normal"
+        assert not hasattr(view, "_btn_save_validation") and not hasattr(view, "_btn_correct_validation")
+        assert not hasattr(view, "_var_initials") and not hasattr(view, "_var_comment")
         assert len(view._validation_tree.get_children()) == 2
         assert view.validation_run_id() == 5
-        assert view.validation_initials() == "AB"
+        assert view.selected_validation_target()[:2] == ("rep-val", 5)
         assert "Verarbeitung: Fertig" in view._lbl_detail_meta.cget("text")
         assert "Status: Validiert" in view._lbl_detail_meta.cget("text")
     finally:
         root.destroy()
 
 
-def test_results_validation_entry_captures_displayed_report_run_and_store_without_writing() -> None:
-    app = _make_app_stub()
-    displayed = ["rep-1", 5, "displayed.sqlite"]
-    rendered, calls, navigation = [], [], []
-    app._views["results"] = SimpleNamespace(current_detail_report_id=lambda: displayed[0],
-        validation_run_id=lambda: displayed[1], validation_result_binding=lambda: ("displayed-result", displayed[2]))
-    app._views["validation"] = SimpleNamespace(render_cases=lambda items: rendered.append(tuple(items)),
-        select_run=lambda run: rendered.append(run))
-    app.show_view = lambda key, **kwargs: navigation.append((key, kwargs))
-    app._services.results.list_open_validation_cases = lambda **kwargs: calls.append(kwargs) or (_validation_item(),)
-    app._services.results.validate_report_run = lambda *_a, **_k: pytest.fail("Opening review must not validate")
-    app._show_confirm_dialog = lambda *_a, **_k: pytest.fail("The canonical form owns explicit confirmation")
-    app._save_selected_validation()
-    displayed[:] = ["other-report", 9, "changed.sqlite"]
+def test_save_validation_refreshes_worklist_without_confirmation(workplace) -> None:
+    app, view = workplace
+    case = replace(_validation_item(run_id=5), report_id="rep-1")
+    view.render_cases((case,))
+    view._var_initials.set(" AB ")
+    view._var_comment.set(" note ")
+    calls: list[tuple[object, ...]] = []
+    app._services.results.validate_report_run = lambda *args, **kwargs: calls.append(("save", args, kwargs))
+    app._services.results.correct_report_run = lambda *args, **kwargs: calls.append(("correct", args, kwargs))
+    app._services.results.list_open_validation_cases = lambda **binding: ()
+    app._services.results.get_report_detail = lambda *_a, **_k: pytest.fail("Prüfplatz does not write through Results")
+    app._show_confirm_dialog = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("confirm"))
+
+    app._save_pending_validation()
+    assert len(app._task_runner.submissions) == 1
     app._task_runner.invoke_success()
-    assert calls == [{"report_id": "rep-1", "include_validated": True, "store_path": "displayed.sqlite"}]
-    assert navigation == [("validation", {"refresh": False})]
-    assert rendered[-1] == 5 and app._validation_report_scope == "rep-1"
+    assert calls[0][0] == "save"
+    assert calls[0][1] == ("rep-1", 5, "AB", "note")
+    assert view.validation_comment() == "" and view.validation_initials() == " AB "
+    assert view.selected_item() is None and view._tree.get_children() == ()
+    assert len(calls) == 1
 
 
-def test_results_correction_uses_same_form_and_main_navigation_restores_global_queue() -> None:
-    app = _make_app_stub()
-    navigation, selected, calls = [], [], []
-    app._views["results"] = SimpleNamespace(current_detail_report_id=lambda: "rep-1", validation_run_id=lambda: 5,
-        validation_result_binding=lambda: ("selected-result", "displayed.sqlite"))
-    app._views["validation"] = SimpleNamespace(render_cases=lambda _items: None, select_run=selected.append)
-    app.show_view = lambda key, **kwargs: navigation.append((key, kwargs))
-    app._services.results.list_open_validation_cases = lambda **kwargs: calls.append(kwargs) or ()
-    app._services.results.correct_report_run = lambda *_a, **_k: pytest.fail("Opening correction must not append a validation")
-    app._correct_selected_validation()
+def test_correct_validation_requires_explicit_confirmation_and_retains_same_revision(workplace) -> None:
+    app, view = workplace
+    dialogs: list[tuple[str, str]] = []
+    calls = []
+    original = RunValidationItem(1, 5, "AB", "2026-01-01T00:00:00Z", "first", None, None, revision_id=20)
+    correction = replace(original, validation_id=2, operator_initials="CD", comment="correction", supersedes_validation_id=1)
+    case = replace(_validation_item(run_id=5), report_id="rep-1", revision_id=20, selection_token="selection:30",
+                   current_validation=original, validation_history=(original,))
+    corrected = replace(case, current_validation=correction, validation_history=(original, correction))
+    view.render_cases((_validation_item(run_id=9),), direct_case=case)
+    view._var_initials.set("CD")
+    view._var_comment.set("correction")
+    app._services.results.correct_report_run = lambda *args, **binding: calls.append((args, binding)) or correction
+    app._services.results.get_validation_case = lambda *_a, **_k: corrected
+    app._services.results.list_open_validation_cases = lambda **binding: (_validation_item(run_id=9),)
+    app._services.results.validate_report_run = lambda *_a, **_k: pytest.fail("correction must not perform first validation")
+    app._show_confirm_dialog = lambda _parent, title, message: dialogs.append((title, message)) or False
+
+    app._save_pending_validation()
+    assert dialogs
+    assert dialogs[0][0] == "Validierung korrigieren"
+    assert "bleibt erhalten" in dialogs[0][1] and "ausdrücklich korrigieren" in dialogs[0][1]
+    assert app._task_runner.submissions == []
+    assert calls == []
+
+    app._show_confirm_dialog = lambda *_args, **_kwargs: True
+    app._save_pending_validation()
     app._task_runner.invoke_success()
-    assert selected == [5]
-    assert calls == [{"report_id": "rep-1", "include_validated": True, "store_path": "displayed.sqlite"}]
-    app._open_validation_queue()
-    assert app._validation_report_scope is None and app._validation_store_scope is None
-    assert navigation[-1] == ("validation", {})
+    assert len(calls) == 1 and calls[0][0] == ("rep-1", 5, "CD", "correction")
+    assert calls[0][1]["expected_selection_token"] == "selection:30"
+    assert view.selected_item() == corrected and view.selected_item().revision_id == 20
+    assert len(view._history.get_children()) == 2 and view._btn_save.cget("text") == "Validierung korrigieren"
+    assert view.validation_initials() == "CD" and view.validation_comment() == ""
+    assert app._validation_direct_target[:2] == ("rep-1", 5)
 
 
 def test_render_report_list_drops_selection_when_selected_report_disappears() -> None:
@@ -1627,6 +2378,8 @@ def test_save_settings_false_watch_enabled_reaches_controller_and_reschedules() 
 
 def test_save_settings_coalesces_latest_wins_while_first_save_active() -> None:
     app = _make_app_stub()
+    # Watch scheduling is covered separately; this case isolates save coalescing.
+    app._reschedule_watch = lambda: None
     statuses: list[str] = []
     saved_flags: list[bool] = []
     collect_queue = [SimpleNamespace(watch_enabled=True), SimpleNamespace(watch_enabled=False)]
@@ -1670,6 +2423,62 @@ def test_settings_view_collects_trimmed_operator_initials() -> None:
     collected = SettingsView.collect_settings(view, device_id_map={})
     assert collected.operator_initials == "RR"
     assert collected.output_mode == "sqlite"
+
+
+@pytest.mark.parametrize("failure", [None, "configuration", "names", "store"])
+def test_settings_configuration_read_is_deferred_isolated_and_never_loads_rule_fields(failure):
+    app = _make_app_stub(current_view="settings")
+    app._views["settings"].render_settings = lambda *_args, **_kwargs: None
+    reads = []
+    store = str(Path(app._settings.sqlite_path).resolve())
+    state = SimpleNamespace(store_path=store, inventory={"snapshot": {"devices": []}}, profiles=())
+    def configuration():
+        reads.append("configuration")
+        if failure == "configuration":
+            raise RuntimeError("synthetic inaccessible QC configuration")
+        return SimpleNamespace(**{**vars(state), "store_path": "other.sqlite3"}) if failure == "store" else state
+    def inventory(kind):
+        reads.append(("rules", kind))
+        if failure == "names":
+            raise RuntimeError("synthetic missing active rule")
+        return [SimpleNamespace(assay_key="A", assay_name="ANA Screen IgG"), SimpleNamespace(assay_key="missing-name", assay_name="")]
+    app._services.settings.get_qc_configuration = configuration
+    app._services.rules.list_inventory = inventory
+    app._services.rules.list_fields = lambda *_args: pytest.fail("The settings list must not read extraction fields")
+    app.refresh_current_view()
+    assert reads == []
+    app._task_runner.invoke_success()
+    rendered, options = app._rendered_qc_configuration
+    assert not app.__dict__.get("_error_shown")
+    if failure in ("configuration", "store"):
+        assert rendered is None and options["error"]
+    else:
+        assert rendered is state
+        assert options["assay_names"] == ({"A": "ANA Screen IgG"} if failure is None else {})
+        assert bool(options["error"]) is (failure == "names")
+
+
+@pytest.mark.parametrize("aba", [False, True])
+def test_settings_configuration_rejects_old_store_generation_and_refreshes_latest(aba):
+    app = _make_app_stub(current_view="settings")
+    app._views["settings"].render_settings = lambda *_args, **_kwargs: None
+    first = app._settings
+    second = SimpleNamespace(**{**vars(first), "sqlite_path": "new-store.sqlite3"})
+    live = [first]
+    app._services.settings.load = lambda: live[0]
+    app._services.settings.get_qc_configuration = lambda: SimpleNamespace(store_path=str(Path(live[0].sqlite_path).resolve()), inventory={"snapshot": {"devices": []}}, profiles=())
+    app.refresh_current_view()
+    old = app._task_runner.submissions[-1][1]()
+    app._accept_settings_snapshot(second)
+    live[0] = second
+    if aba:
+        app._accept_settings_snapshot(first)
+        live[0] = first
+    app._task_runner.invoke_success(index=0, result=old)
+    assert "_rendered_qc_configuration" not in app.__dict__
+    assert len(app._task_runner.submissions) == 2
+    app._task_runner.invoke_success(index=1)
+    assert app._rendered_qc_configuration[0].store_path == str(Path(live[0].sqlite_path).resolve())
 
 
 def test_settings_view_disables_excel_but_keeps_sqlite() -> None:
@@ -1996,6 +2805,284 @@ def test_diagnostics_retry_button_is_disabled_for_historical_exports(retry_kind,
     assert states == [expected]
 
 
+@pytest.mark.parametrize("late", ["selection", "selection-aba", "navigation", "store", "refresh", "error"])
+def test_diagnosis_candidates_and_details_never_apply_after_context_change(late):
+    app = _make_app_stub(current_view="diagnostics")
+    selected, rendered, shown = ["job-a"], [], []
+    selection_generation = [0]
+    app._views["diagnostics"].selected_job_id = lambda: selected[0]
+    app._views["diagnostics"].diagnosis_selection_context = lambda: (selected[0], selection_generation[0])
+    app._views["diagnostics"].render_candidates = rendered.append
+    app._services.extraction.get_job_diagnosis = lambda _job: SimpleNamespace(technical_detail="Technical A", friendly_message="Hint A", context_text="Context A", error_label="Error A", file_name="a.pdf")
+    app._services.rules.discover_assay_candidates_for_job = lambda _job: ("candidate-a",)
+    app._show_details_dialog = lambda *_args: shown.append(_args)
+    app._show_diagnosis_details()
+    payload = app._task_runner.submissions[-1][1]()
+    if late in ("selection", "error"):
+        selected[0] = "job-b"
+    elif late == "selection-aba":
+        selection_generation[0] += 2
+    elif late == "navigation":
+        app._navigation_generation += 1
+        app._current_view = "results"
+    elif late == "store":
+        app._store_generation += 2  # A -> B -> A remains stale, even at the same path.
+    else:
+        app._refresh_generation += 1
+    if late == "error":
+        app._task_runner.invoke_error(exc=RuntimeError("old A"))
+    else:
+        app._task_runner.invoke_success(result=payload)
+    assert not rendered and not shown and not app.__dict__.get("_error_shown")
+
+
+def test_diagnosis_details_keep_exact_selected_job_and_existing_dialog():
+    app = _make_app_stub(current_view="diagnostics")
+    rendered, shown, reads = [], [], []
+    app._views["diagnostics"].selected_job_id = lambda: "job-a"
+    app._views["diagnostics"].diagnosis_selection_context = lambda: ("job-a", 0)
+    app._views["diagnostics"].render_candidates = rendered.append
+    app._services.extraction.get_job_diagnosis = lambda job: reads.append(job) or SimpleNamespace(technical_detail="Technical A", friendly_message="Hint A", context_text="Context A", error_label="Error A", file_name="a.pdf")
+    app._services.rules.discover_assay_candidates_for_job = lambda job: reads.append(job) or ("candidate-a",)
+    app._show_details_dialog = lambda *_args: shown.append(_args)
+    app._show_diagnosis_details()
+    assert reads == []
+    app._task_runner.invoke_success()
+    assert reads == ["job-a", "job-a"] and rendered == [("candidate-a",)]
+    assert shown[0][1:] == ("Error A", "Hint A", "Technical A\n\nContext A")
+
+
+@pytest.mark.parametrize("stale", [False, "selection", "selection-aba", "store"])
+def test_duplicate_comparison_route_is_exact_read_only_and_discards_late_selection(monkeypatch, stale):
+    from interfaces.tk.widgets import dialogs
+    app = _make_app_stub(current_view="diagnostics")
+    selected, opened, reads = [7], [], []
+    selection_generation = [0]
+    store = str(Path(app._settings.sqlite_path).resolve())
+    app._views["diagnostics"].selected_duplicate_id = lambda: selected[0]
+    app._views["diagnostics"].selected_duplicate_descriptor = lambda: (selected[0], store, selection_generation[0])
+    app._views["diagnostics"].duplicate_selection_context = lambda: (selected[0], store, selection_generation[0])
+    detail = DuplicateCandidateDetail(DuplicateCandidateItem(7, "pending", "private-key", "dedupe", 1, "2026-11-25T08:14:00Z", assay_name="ANA Screen IgG"), None,
+        (DuplicateFieldComparisonItem("PC_IST", "100", "103", True),))
+    app._services.results.get_duplicate_candidate_detail = lambda candidate, *, store_path: reads.append((candidate, store_path)) or detail
+    app._services.results.discard_duplicate_candidate = lambda _candidate: pytest.fail("Comparison must not write")
+    monkeypatch.setattr(dialogs, "show_duplicate_comparison_dialog", lambda parent, result, *, technical_details: opened.append((result, technical_details)))
+    app._show_duplicate_details()
+    assert reads == []
+    payload = app._task_runner.submissions[-1][1]()
+    if stale == "selection":
+        selected[0] = 8
+    elif stale == "selection-aba":
+        selection_generation[0] += 2
+    elif stale == "store":
+        app._store_generation += 2
+    app._task_runner.invoke_success(result=payload)
+    assert reads == [(7, store)]
+    assert not opened if stale else opened == [(detail, format_duplicate_detail_lines(detail))]
+
+
+@pytest.mark.parametrize("moment", ["confirm", "selection-aba", "worker", "worker-store-aba", "ui"])
+def test_diagnostics_duplicate_discard_never_rebinds_same_id_to_new_store(moment):
+    app = _make_app_stub(current_view="diagnostics")
+    first = app._settings
+    second = SimpleNamespace(**{**vars(first), "sqlite_path": "other-store.sqlite3"})
+    descriptor = [(7, str(Path(first.sqlite_path).resolve()), 0)]
+    diagnostics = app._views["diagnostics"]
+    diagnostics.selected_duplicate_descriptor = lambda: descriptor[0]
+    diagnostics.duplicate_selection_context = lambda: descriptor[0]
+    calls, refreshed = [], []
+    app._services.results.discard_duplicate_candidate = lambda candidate, *, store_path: calls.append((candidate, store_path))
+    app.refresh_current_view = lambda: refreshed.append(True)
+    def confirm(*_args):
+        if moment == "confirm":
+            app._accept_settings_snapshot(second)
+        elif moment == "selection-aba":
+            descriptor[0] = (7, descriptor[0][1], 2)
+        return True
+    app._show_confirm_dialog = confirm
+    app._discard_selected_duplicate()
+    if moment in ("confirm", "selection-aba"):
+        assert not app._task_runner.submissions and not calls
+        assert app._info_shown
+        return
+    if moment == "ui":
+        result = app._task_runner.submissions[-1][1]()
+        app._accept_settings_snapshot(second)
+        app._task_runner.invoke_success(result=result)
+        assert calls == [(7, str(Path(first.sqlite_path).resolve()))]
+    else:
+        app._accept_settings_snapshot(second)
+        if moment == "worker-store-aba":
+            app._accept_settings_snapshot(first)
+        app._task_runner.invoke_success()
+        assert not calls
+    assert not refreshed
+
+
+def test_diagnostics_listing_is_bound_to_captured_payload_store_before_worker_and_ui():
+    app = _make_app_stub(current_view="diagnostics")
+    first, reads, shown = app._settings, [], []
+    second = SimpleNamespace(**{**vars(first), "sqlite_path": "new-store.sqlite3"})
+    current = [first]
+    app._services.settings.load = lambda: current[0]
+    app._services.results.list_duplicate_candidates = lambda *, status, store_path: reads.append((status, store_path)) or []
+    app._views["diagnostics"].render_diagnoses = lambda _items: None
+    app._views["diagnostics"].render_duplicates = lambda _items, *, store_path: shown.append(store_path)
+    app._views["diagnostics"].render_candidates = lambda _items: None
+    app.refresh_current_view()
+    assert not reads
+    old = app._task_runner.submissions[0][1]()
+    assert reads == [("pending", str(Path(first.sqlite_path).resolve()))]
+    current[0] = second
+    app._accept_settings_snapshot(second)
+    app._task_runner.invoke_success(index=0, result=old)
+    assert not shown and len(app._task_runner.submissions) == 2
+    app._task_runner.invoke_success(index=1)
+    assert shown == [str(Path(second.sqlite_path).resolve())]
+
+
+@pytest.mark.parametrize("width,height,scale", [(1420, 930, 1.0), (960, 620, 1.25)])
+def test_diagnostics_native_layout_comparison_values_and_selection_guards(tmp_path, monkeypatch, width, height, scale):
+    from tkinter import ttk
+    import tkinter.font as tkfont
+    from interfaces.tk import desktop_theme
+    from interfaces.tk.widgets.dialogs import show_duplicate_comparison_dialog
+    from src.application.api import JobDiagnosisItem
+    original_theme, scaling_state = desktop_theme.configure_desktop_theme, []
+    def scaled_theme(root):
+        scaling_state.append((root, float(root.tk.call("tk", "scaling"))))
+        root.tk.call("tk", "scaling", (4 / 3) * scale)
+        return original_theme(root)
+    monkeypatch.setattr(desktop_theme, "configure_desktop_theme", scaled_theme)
+    try:
+        app = test_app.AnalyzerDesktopApp(project_root=tmp_path, services=_fake_services())
+    except BaseException as exc:
+        if scaling_state:
+            failed, previous = scaling_state[0]
+            try:
+                failed.tk.call("tk", "scaling", previous)
+            finally:
+                failed.destroy()
+        if isinstance(exc, tk.TclError):
+            pytest.skip(f"Tk not available: {exc}")
+        raise
+    try:
+        app._task_runner.shutdown_runner()
+        app._accept_settings_snapshot(app.services.settings.load())
+        app.geometry(f"{width}x{height}")
+        app.show_view("diagnostics", refresh=False)
+        view = app._views["diagnostics"]
+        view.render_diagnoses(())
+        view.render_duplicates(())
+        for _ in range(4):
+            app.update()
+        assert view._diag_card._rounded and view._dup_card._rounded
+        assert not view._diag_frame.winfo_manager() and not view._dup_frame.winfo_manager()
+        assert not view._candidate_panel.winfo_manager() and view._page._canvas.yview() == (0.0, 1.0)
+        first = JobDiagnosisItem("job-a", "ANA_2026-11-25.pdf", "ANA_2026-11-25.pdf", "FAILED", "Felder nicht extrahiert", "configured_fields_empty:PC_IST", "Normalisierter Text",
+            "Felder nicht extrahiert", "configured_fields_empty:PC_IST")
+        historical = replace(first, job_id="job-b", file_name="Historischer_Ausgabeplan.pdf", queue_status="DONE", retry_kind="retired", error_label="Excel-Ausgabe", friendly_message="Historischer Ausgabeplan ist schreibgeschützt.")
+        duplicate = DuplicateCandidateItem(7, "pending", "private-assay-key", "dedupe", 1, "2026-11-25T08:14:00Z", assay_name="ANA Screen IgG")
+        store = str(Path(app._settings.sqlite_path).resolve())
+        view.render_diagnoses((first,))
+        view.render_duplicates((duplicate,), store_path=store)
+        for _ in range(4):
+            app.update()
+        assert view._page._canvas.yview() == (0.0, 1.0)
+        assert view._btn_compare.winfo_rooty() + view._btn_compare.winfo_height() <= app.winfo_rooty() + height
+        view.render_diagnoses((first, historical))
+        view.render_duplicates((duplicate,), store_path=store)
+        view._diag_tree.selection_set("job-a")
+        view._dup_tree.selection_set("7")
+        for _ in range(4):
+            app.update()
+        assert view.selected_job_id() == "job-a" and view.selected_duplicate_id() == 7
+        assert str(view._btn_retry.cget("state")) == "normal"
+        assert view._diag_tree.item("job-a", "values")[2] == "Kontext: Normalisierter Text"
+        assert view._dup_tree.item("7", "values") == ("ANA Screen IgG", "Offen", "25.11.2026 08:14")
+        assert tuple(view._dup_tree.cget("displaycolumns")) == ("assay", "detected", "status")
+        heading_font = tkfont.Font(app, font=ttk.Style(app).lookup("Diagnostics.Treeview.Heading", "font"))
+        for tree in (view._diag_tree, view._dup_tree):
+            assert tree.xview() == tree.yview() == (0.0, 1.0)
+            for column in tree.cget("columns"):
+                assert tree.column(column, "width") >= heading_font.measure(tree.heading(column, "text")) + 24
+        candidate = AssayCandidateItem("candidate-a", "private-assay-key", "Dateihinweis", "ANA_2026-11-25.pdf", "3", "Assayblock", "test_line", "high", assay_name="ANA Screen IgG")
+        view.render_candidates((candidate,))
+        view._candidate_tree.selection_set("candidate-a")
+        app.update()
+        assert view.selected_candidate() is candidate and str(view._btn_draft.cget("state")) == "normal"
+        view._diag_tree.selection_set("job-b")
+        app.update()
+        assert view.selected_candidate() is None and not view._candidate_panel.winfo_manager()
+        assert str(view._btn_retry.cget("state")) == "disabled"
+        old_job_context = view.diagnosis_selection_context()
+        view._diag_tree.selection_set("job-a")
+        app.update()
+        view._diag_tree.selection_set("job-b")
+        app.update()
+        assert view.diagnosis_selection_context()[0] == old_job_context[0]
+        assert view.diagnosis_selection_context()[1] == old_job_context[1] + 2
+        descriptor = view.selected_duplicate_descriptor()
+        view.render_duplicates((duplicate, replace(duplicate, candidate_id=8)), store_path=store)
+        app.update()
+        assert view.selected_duplicate_descriptor() == descriptor
+        view._dup_tree.selection_set("8")
+        app.update()
+        view._dup_tree.selection_set("7")
+        app.update()
+        assert view.selected_duplicate_descriptor() == (7, store, descriptor[2] + 2)
+        view._page._canvas.yview_moveto(1)
+        app.update()
+        for button in (view._btn_compare, view._btn_discard):
+            assert button.winfo_rooty() + button.winfo_height() <= app.winfo_rooty() + height
+            assert button.winfo_rootx() + button.winfo_width() <= app.winfo_rootx() + width
+        assert view._btn_compare.winfo_rooty() == view._btn_discard.winfo_rooty()
+        assert view._btn_compare.winfo_height() == view._btn_discard.winfo_height()
+        unchanged = tuple(DuplicateFieldComparisonItem(f"SAME_{index}", "1", "1", False) for index in range(9))
+        fields = (*unchanged, DuplicateFieldComparisonItem("PC_IST", "100", "103", True),
+            DuplicateFieldComparisonItem("ZERO", 0, 0, False), DuplicateFieldComparisonItem("FLAG", False, False, False), DuplicateFieldComparisonItem("EMPTY", "", "", False))
+        detail = DuplicateCandidateDetail(replace(duplicate, candidate_meta={"pdf_path": r"C:\Labor\Privater Testordner\ANA_Duplikat.pdf"}), None, fields)
+        dialog = show_duplicate_comparison_dialog(app, detail, technical_details=format_duplicate_detail_lines(detail))
+        for _ in range(4):
+            app.update()
+        tree = dialog._comparison_tree
+        rows = [tree.item(row, "values") for row in tree.get_children()]
+        assert rows[0] == ("PC_IST", "100", "103") and tree.item(tree.get_children()[0], "tags") == ("changed",)
+        assert [row[0] for row in rows[1:10]] == [f"SAME_{index}" for index in range(9)]
+        assert ("ZERO", "0", "0") in rows and ("FLAG", "False", "False") in rows and ("EMPTY", "", "") in rows
+        assert len(rows) == len(fields) == 13 and tree.xview() == (0.0, 1.0)
+        first_box = tree.bbox(tree.get_children()[0])
+        assert first_box and tree.winfo_rooty() + first_box[1] + first_box[3] < dialog.winfo_rooty() + dialog.winfo_height()
+        assert not dialog._technical_frame.winfo_manager()
+        assert "Quelle: ANA_Duplikat.pdf" in dialog._comparison_context.cget("text")
+        assert "Privater Testordner" not in dialog._comparison_context.cget("text")
+        dialog._technical_toggle.invoke()
+        app.update()
+        assert dialog._technical_frame.winfo_manager()
+        dialog._technical_toggle.invoke()
+        assert not dialog._technical_frame.winfo_manager()
+        dialog.destroy()
+        empty_dialog = show_duplicate_comparison_dialog(app, replace(detail, field_comparison=()), technical_details="No values")
+        app.update()
+        assert str(empty_dialog.tk.call("focus", "-lastfor", empty_dialog)) == str(empty_dialog._comparison_close)
+        empty_dialog.focus_force()
+        empty_dialog.event_generate("<Escape>")
+        app.update()
+        assert not empty_dialog.winfo_exists()
+        view.render_diagnoses(())
+        view.render_duplicates(())
+        for _ in range(4):
+            app.update()
+        assert view._page._canvas.yview() == (0.0, 1.0)
+        assert str(view._btn_retry.cget("state")) == str(view._btn_compare.cget("state")) == str(view._btn_discard.cget("state")) == "disabled"
+    finally:
+        try:
+            if scaling_state:
+                app.tk.call("tk", "scaling", scaling_state[0][1])
+        finally:
+            app.destroy()
+
+
 def test_create_draft_from_candidate_confirmation_true_submits_and_opens_editor() -> None:
     app = _make_app_stub()
     created: list[tuple[str, str]] = []
@@ -2019,7 +3106,10 @@ def test_create_draft_from_candidate_confirmation_true_submits_and_opens_editor(
 
 
 def test_discard_selected_duplicate_confirmation_false_does_nothing() -> None:
-    app = _make_app_stub()
+    app = _make_app_stub(current_view="diagnostics")
+    descriptor = (7, str(Path(app._settings.sqlite_path).resolve()), 0)
+    app._views["diagnostics"].selected_duplicate_descriptor = lambda: descriptor
+    app._views["diagnostics"].duplicate_selection_context = lambda: descriptor
     app._show_confirm_dialog = lambda *_a, **_k: False
     app._views["diagnostics"].selected_duplicate_id = lambda: 7
     test_app.AnalyzerDesktopApp._discard_selected_duplicate(app)
@@ -2027,16 +3117,19 @@ def test_discard_selected_duplicate_confirmation_false_does_nothing() -> None:
 
 
 def test_discard_selected_duplicate_confirmation_true_refreshes() -> None:
-    app = _make_app_stub()
+    app = _make_app_stub(current_view="diagnostics")
+    descriptor = (7, str(Path(app._settings.sqlite_path).resolve()), 0)
+    app._views["diagnostics"].selected_duplicate_descriptor = lambda: descriptor
+    app._views["diagnostics"].duplicate_selection_context = lambda: descriptor
     discarded: list[int] = []
     refresh_calls = {"count": 0}
     app.refresh_current_view = lambda: refresh_calls.__setitem__("count", refresh_calls["count"] + 1)
     app._views["diagnostics"].selected_duplicate_id = lambda: 7
-    app._services.results.discard_duplicate_candidate = lambda candidate_id: discarded.append(candidate_id)
+    app._services.results.discard_duplicate_candidate = lambda candidate_id, *, store_path: discarded.append((candidate_id, store_path))
     test_app.AnalyzerDesktopApp._discard_selected_duplicate(app)
     assert len(app._task_runner.submissions) == 1
     app._task_runner.invoke_success()
-    assert discarded == [7]
+    assert discarded == [(7, descriptor[1])]
     assert refresh_calls["count"] == 1
 
 
@@ -2109,8 +3202,13 @@ def test_analyzer_desktop_app_declares_product_views(tmp_path) -> None:
         pytest.skip(f"Tk not available: {exc}")
     try:
         assert set(app._views) == set(test_app.AnalyzerDesktopApp.VIEW_KEYS)
-        assert app.VIEW_KEYS == ("dashboard", "results", "statistics", "validation", "rules", "settings", "diagnostics")
+        assert app.VIEW_KEYS == ("dashboard", "results", "changes", "statistics", "validation", "rules", "settings", "diagnostics")
         assert app._nav_buttons["statistics"].cget("text") == "Statistik"
+        assert app._nav_buttons["dashboard"].cget("text") == "Arbeitsübersicht"
+        assert app._nav_buttons["validation"].cget("text") == "Prüfplatz"
+        assert tuple(app._nav_buttons) == ("dashboard", "validation", "results", "changes", "statistics", "rules", "settings", "diagnostics")
+        assert app._header_section.cget("text") == "Arbeitsübersicht"
+        assert app._nav_buttons["changes"].cget("text") == "Änderungen"
         assert isinstance(app._views["statistics"], StatisticsView)
         assert app._views["statistics"]._qc_include_explanations.get() is False
         assert not hasattr(app._views["results"], "render_qc_lots")
@@ -2118,6 +3216,168 @@ def test_analyzer_desktop_app_declares_product_views(tmp_path) -> None:
         assert app.TASK_PROCESSING == "processing_queue"
     finally:
         app.destroy()
+
+
+def test_mockup_theme_uses_palette_and_readable_primary_and_navigation_states():
+    from interfaces.tk.desktop_theme import COLOR_BG, COLOR_CARD, COLOR_PRIMARY, COLOR_TEXT, FONT_FAMILY
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk not available: {exc}")
+    root.withdraw()
+    try:
+        style = configure_desktop_theme(root)
+        assert (COLOR_BG, COLOR_CARD, COLOR_TEXT, COLOR_PRIMARY) == ("#f3f6fa", "#ffffff", "#16293c", "#175ba4")
+        assert FONT_FAMILY == "Segoe UI"
+        assert style.lookup("Header.TFrame", "background") == COLOR_CARD
+        assert style.lookup("Nav.TButton", "background") == COLOR_CARD
+        assert style.lookup("NavActive.TButton", "background") == "#eaf3fd"
+        assert style.lookup("NavActive.TButton", "foreground") == "#134a83"
+        assert style.lookup("Primary.TButton", "background") == COLOR_PRIMARY
+        assert style.lookup("Primary.TButton", "foreground") == COLOR_CARD
+        assert style.lookup("Primary.TButton", "background", ("active",)) == "#134a83"
+        assert style.lookup("Primary.TButton", "foreground", ("disabled",)) == "#53677a"
+    finally:
+        root.destroy()
+
+
+@pytest.mark.parametrize(
+    "selected,default,devices,expected",
+    (
+        ("B", "A", (DeviceInventoryItem("A", "Analyzer 1", True), DeviceInventoryItem("B", "Analyzer 2", True)), "Analyzer 2"),
+        (None, "A", (DeviceInventoryItem("A", "Analyzer 1", True),), "Analyzer 1"),
+        ("A", "A", (DeviceInventoryItem("A", "Analyzer 1", False),), "Analyzer 1 · inaktiv"),
+        ("missing", "A", (), "missing · nicht verfügbar"),
+        (None, "", (), "Kein Gerät ausgewählt"),
+    ),
+)
+def test_import_device_context_uses_existing_selected_or_default_inventory(selected, default, devices, expected):
+    assert import_device_label(
+        SimpleNamespace(device_id=selected), SimpleNamespace(default_device_id=default, devices=devices),
+    ) == expected
+
+
+def test_dashboard_payload_binds_real_device_and_open_case_count_without_ui_thread_reads():
+    app = _make_app_stub(current_view="dashboard")
+    app._validation_badge = None
+    reads, rendered = [], []
+    app._services.settings.get_device_inventory = lambda: reads.append("devices") or SimpleNamespace(
+        default_device_id="A", devices=(DeviceInventoryItem("A", "Analyzer 1", True),),
+    )
+    app._services.results.list_open_validation_cases = lambda **binding: [_validation_item(run_id=7), _validation_item(run_id=8)]
+    app._views["dashboard"].render_import_device = lambda label: rendered.append(("device", label))
+    app._views["dashboard"].render_open_case_count = lambda count: rendered.append(("count", count))
+    app._header_device = SimpleNamespace(configure=lambda **values: rendered.append(("header", values["text"])))
+    payload = app._load_view_payload("dashboard")
+    assert reads == ["devices"] and rendered == []
+    app._apply_view_payload("dashboard", payload)
+    assert reads == ["devices"]
+    assert rendered == [("header", "Importgerät: Analyzer 1"), ("device", "Analyzer 1"), ("count", 2)]
+
+
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_confirmed_import_device_save_updates_header_and_dashboard_without_new_reads(succeeds):
+    app = _make_app_stub(current_view="dashboard")
+    app._validation_badge = None
+    reads, header_labels, dashboard_labels = [], [], []
+    app._services.settings.get_device_inventory = lambda: reads.append("devices") or SimpleNamespace(
+        default_device_id="A", devices=(DeviceInventoryItem("A", "Analyzer 1", True), DeviceInventoryItem("B", "Analyzer 2", True)),
+    )
+    app._header_device = SimpleNamespace(configure=lambda **values: header_labels.append(values["text"]))
+    app._views["dashboard"].render_import_device = dashboard_labels.append
+    app._apply_view_payload("dashboard", app._load_view_payload("dashboard"))
+    assert header_labels == ["Importgerät: Analyzer 1"] and dashboard_labels == ["Analyzer 1"]
+    proposed = SimpleNamespace(watch_enabled=False, device_id="B")
+    app._views["settings"].collect_settings = lambda **_kwargs: proposed
+    app._reschedule_watch = lambda: None
+    app._save_settings()
+    assert header_labels[-1] == "Importgerät: Analyzer 1" and dashboard_labels[-1] == "Analyzer 1"
+    if succeeds:
+        app._task_runner.invoke_success()
+    else:
+        app._task_runner.invoke_error(exc=SettingsSaveError("readonly"))
+    expected = "Analyzer 2" if succeeds else "Analyzer 1"
+    assert header_labels[-1] == f"Importgerät: {expected}"
+    assert dashboard_labels[-1] == expected
+    assert reads == ["devices"]
+
+
+def test_dashboard_mockup_keeps_existing_actions_reports_and_compact_watch():
+    from tkinter import ttk
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk not available: {exc}")
+    root.withdraw()
+    configure_desktop_theme(root)
+    calls = []
+    view = DashboardView(
+        root,
+        on_pick_and_process_pdfs=lambda: calls.append("import"),
+        on_open_settings=lambda: calls.append("settings"),
+        on_refresh=lambda: calls.append("refresh"),
+        on_open_report=lambda report: calls.append(("report", report)),
+        on_open_selected_report=lambda: calls.append("selected"),
+        on_open_results=lambda: calls.append("results"),
+        on_open_validation=lambda: calls.append("validation"),
+    )
+    try:
+        assert view._lbl_open_count.cget("text") == "–"
+        view.render_import_device("Analyzer 1")
+        view.render_open_case_count(4)
+        assert view._lbl_device.cget("text") == "Analyzer 1"
+        assert "Analyzer 1" in view._lbl_import_context.cget("text")
+        assert view._lbl_open_count.cget("text") == "4"
+        assert int(view._recent_card.grid_info()["row"]) < int(view._watch_card.grid_info()["row"])
+        assert view._scrollable._canvas.cget("background") == "#f3f6fa"
+        view._btn_pick.invoke()
+        view.set_processing_busy(True)
+        view._btn_pick.invoke()
+        view.set_processing_busy(False)
+        assert calls == ["import"]
+        view._btn_open_validation.invoke()
+        assert calls[-1] == "validation"
+
+        view.render_recent_rows((DashboardRecentRow("ingestion-1", "Fertig", "ANA.pdf", "Analyzer 1", "26.11.2026 08:14", "Manuell", "report-1"),))
+        assert view._tree.set("ingestion-1", "file") == "ANA.pdf"
+        assert view._tree.set("ingestion-1", "status") == "Fertig"
+        view._tree.selection_set("ingestion-1")
+        view._update_open_result_button()
+        view._btn_open_result.invoke()
+        view._handle_open_report(None)
+        assert calls[-2:] == ["selected", ("report", "report-1")]
+        view.render_recent_rows(())
+        assert view.selected_report_id() is None
+        assert str(view._btn_open_result.cget("state")) == "disabled"
+
+        settings = SimpleNamespace(watch_enabled=False, watch_input_path="", watch_backup_path="", watch_recursive=False)
+        view.render_watch_settings(settings)
+        assert view._lbl_watch_input.cget("text") == "Kein Eingabeordner konfiguriert."
+        assert "Kein Verschieben" in view._lbl_watch_backup.cget("text")
+        view.render_watch_session_summary(None, error="watch_input_path_required")
+        assert "Eingabeordner" in view._lbl_watch_session.cget("text")
+        view.render_batch_statuses((BatchFileStatus("ANA.pdf", "ANA.pdf", "In Warteschlange"),))
+        assert "ANA.pdf" in view._lbl_batch.cget("text")
+        view.render_batch_statuses(())
+        assert view._lbl_batch.winfo_manager() == ""
+
+        def buttons(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, ttk.Button):
+                    yield child
+                yield from buttons(child)
+
+        actions = {button.cget("text"): button for button in buttons(view)}
+        for title in ("Gerät wechseln", "Alle Ergebnisse  →", "Aktualisieren", "Konfigurieren"):
+            actions[title].invoke()
+        assert calls[-4:] == ["settings", "results", "refresh", "settings"]
+        view.set_actions_enabled(False)
+        assert str(view._btn_pick.cget("state")) == "disabled"
+        assert str(view._btn_open_validation.cget("state")) == "disabled"
+    finally:
+        root.destroy()
 
 
 def test_statistics_refresh_uses_single_deferred_qc_owner_and_rejects_old_store():

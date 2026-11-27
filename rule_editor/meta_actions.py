@@ -80,7 +80,8 @@ class MetaMixin:
                 seen.add(item)
         return out
 
-    def _save_meta_to_draft(self, push_undo: bool = False) -> dict:
+    def _draft_meta_inputs(self) -> dict[str, str]:
+        """Capture widget input; no controller or filesystem work while rendering."""
         if not self.current_draft_path:
             raise RuntimeError("draft missing")
 
@@ -97,14 +98,13 @@ class MetaMixin:
         sheet_template = self.var_sheet_template.get().strip()
         if not excel_filename or not sheet_template:
             raise ValueError("excel_filename_template und sheetname_template sind erforderlich")
+        return dict(assay_key=assay_key, assay_name=assay_name, lot_regex=lot_regex,
+                    excel_filename_template=excel_filename, sheetname_template=sheet_template)
 
+    def _save_meta_to_draft(self, push_undo: bool = False) -> dict:
         receipt = self._rules.update_draft_meta(
             self.current_draft_path,
-            assay_key=assay_key,
-            assay_name=assay_name,
-            lot_regex=lot_regex,
-            excel_filename_template=excel_filename,
-            sheetname_template=sheet_template,
+            **self._draft_meta_inputs(),
             return_receipt=push_undo,
         )
         if push_undo:

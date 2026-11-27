@@ -816,6 +816,33 @@ def test_duplicate_detail_captures_one_store_with_same_ids_in_another_store(tmp_
     assert [(hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) for path in (first, second)] == before
 
 
+def test_duplicate_explicit_store_blocks_current_store_switch_with_colliding_ids(tmp_path):
+    from src.application.api import DesktopSettings, ValidationConflictError
+    from src.dbwriter.api import get_duplicate_candidate
+    first, _, _, candidate_id, _ = _accepted_alias_duplicate(tmp_path / "first")
+    second, _, _, other_id, _ = _accepted_alias_duplicate(tmp_path / "second")
+    assert candidate_id == other_id
+    selected = [second]
+    controller = ResultsController(tmp_path, settings_provider=lambda: DesktopSettings("sqlite", str(selected[0])))
+    before = {path: path.read_bytes() for path in (first, second)}
+    for action in (lambda: controller.list_duplicate_candidates(store_path=str(first)),
+                   lambda: controller.get_duplicate_candidate_detail(candidate_id, store_path=str(first)),
+                   lambda: controller.discard_duplicate_candidate(candidate_id, store_path=str(first))):
+        with pytest.raises(ValidationConflictError, match="Ergebnisspeicher"):
+            action()
+    assert {path: path.read_bytes() for path in (first, second)} == before
+    selected[0] = first
+    assert controller.list_duplicate_candidates(store_path=str(first))[0].candidate_id == candidate_id
+    assert controller.get_duplicate_candidate_detail(candidate_id, store_path=str(first)).candidate.candidate_id == candidate_id
+    assert {path: path.read_bytes() for path in (first, second)} == before
+    controller.discard_duplicate_candidate(candidate_id, store_path=str(first))
+    assert get_duplicate_candidate(str(first), candidate_id)["candidate"]["status"] == "deleted"
+    assert get_duplicate_candidate(str(second), other_id)["candidate"]["status"] == "pending"
+    assert second.read_bytes() == before[second]
+    selected[0] = second
+    assert controller.list_duplicate_candidates()[0].candidate_id == other_id  # Legacy calls remain compatible.
+
+
 def test_duplicate_controller_list_detail_and_discard(tmp_path: Path) -> None:
     from src.dbwriter.api import write_record_sqlite
     from src.extractor.model import AssayRecord
@@ -987,6 +1014,131 @@ def test_open_validation_cases_are_per_assay_run_and_refresh_after_validation(tm
 
     services.results.validate_report_run(open_cases[0].report_id, open_cases[0].run_id, "AB")
     assert [item.run_id for item in services.results.list_open_validation_cases()] == [1]
+
+
+def test_exact_validation_case_shares_queue_projection_and_reads_completed_history_without_writes(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    db = root / "runs.sqlite3"
+    _insert_same_job_runs(db)
+    services = _configure_results_services(root, db)
+    original = services.results.list_open_validation_cases()[0]
+    before = db.read_bytes(), db.stat().st_mtime_ns
+    assert services.results.get_validation_case(original.report_id, original.run_id, store_path=str(db)) == original
+    assert (db.read_bytes(), db.stat().st_mtime_ns) == before
+    first = services.results.validate_report_run(original.report_id, original.run_id, "AB", "first")
+    corrected = services.results.correct_report_run(original.report_id, original.run_id, "CD", "explicit correction")
+    before = db.read_bytes(), db.stat().st_mtime_ns
+    completed = services.results.get_validation_case(original.report_id, original.run_id, store_path=str(db))
+    assert completed.current_validation == corrected
+    assert completed.validation_history == (first, corrected)
+    assert completed.fields == original.fields and completed.store_path == str(db.resolve())
+    assert [item.run_id for item in services.results.list_open_validation_cases(store_path=str(db))] == [1]
+    assert set(services.results.list_recent_reports()[0].lot_ids) == {"LOT-0", "LOT-1"}
+    assert (db.read_bytes(), db.stat().st_mtime_ns) == before
+
+
+def test_exact_validation_case_captures_one_store_and_rejects_same_ids_in_another_store(tmp_path):
+    from src.application.api import DesktopSettings, ValidationConflictError, ValidationInputError
+
+    first_db, second_db = tmp_path / "first.sqlite3", tmp_path / "second.sqlite3"
+    _insert_same_job_runs(first_db)
+    _insert_same_job_runs(second_db)
+    calls = []
+
+    def settings():
+        calls.append(True)
+        return DesktopSettings("sqlite", str(first_db if len(calls) == 1 else second_db))
+
+    controller = ResultsController(tmp_path, settings_provider=settings)
+    case = controller.get_validation_case("job-shared", 1, store_path=str(first_db))
+    assert case.run_id == 1 and case.store_path == str(first_db.resolve()) and len(calls) == 1
+    before = (first_db.read_bytes(), second_db.read_bytes())
+    with pytest.raises(ValidationConflictError):
+        controller.get_validation_case("job-shared", 1, store_path=str(first_db))
+    with pytest.raises(ValidationInputError, match="run_not_in_report"):
+        controller.get_validation_case("job-shared", 99, store_path=str(second_db))
+    with pytest.raises(ValidationInputError):
+        controller.get_validation_case("job-shared", 1, store_path="")
+    assert (first_db.read_bytes(), second_db.read_bytes()) == before
+
+
+def test_report_list_detail_and_pdf_keep_displayed_store_with_colliding_ids(tmp_path, monkeypatch):
+    from src.application.api import DesktopSettings, ReportPdfPage, ValidationConflictError
+    import src.application.results_controller as owner
+
+    first_db, second_db = tmp_path / "first.sqlite3", tmp_path / "second.sqlite3"
+    first_pdf, second_pdf = tmp_path / "first.pdf", tmp_path / "second.pdf"
+    first_pdf.write_bytes(b"first synthetic PDF source")
+    second_pdf.write_bytes(b"second synthetic PDF source")
+    _create_runs_db_with_pdf(first_db, str(first_pdf), job_id="same-report")
+    _create_runs_db_with_pdf(second_db, str(second_pdf), job_id="same-report")
+    current, settings_reads, opened, rendered = [first_db], [], [], []
+
+    def settings():
+        settings_reads.append(current[0])
+        return DesktopSettings("sqlite", str(current[0]))
+
+    def render(report, path, **options):
+        rendered.append((report, path, options))
+        return ReportPdfPage(report, options["page_index"], 2, options["zoom"], 1, 1, b"P6\n1 1\n255\n\xff\xff\xff")
+
+    monkeypatch.setattr(owner, "render_pdf_page", render)
+    controller = ResultsController(tmp_path, settings_provider=settings, path_opener=opened.append)
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (first_db, second_db, first_pdf, second_pdf)}
+    reports = controller.list_recent_reports(store_path=str(first_db))
+    report = reports[0].report_id
+    detail = controller.get_report_detail(report, store_path=str(first_db))
+    assert detail.store_path == str(first_db.resolve()) and detail.current_pdf_path == str(first_pdf.resolve())
+    assert detail.assay_groups[0].occurrences[0].store_path == detail.store_path
+    assert controller.open_report_pdf(report, store_path=str(first_db)) == str(first_pdf.resolve())
+    assert controller.render_report_pdf_page(report, store_path=str(first_db), page_index=1, zoom=1.5).page_index == 1
+    assert settings_reads == [first_db] * 4
+    current[0] = second_db
+    for operation in (
+        lambda: controller.list_recent_reports(store_path=str(first_db)),
+        lambda: controller.get_report_detail(report, store_path=str(first_db)),
+        lambda: controller.open_report_pdf(report, store_path=str(first_db)),
+        lambda: controller.render_report_pdf_page(report, store_path=str(first_db)),
+    ):
+        with pytest.raises(ValidationConflictError):
+            operation()
+    assert opened == [str(first_pdf.resolve())] and len(rendered) == 1
+    assert rendered[0] == (report, str(first_pdf.resolve()), {"page_index": 1, "zoom": 1.5})
+    assert controller.list_recent_reports(store_path=str(second_db))[0].report_id == report
+    assert controller.get_report_detail(report, store_path=str(second_db)).current_pdf_path == str(second_pdf.resolve())
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
+    assert not (tmp_path / "jobs").exists()
+
+
+def test_exact_case_is_first_read_and_does_not_create_queue_or_change_store(tmp_path):
+    from src.application.api import DesktopSettings
+
+    db = tmp_path / "runs.sqlite3"
+    _insert_same_job_runs(db)
+    controller = ResultsController(tmp_path, settings_provider=lambda: DesktopSettings("sqlite", str(db)))
+    before = db.read_bytes(), db.stat().st_mtime_ns, tuple(sorted(str(path) for path in tmp_path.rglob("*")))
+    assert not (tmp_path / "jobs").exists()
+    case = controller.get_validation_case("job-shared", 1, store_path=str(db))
+    assert case.run_id == 1 and case.current_validation is None
+    assert controller.list_open_validation_cases(store_path=str(db))
+    assert (db.read_bytes(), db.stat().st_mtime_ns, tuple(sorted(str(path) for path in tmp_path.rglob("*")))) == before
+
+
+def test_exact_case_exposes_nonterminal_source_without_enabling_activation(tmp_path):
+    from src.application.api import DesktopSettings
+
+    db = tmp_path / "runs.sqlite3"
+    _insert_same_job_runs(db)
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    (jobs / "job-shared.json").write_text(json.dumps({"job_id": "job-shared", "status": "PENDING", "steps": []}), encoding="utf-8")
+    controller = ResultsController(tmp_path, settings_provider=lambda: DesktopSettings("sqlite", str(db)))
+    before = db.read_bytes(), db.stat().st_mtime_ns
+    case = controller.get_validation_case("job-shared", 1, store_path=str(db))
+    assert "PENDING" in case.activation_blocked_reason
+    assert controller.list_open_validation_cases(store_path=str(db)) == []
+    assert (db.read_bytes(), db.stat().st_mtime_ns) == before
 
 
 def test_open_validation_cases_scan_beyond_first_500_runs(tmp_path: Path) -> None:

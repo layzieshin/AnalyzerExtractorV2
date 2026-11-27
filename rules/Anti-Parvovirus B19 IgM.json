@@ -1,0 +1,135 @@
+{
+  "assay_name": "Anti-Parvovirus B19 IgM",
+  "assay_key": "(8fab)",
+  "lot_rule": {
+    "regex": "Kit\\s+(\\S+)\\s+\\d{6}"
+  },
+  "extract_rules": {
+    "fields": [
+      {
+        "key": "DATUM",
+        "regex": "Datum:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "required": true
+      },
+      {
+        "key": "ZEIT",
+        "regex": "Zeit:\\s*(\\d{2}:\\d{2}:\\d{2})",
+        "required": true
+      },
+      {
+        "key": "ANWENDER",
+        "regex": "Anwender:\\s*([^\\s]+)",
+        "required": true
+      },
+      {
+        "key": "PLATTE",
+        "regex": "Plattenname:\\s*(.+?)\\s+Zeit:",
+        "required": true
+      },
+      {
+        "key": "TEST",
+        "regex": "Test:[^\\n]*?[\\\\/]([^\\\\/]+\\.asy)\\s*\\(",
+        "required": true
+      },
+      {
+        "key": "CHARGE",
+        "regex": "Kit\\s+(E[0-9A-Za-z]+)\\s+\\d{6}",
+        "required": true
+      },
+      {
+        "key": "HALTBARKEIT",
+        "regex": "Kit\\s+E[0-9A-Za-z]+\\s+(\\d{6})",
+        "required": true
+      },
+      {
+        "key": "VALIDATION",
+        "regex": "(Validationskriterien\\s+(?:nicht\\s+)?erfüllt)",
+        "required": true,
+        "search_from": {
+          "line": 0
+        }
+      },
+      {
+        "key": "C1_MINIMUM",
+        "regex": "\\bC1\\b[^\\n]*?(?<![\\w.,])[0-9]+(?:[.,][0-9]+)?[ \\t]*(?i:O\\.[ \\t]*D\\.)[ \\t]*(>[ \\t]*[0-9]+(?:[.,][0-9]+)?)[ \\t]*(?i:O\\.[ \\t]*D\\.)",
+        "required": false
+      },
+      {
+        "key": "C1_SOLL",
+        "regex": "\\bC1\\b[^\\n]*?(?<![\\w.,])([0-9]+(?:[.,][0-9]+)?)[ \\t]*(?i:O\\.[ \\t]*D\\.)",
+        "required": false
+      },
+      {
+        "key": "C1_IST",
+        "regex": "(?m)^[ \\t]*C1\\b[^\\n]*?(?<![\\w.,])([0-9]+(?:[.,][0-9]+)?)[ \\t]*>[ \\t]*[0-9]+(?:[.,][0-9]+)?(?![\\d.,])",
+        "required": false
+      },
+      {
+        "key": "PCS1_LOW",
+        "regex": "\\bPCS1\\b[^\\n]*?(?<![\\w.,])[0-9]+(?:[.,][0-9]+)?[ \\t]*(?i:Ratio)[ \\t]*([0-9]+(?:[.,][0-9]+)?)[ \\t]*[-–−][ \\t]*[0-9]+(?:[.,][0-9]+)?[ \\t]*(?i:Ratio)",
+        "required": false
+      },
+      {
+        "key": "PCS1_HIGH",
+        "regex": "\\bPCS1\\b[^\\n]*?(?<![\\w.,])[0-9]+(?:[.,][0-9]+)?[ \\t]*(?i:Ratio)[ \\t]*[0-9]+(?:[.,][0-9]+)?[ \\t]*[-–−][ \\t]*([0-9]+(?:[.,][0-9]+)?)[ \\t]*(?i:Ratio)",
+        "required": false
+      },
+      {
+        "key": "PCS1_SOLL",
+        "regex": "\\bPCS1\\b[^\\n]*?(?<![\\w.,])([0-9]+(?:[.,][0-9]+)?)[ \\t]*(?i:Ratio)",
+        "required": false
+      },
+      {
+        "key": "NCS1_LOW",
+        "regex": "\\bNCS1\\b[^\\n]*?(?<![\\w.,])[0-9]+(?:[.,][0-9]+)?[ \\t]*(?i:Ratio)[ \\t]*([0-9]+(?:[.,][0-9]+)?)[ \\t]*[-–−][ \\t]*[0-9]+(?:[.,][0-9]+)?[ \\t]*(?i:Ratio)",
+        "required": false
+      },
+      {
+        "key": "NCS1_HIGH",
+        "regex": "\\bNCS1\\b[^\\n]*?(?<![\\w.,])[0-9]+(?:[.,][0-9]+)?[ \\t]*(?i:Ratio)[ \\t]*[0-9]+(?:[.,][0-9]+)?[ \\t]*[-–−][ \\t]*([0-9]+(?:[.,][0-9]+)?)[ \\t]*(?i:Ratio)",
+        "required": false
+      },
+      {
+        "key": "NCS1_SOLL",
+        "regex": "\\bNCS1\\b[^\\n]*?(?<![\\w.,])([0-9]+(?:[.,][0-9]+)?)[ \\t]*(?i:Ratio)",
+        "required": false
+      },
+      {
+        "key": "NCS1_IST",
+        "regex": "(?m)^[ \\t]*NCS1\\b[^\\n]*?(?<![\\w.,])[0-9]+(?:[.,][0-9]+)?[ \\t]*(?:<=|≤)[ \\t]*([0-9]+(?:[.,][0-9]+)?)[ \\t]*(?:<=|≤)[ \\t]*[0-9]+(?:[.,][0-9]+)?(?![\\d.,])",
+        "required": false
+      },
+      {
+        "key": "PCS1_IST",
+        "regex": "(?m)^[ \\t]*PCS1\\b[^\\n]*?(?<![\\w.,])[0-9]+(?:[.,][0-9]+)?[ \\t]*(?:<=|≤)[ \\t]*([0-9]+(?:[.,][0-9]+)?)[ \\t]*(?:<=|≤)[ \\t]*[0-9]+(?:[.,][0-9]+)?(?![\\d.,])",
+        "required": false
+      }
+    ],
+    "dedupe_fields": []
+  },
+  "excel_rules": {
+    "excel_filename_template": "{assay_name}.xlsx",
+    "sheetname_template": "{lot_id}",
+    "column_mapping": {
+      "DATUM": "DATUM",
+      "ZEIT": "ZEIT",
+      "ANWENDER": "ANWENDER",
+      "PLATTE": "PLATTE",
+      "TEST": "TEST",
+      "CHARGE": "CHARGE",
+      "HALTBARKEIT": "Haltbarkeit",
+      "VALIDATION": "VALIDATION",
+      "C1_MINIMUM": "C1_MINIMUM",
+      "C1_SOLL": "C1_SOLL",
+      "C1_IST": "C1_IST",
+      "PCS1_LOW": "PCS1_LOW",
+      "PCS1_HIGH": "PCS1_HIGH",
+      "PCS1_SOLL": "PCS1_SOLL",
+      "NCS1_LOW": "NCS1_LOW",
+      "NCS1_HIGH": "NCS1_HIGH",
+      "NCS1_SOLL": "NCS1_SOLL",
+      "NCS1_IST": "NCS1_IST",
+      "PCS1_IST": "PCS1_IST"
+    }
+  }
+}

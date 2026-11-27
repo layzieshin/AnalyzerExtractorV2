@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .contentsplitter import ContentSplitter, split_by_assay_keys as _split_by_assay_keys_impl
-from .model import AssayDescriptor
+from .contentsplitter import ContentSplitError, ContentSplitter, split_assay_sections, split_by_assay_keys as _split_by_assay_keys_impl
+from .model import AssayDescriptor, AssaySection
 
 __all__ = [
     "AssayDescriptor",
+    "AssaySection",
+    "ContentSplitError",
+    "split_assay_sections",
     "split_by_assay_keys",
     "split_by_assay_name",
     "split_by_assay_name_and_key",

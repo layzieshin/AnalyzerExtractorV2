@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import List
 
+from src.contentsplitter.api import AssaySection
+
 from .model import AssayMatch
 from .assaychooser import AssayChooser
 
 
-def detect_assays(norm_text: str, rules_index_path: str) -> List[AssayMatch]:
+def detect_assays(norm_text: str, rules_index_path: str, *, sections: List[AssaySection] | None = None,
+                  index_bytes: bytes | None = None) -> List[AssayMatch]:
     """Public API (AssayChooser)
 
     Contract:
@@ -14,5 +17,8 @@ def detect_assays(norm_text: str, rules_index_path: str) -> List[AssayMatch]:
     - Search in normalized text.
     - Match: contains, case-sensitive.
     - Multi-assay: return all found keys, deduped by key, sorted by first occurrence position.
+    - New imports pass proven ``sections`` from ContentSplitter instead: match
+      canonical document IDs to exact configured keys, never ruleset names.
+      Omitting sections preserves the legacy case-sensitive contains contract.
     """
-    return AssayChooser().detect_assays(norm_text, rules_index_path)
+    return AssayChooser().detect_assays(norm_text, rules_index_path, sections=sections, index_bytes=index_bytes)

@@ -274,61 +274,45 @@ def test_stepwise_nonempty_match_contract_accepts_zero_only() -> None:
     assert NewRulesetWizard._row_has_nonempty_value({"matched": False, "value": "x", "error": None}) is False
 
 
-def test_stepwise_proof_requires_real_preview_then_returns_without_activation(monkeypatch) -> None:
+def test_stepwise_activation_requires_real_preview(monkeypatch) -> None:
     from rule_editor.wizard import NewRulesetWizard
 
-    calls: list[tuple[str, str, str | None]] = []
     opened: list[str] = []
-    errors: list[str] = []
-
-    class _Rules:
-        def create_authoring_proof(
-            self,
-            key: str,
-            draft_path: str,
-            pdf: str,
-            reference_pdf: str | None = None,
-        ) -> dict:
-            assert reference_pdf is None
-            calls.append((pdf, key, draft_path))
-            if len(calls) == 1:
-                raise RuntimeError("configured_fields_empty: optional")
-            return {"draft_sha256": "ok"}
+    warnings: list[str] = []
+    ready = False
 
     wizard = NewRulesetWizard.__new__(NewRulesetWizard)
-    wizard._rules = _Rules()
+    wizard._rules = SimpleNamespace(create_authoring_proof=lambda *_a, **_k: pytest.fail("Finish must not silently run another test"))
+    wizard._busy = False
+    wizard._closed = False
+    wizard._proof_owner = SimpleNamespace(authoring_target_ready=lambda target, **kw: ready)
     wizard.draft_path = "draft.json"
     wizard.assay_text = "Assay text"
     wizard._normalized_pdf_text = "Assay text"
     wizard.var_finish_action = _Var("activate")
     wizard.var_pdf = _Var("sample.pdf")
-    wizard.var_reference_pdf = _Var("")
     wizard.var_key = _Var("(1111)")
     wizard._pdf_fingerprint = "sample.pdf"
     wizard._all_fields_confirmed = lambda: True
-    wizard._rules.validate_draft = lambda _path: {"ok": True, "errors": []}
-    wizard._rules.diff_draft_vs_active = lambda _key, _path: {"mode": "create"}
     wizard.destroy = lambda: opened.append("destroyed")
-    wizard._on_open_in_editor = lambda path: opened.append("editor:" + path)
-    wizard._on_activate_requested = lambda _path: pytest.fail("proof success must not activate")
+    wizard._on_session_closed = None
+    wizard._on_open_in_editor = lambda _path: pytest.fail("activation must not open the editor")
+    wizard._on_activate_requested = opened.append
     monkeypatch.setattr(
-        "rule_editor.wizard.messagebox.showerror",
-        lambda _title, message, **_kwargs: errors.append(str(message)),
+        "rule_editor.wizard.messagebox.showwarning",
+        lambda _title, message, **_kwargs: warnings.append(str(message)),
     )
 
     wizard._finish()
-    assert errors and "configured_fields_empty" in errors[0]
+    assert warnings and "Extraktion testen" in warnings[0]
     assert opened == []
 
+    ready = True
     wizard._finish()
-    assert calls == [
-        ("sample.pdf", "(1111)", "draft.json"),
-        ("sample.pdf", "(1111)", "draft.json"),
-    ]
-    assert opened == ["destroyed", "editor:draft.json"]
+    assert opened == ["destroyed", "draft.json"]
 
 
-def test_stepwise_existing_rule_requires_reference_pdf(monkeypatch) -> None:
+def test_stepwise_existing_rule_requires_shared_proof_not_a_manual_reference(monkeypatch) -> None:
     from rule_editor.wizard import NewRulesetWizard
 
     warnings: list[str] = []
@@ -339,12 +323,13 @@ def test_stepwise_existing_rule_requires_reference_pdf(monkeypatch) -> None:
 
     wizard = NewRulesetWizard.__new__(NewRulesetWizard)
     wizard._rules = _Rules()
+    wizard._busy = False
+    wizard._proof_owner = SimpleNamespace(authoring_target_ready=lambda *_a, **_kw: False)
     wizard.draft_path = "draft.json"
     wizard.assay_text = "Assay text"
     wizard._normalized_pdf_text = "Assay text"
     wizard.var_finish_action = _Var("activate")
     wizard.var_pdf = _Var("failing.pdf")
-    wizard.var_reference_pdf = _Var("")
     wizard.var_key = _Var("(1111)")
     wizard._pdf_fingerprint = "failing.pdf"
     wizard._all_fields_confirmed = lambda: True
@@ -357,7 +342,7 @@ def test_stepwise_existing_rule_requires_reference_pdf(monkeypatch) -> None:
 
     wizard._finish()
 
-    assert warnings and "Referenz-PDF" in warnings[0]
+    assert warnings and "Extraktion testen" in warnings[0] and "Referenz-PDF" not in warnings[0]
 
 
 class _SummaryList:
@@ -610,14 +595,15 @@ def test_failed_draft_selection_restores_loaded_context_or_disables_continuation
         if initial_draft_path:
             assert wizard.list_drafts.curselection() == (0,)
             assert (wizard.var_key.get(), wizard.var_name.get()) == ("(a)", "A")
-            assert wizard.btn_continue_draft.cget("state") == tk.NORMAL
+            assert str(wizard.btn_continue_draft.cget("state")) == tk.NORMAL
             wizard.btn_continue_draft.invoke()
             assert wizard._step == 3
-            wizard.btn_next.invoke()
+            assert str(wizard.btn_next.cget("state")) == tk.DISABLED
+            wizard.btn_finish_later.invoke()
             assert opened == [initial_draft_path]
         else:
             assert wizard.list_drafts.curselection() == ()
-            assert wizard.btn_continue_draft.cget("state") == tk.DISABLED
+            assert str(wizard.btn_continue_draft.cget("state")) == tk.DISABLED
             wizard.btn_continue_draft.invoke()
             assert wizard._step == 0
             assert opened == []
@@ -688,9 +674,9 @@ def test_loaded_draft_is_preselected_and_can_continue_without_pdf(tk_root, start
         wizard.btn_continue_draft.invoke()
         assert wizard._step == 3
         assert wizard.var_finish_action.get() == "editor"
-        assert checks == ["diff", "structure"]
+        assert checks == []  # Summary is cached presentation, no draft/files read.
         assert "weiterbearbeitet" in wizard.lbl_required_summary.cget("text")
-        assert wizard.var_reference_pdf.get() == ""
+        assert not hasattr(wizard, "var_reference_pdf")
         wizard.btn_back.invoke()
         assert wizard._step == 0
         assert wizard.draft_path == target
@@ -698,11 +684,13 @@ def test_loaded_draft_is_preselected_and_can_continue_without_pdf(tk_root, start
         assert wizard._pdf_ready() is False
         wizard.btn_continue_draft.invoke()
         assert wizard._step == 3
-        wizard.btn_next.invoke()
+        assert wizard.btn_next.cget("text") == "Geprüfte Regel aktivieren"
+        assert str(wizard.btn_next.cget("state")) == "disabled"
+        wizard.btn_finish_later.invoke()
         assert opened == [target]
         assert closed == [target]
         assert activated == []
-        assert checks == ["diff", "structure", "diff", "structure"]
+        assert checks == []
     finally:
         if not wizard._closed:
             wizard.destroy()
@@ -750,7 +738,7 @@ def test_draft_selection_loads_identity_and_fields_once_even_if_a_second_read_wo
         assert wizard._pending_draft_path == wizard.draft_path == "b.draft.json"
         assert (wizard.var_key.get(), wizard.var_name.get()) == ("(b)", "B")
         assert wizard._fields == [{"key": "b_field", "regex": ""}]
-        assert wizard.btn_continue_draft.cget("state") == tk.NORMAL
+        assert str(wizard.btn_continue_draft.cget("state")) == tk.NORMAL
     finally:
         wizard.destroy()
 
@@ -1077,7 +1065,8 @@ def test_custom_field_can_be_tested_added_and_repeated() -> None:
     assert added == ["extra", "extra2"]
 
 
-def test_update_reference_must_differ_and_create_skips_it(monkeypatch) -> None:
+@pytest.mark.parametrize("mode", ["create", "update"])
+def test_wizard_finish_reuses_the_same_scoped_proof_without_retesting(monkeypatch, mode) -> None:
     from rule_editor.wizard import NewRulesetWizard
 
     proofs: list[tuple[str, str | None]] = []
@@ -1105,11 +1094,15 @@ def test_update_reference_must_differ_and_create_skips_it(monkeypatch) -> None:
 
     wizard = NewRulesetWizard.__new__(NewRulesetWizard)
     wizard._rules = _Rules()
+    wizard._rules.mode = mode
+    wizard._busy = False
+    wizard._closed = False
+    ready = False
+    wizard._proof_owner = SimpleNamespace(authoring_target_ready=lambda *_a, **_kw: ready)
     wizard.draft_path = "draft.json"
     wizard.assay_text = "PDF"
     wizard._normalized_pdf_text = "PDF"
     wizard.var_pdf = _Var(r"I:\pdfs\problem.pdf")
-    wizard.var_reference_pdf = _Var(r"I:\pdfs\problem.pdf")
     wizard._pdf_fingerprint = r"I:\pdfs\problem.pdf"
     wizard.var_key = _Var("(1111)")
     wizard.var_finish_action = _Var("activate")
@@ -1125,12 +1118,11 @@ def test_update_reference_must_differ_and_create_skips_it(monkeypatch) -> None:
 
     wizard._finish()
     assert proofs == []
-    assert warnings and "andere Datei" in warnings[0]
+    assert warnings and "Extraktion testen" in warnings[0]
 
-    wizard._rules.mode = "create"
-    wizard.var_reference_pdf.set(r"I:\pdfs\problem.pdf")
+    ready = True
     wizard._finish()
-    assert proofs == [(r"I:\pdfs\problem.pdf", None)]  # Proof success has no activation callback.
+    assert proofs == [("activated", None)]
 
 
 def test_proof_is_blocked_until_every_configured_field_hits(monkeypatch) -> None:
@@ -1160,6 +1152,8 @@ def test_proof_is_blocked_until_every_configured_field_hits(monkeypatch) -> None
     wizard.var_key = _Var("(1111)")
     wizard.var_finish_action = _Var("activate")
     wizard._all_fields_confirmed = lambda: False
+    wizard._busy = False
+    wizard._proof_owner = SimpleNamespace(authoring_target_ready=lambda *_a, **_kw: False)
     monkeypatch.setattr(
         "rule_editor.wizard.messagebox.showwarning",
         lambda *_args, **_kwargs: None,
@@ -1238,6 +1232,29 @@ def test_stale_pdf_callback_does_not_publish_ready_state() -> None:
 
     wizard.after = _after_tcl
     wizard._schedule_ui(lambda: (_ for _ in ()).throw(AssertionError("callback ran")))
+
+
+def test_wizard_worker_captures_section_context_and_ui_derives_without_reads():
+    callbacks, derived = [], []
+    class Rules:
+        def load_authoring_pdf_context(self, pdf):
+            assert pdf == "sample.pdf"
+            return {"normalized_text": "DOCUMENT", "known_assay_keys": ("(1111)", "(zz01)")}
+        def load_normalized_pdf_text(self, _pdf):
+            pytest.fail("the context worker owns this single read")
+        def derive_assay_block(self, text, key, name, *, known_assay_keys):
+            derived.append((text, key, name, known_assay_keys))
+            return "BOUNDED"
+    wizard = _target_wizard(Rules())
+    wizard.var_pdf.set("sample.pdf")
+    wizard._pdf_request_id = 1
+    wizard._schedule_ui = callbacks.append
+    wizard._load_text_thread(wizard._rules, "sample.pdf", 1)
+    assert not derived and wizard._normalized_pdf_text == ""
+    callbacks.pop()()
+    assert wizard._known_assay_keys == ("(1111)", "(zz01)")
+    assert wizard._derive_assay_text("(1111)", "Internal name") == ("block", "BOUNDED")
+    assert derived == [("DOCUMENT", "(1111)", "Internal name", ("(1111)", "(zz01)"))]
 
     def _after_runtime(_delay: int, _callback: object) -> None:
         raise RuntimeError("main thread is not in main loop")
@@ -1405,6 +1422,7 @@ def test_fulltext_warning_stays_visible_and_proof_explains_split(monkeypatch) ->
     wizard._clear_field_form = lambda: None
     wizard._reload_fields = lambda: None
     wizard._all_fields_confirmed = lambda: True
+    wizard._field_report = None
 
     wizard._show_step(1)
     wizard._show_current_field()
@@ -1413,14 +1431,13 @@ def test_fulltext_warning_stays_visible_and_proof_explains_split(monkeypatch) ->
     assert _FULLTEXT_FALLBACK_WARNING in wizard.var_status.get()
     assert any(_FULLTEXT_FALLBACK_WARNING in row for row in wizard.list_summary.rows)
     monkeypatch.setattr(
-        "rule_editor.wizard.messagebox.showerror",
+        "rule_editor.wizard.messagebox.showwarning",
         lambda _title, message, **_kwargs: errors.append(str(message)),
     )
     wizard._finish()
     assert errors
-    assert "Blocktrennung" in errors[0]
-    assert "Kein erfolgreicher Abschluss" in wizard.var_status.get()
-    assert "erfolgreich" not in wizard.var_status.get().lower() or "kein erfolgreicher" in wizard.var_status.get().lower()
+    assert "Extraktion testen" in errors[0]
+    assert _FULLTEXT_FALLBACK_WARNING in wizard.var_status.get()
 
 
 def test_new_mode_blocks_active_key_before_draft_creation() -> None:
@@ -1465,6 +1482,8 @@ def test_cancel_shutdown_reloads_same_draft_without_callbacks() -> None:
 
     host = ManageMixin.__new__(ManageMixin)
     host.current_draft_path = same
+    host._capture_authoring_completion = lambda _path: None
+    host._adopt_authoring_completion = lambda _completion: None
     host.on_load_draft_into_editor = lambda path: reloaded.append(path) or True
 
     wizard = NewRulesetWizard.__new__(NewRulesetWizard)

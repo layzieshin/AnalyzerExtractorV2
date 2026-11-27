@@ -1,14 +1,22 @@
 """ReleaseMixin: Speichern, Validieren, Diff, Preview und kontrollierte Aktivierung."""
 from __future__ import annotations
 
-import json
-import threading
 import tkinter as tk
-from tkinter import messagebox, filedialog
-from pathlib import Path
+import os
+from tkinter import messagebox
+
+from .report_panel import clear_authoring_result, render_authoring_result
 
 
 class ReleaseMixin:
+    def _show_rule_results(self, *, reveal=True, toggle=False):
+        frame = getattr(self, "authoring_values_frame", None)
+        if frame is None:
+            self.report_notebook.select(self.authoring_result_tab)
+        elif not reveal or (toggle and frame.winfo_manager()):
+            frame.pack_forget()
+        else:
+            frame.pack(fill="both", expand=True)
     def _clear_validation_list(self) -> None:
         self.list_validation.delete(0, tk.END)
 
@@ -25,7 +33,7 @@ class ReleaseMixin:
 
     def _quick_validate(self, phase: str, *, save: bool = True) -> bool:
         try:
-            if save and self.__dict__.get("_dirty", False):
+            if save:
                 self._save_meta_to_draft(push_undo=False)
             report = self._rules.validate_draft(self.current_draft_path or "")
         except Exception as e:
@@ -37,9 +45,6 @@ class ReleaseMixin:
         if report.get("ok"):
             return True
 
-        if phase == "Aktivierung":
-            messagebox.showerror("Aktivierung blockiert", "Die Strukturprüfung muss ohne Fehler bestehen.")
-            return False
         if not messagebox.askyesno(
             "Strukturprüfung",
             f"{phase}: Der Entwurf ist strukturell nicht in Ordnung ({len(report.get('errors', []))} Fehler). Trotzdem fortfahren?",
@@ -47,205 +52,26 @@ class ReleaseMixin:
             return False
         return True
 
-    def _proof_set(self, name, value):
-        variable = self.__dict__.get(name)
-        if variable is not None:
-            variable.set(value)
-
-    @staticmethod
-    def _proof_path_text(value):
-        return str(Path(value).resolve()) if str(value or "").strip() else ""
-
-    def _authoring_ui_context(self):
-        def value(name):
-            variable = self.__dict__.get(name)
-            return str(variable.get()).strip() if variable is not None else ""
-        rules = self.__dict__.get("_rules")
-        return (id(rules), str(getattr(rules, "project_root", self.__dict__.get("project_root", ""))),
-            self._proof_path_text(self.__dict__.get("current_draft_path")), value("var_new_assay_key"),
-            value("var_new_assay_name"), self._proof_path_text(value("var_pdf")), self._proof_path_text(value("var_reference_pdf")))
-
-    def _proof_matches_selection(self, proof):
-        context = self._authoring_ui_context()
-        return (context[2] == self._proof_path_text(proof.get("draft_path")) and context[3] == proof.get("assay_key")
-            and context[4] == str(proof.get("assay_name") or "").strip() and context[5] == self._proof_path_text(proof.get("failing_pdf_path"))
-            and (proof.get("mode") != "update" or context[6] == self._proof_path_text(proof.get("reference_pdf_path"))))
-
-    def _invalidate_authoring_proof(self, *_args):
-        if self.__dict__.get("_suspend_proof_tracking", False):
-            return
-        self._proof_generation = self.__dict__.get("_proof_generation", 0) + 1
-        self._proof_needs_recheck = True
-        self._proof_set("var_proof_status", "Änderungen – erneut mit PDFs prüfen.")
-        button = self.__dict__.get("btn_activate")
-        if button is not None:
-            button.configure(state="disabled")
-
-    def _on_proof_pdf_changed(self, *_args):
-        self._invalidate_authoring_proof()
-
-    def _proof_result_text(self, value):
-        widget = self.__dict__.get("txt_proof_result")
-        if widget is not None:
-            widget.configure(state="normal")
-            widget.delete("1.0", tk.END)
-            widget.insert("1.0", value)
-            widget.configure(state="disabled")
-
-    @staticmethod
-    def _proof_failure_message(error):
-        explanations = (("reference_pdf_required", "Bei einer Änderung ist eine andere Referenz-PDF erforderlich."),
-            ("reference_pdf_missing", "Die ausgewählte Referenz-PDF fehlt oder ist nicht lesbar."),
-            ("reference_must_differ", "Problem- und Referenz-PDF müssen unterschiedliche Dateien mit unterschiedlichem Inhalt sein."),
-            ("reference_mismatch", "Der Referenzvergleich ist fehlgeschlagen: bisherige Feldwerte oder Kit-Charge unterscheiden sich."),
-            ("configured_fields_empty", "Die Extraktion ist unvollständig: jedes konfigurierte Feld braucht einen nichtleeren Wert."),
-            ("inputs_changed", "Entwurf, PDF oder aktive Regel wurden während der Prüfung verändert. Bitte erneut prüfen."))
-        prefix = next((message for key, message in explanations if key in str(error)), "Der PDF-Nachweis ist nicht verwendbar. Bitte den Sperrgrund klären.")
-        return prefix + "\nDetails: " + str(error)
-
-    def _refresh_authoring_status(self, *, adopt_paths=False):
-        button = self.__dict__.get("btn_activate")
-        if button is not None:
-            button.configure(state="disabled")
-        if not self.__dict__.get("current_draft_path"):
-            self._proof_set("var_proof_status", "Nachweis fehlt – zuerst einen Entwurf laden.")
-            return False
-        try:
-            report = self._rules.verify_authoring_proof(self.var_new_assay_key.get().strip(), self.current_draft_path)
-        except Exception as exc:
-            report = {"ok": False, "errors": [str(exc)]}
-        proof = report.get("proof") or {}
-        identity = self._authoring_ui_context()[:5]
-        if adopt_paths and identity != self.__dict__.get("_proof_loaded_identity"):
-            self._proof_loaded_identity = identity
-            self._suspend_proof_tracking = True
-            try:
-                if proof.get("failing_pdf_path"):
-                    self.var_pdf.set(proof["failing_pdf_path"])
-                reference = self.__dict__.get("var_reference_pdf")
-                if reference is not None:
-                    reference.set(proof.get("reference_pdf_path", ""))
-            finally:
-                self._suspend_proof_tracking = False
-            self._proof_needs_recheck = False
-        try:
-            structure = self._rules.validate_draft(self.current_draft_path)
-            self._proof_set("var_proof_structure", "Struktur: bestanden" if structure.get("ok") else "Struktur: Fehler")
-            mode = self._rules.diff_draft_vs_active(self.var_new_assay_key.get().strip(), self.current_draft_path).get("mode")
-        except Exception:
-            structure, mode = {"ok": False}, None
-        dirty = self.__dict__.get("_dirty", False) or self.__dict__.get("_field_form_dirty", False)
-        current = bool(report.get("ok") and structure.get("ok") and not dirty
-            and not self.__dict__.get("_proof_needs_recheck", False) and self._proof_matches_selection(proof))
-        if self.__dict__.get("_proof_running", False):
-            status = "Prüfung läuft – es wird nichts aktiviert."
-        elif current:
-            status = "Prüfung erfolgreich – noch nicht aktiviert."
-        elif proof.get("status") == "failed":
-            status = "Vorige PDF-Prüfung fehlgeschlagen – aktuell mit PDFs prüfen."
-        elif dirty or self.__dict__.get("_proof_needs_recheck", False) or report.get("ok"):
-            status = "Änderungen – erneut mit PDFs prüfen."
-        else:
-            status = "Nachweis fehlt oder ist nicht mehr aktuell – mit PDFs prüfen."
-        self._proof_set("var_proof_status", status)
-        self._proof_set("var_proof_example", "Beispiel/Problem: bestanden" if current else "Beispiel/Problem: nicht aktuell")
-        self._proof_set("var_proof_reference", "Referenz: nicht erforderlich (Neuanlage)" if mode == "create" else
-            ("Referenz: Vergleich bestanden" if current else "Referenz: andere PDF erforderlich / erneut prüfen"))
-        if self.__dict__.get("_proof_running", False):
-            self._proof_set("var_proof_example", "Beispiel/Problem: Prüfung läuft")
-            if mode == "update":
-                self._proof_set("var_proof_reference", "Referenz: Prüfung läuft")
-        if current:
-            detail = f"Geprüft: {proof.get('checked_at_utc', '')} · Beispiel: {Path(proof['failing_pdf_path']).name}"
-            if proof.get("reference_pdf_path"):
-                detail += f" · Referenz: {Path(proof['reference_pdf_path']).name}"
-            detail += "\nGeprüfte Felder: " + ", ".join(proof.get("failing_result_fields", []))
-            detail += "\nReferenzvergleich: " + (", ".join([*proof.get("compared_fields", []), "lot_id"]) if mode == "update" else "nicht erforderlich")
-        else:
-            detail = self._proof_failure_message(proof["error"]) if proof.get("error") else (
-                "; ".join(report.get("errors", [])) or "Prüfung mit der aktuellen PDF-Auswahl erforderlich.")
-        self._proof_result_text(detail)
-        if button is not None:
-            button.configure(state="normal" if current and not self.__dict__.get("_proof_running", False) else "disabled")
-        return current and not self.__dict__.get("_proof_running", False)
-
-    def on_pick_reference_pdf(self):
-        path = filedialog.askopenfilename(title="Andere Referenz-PDF auswählen", filetypes=[("PDF", "*.pdf")])
-        if path:
-            self.var_reference_pdf.set(path)
-
-    def on_check_pdfs(self):
-        if self.__dict__.get("_busy", False) or self.__dict__.get("_proof_running", False) or not self._guard_field_form():
-            return
-        if not self.current_draft_path:
-            self._set_hint("Bitte zuerst einen Entwurf laden.")
-            return
-        try:
-            if self.__dict__.get("_dirty", False):
-                self._save_meta_to_draft(push_undo=False)
-        except Exception as exc:
-            self._invalidate_authoring_proof()
-            messagebox.showerror("Entwurf speichern", str(exc))
-            return
-        self._proof_generation = self.__dict__.get("_proof_generation", 0) + 1
-        generation, context, rules = self._proof_generation, self._authoring_ui_context(), self._rules
-        self._proof_active_request = generation
-        self._proof_running = True
-        self._set_busy(True, "PDF-Nachweis läuft …")
-        self._refresh_authoring_status()
-        def work():
-            return rules.create_authoring_proof(context[3], context[2], context[5], context[6] or None)
-        # Only the existing main-thread poller talks to Tk. A worker-side
-        # after() call can fail or lose delivery after Tcl/mainloop changes.
-        submitted = self._proof_task_runner.submit(f"rule-authoring-proof-{generation}", work,
-            on_success=lambda result: self._complete_authoring_check(generation, context, result, None),
-            on_error=lambda error: self._complete_authoring_check(generation, context, None, str(error)))
-        if not submitted:
-            self._complete_authoring_check(generation, context, None, "Die PDF-Prüfung konnte nicht gestartet werden. Bitte erneut versuchen.")
-
-    def _complete_authoring_check(self, generation, context, result, error):
-        if self.__dict__.get("_proof_disposed", False) or generation != self.__dict__.get("_proof_active_request"):
-            return
-        self._proof_active_request = None
-        self._proof_running = False
-        self._set_busy(False, "Bereit")
-        if generation != self._proof_generation or context != self._authoring_ui_context():
-            self._refresh_authoring_status()
-            return
-        if error:
-            self._proof_needs_recheck = True
-            self._proof_set("var_proof_status", "PDF-Prüfung fehlgeschlagen – keine Aktivierung.")
-            try:
-                mode = self._rules.diff_draft_vs_active(self.var_new_assay_key.get().strip(), self.current_draft_path).get("mode")
-                structural = self._rules.validate_draft(self.current_draft_path)
-            except Exception:
-                mode, structural = None, {"ok": False}
-            self._proof_set("var_proof_structure", "Struktur: bestanden" if structural.get("ok") else "Struktur: Fehler")
-            example_state = "bestanden" if "reference_mismatch" in error else ("nicht geprüft" if "reference_" in error else "nicht aktuell")
-            self._proof_set("var_proof_example", "Beispiel/Problem: " + example_state)
-            self._proof_set("var_proof_reference", "Referenz: nicht erforderlich (Neuanlage)" if mode == "create" else
-                ("Referenz: blockiert / Vergleich fehlgeschlagen" if "reference_" in error else "Referenz: nicht aktuell / erneut prüfen"))
-            self._proof_result_text(self._proof_failure_message(error))
-            button = self.__dict__.get("btn_activate")
-            if button is not None:
-                button.configure(state="disabled")
-            return
-        self._proof_needs_recheck = False
-        self._refresh_authoring_status()
-
     def _check_authoring_readiness_for_activate(self) -> bool:
         if not self.current_draft_path:
             return False
+        assay_key = self.var_new_assay_key.get().strip()
         try:
-            report = self._rules.verify_authoring_proof(self.var_new_assay_key.get().strip(), self.current_draft_path)
-        except Exception as exc:
-            report = {"ok": False, "errors": [str(exc)]}
-        dirty = self.__dict__.get("_dirty", False) or self.__dict__.get("_field_form_dirty", False)
-        if (report.get("ok") and not dirty and not self.__dict__.get("_proof_running", False)
-                and not self.__dict__.get("_proof_needs_recheck", False) and self._proof_matches_selection(report.get("proof") or {})):
+            report = self._rules.verify_authoring_proof(assay_key, self.current_draft_path)
+        except Exception as e:
+            messagebox.showerror("Readiness", str(e))
+            return False
+
+        if report.get("ok"):
             return True
-        errors = ", ".join(report.get("errors", [])) or "PDF-Auswahl oder ungespeicherte Änderungen passen nicht zum Nachweis"
-        messagebox.showerror("Aktivierung blockiert", "Der Nachweis fehlt oder ist nicht aktuell. Bitte 'Mit PDFs prüfen' ausführen.\n\n" + errors)
+        errors = ", ".join(str(item) for item in report.get("errors", [])) or "Nachweis fehlt"
+        messagebox.showerror(
+            "Aktivierung blockiert",
+            "Der Aktivierungsnachweis fehlt oder ist nicht mehr aktuell.\n\n"
+            f"Details: {errors}\n\n"
+            "Bitte 'Extraktion testen' mit der gewählten Test-PDF erneut ausführen.",
+            parent=self._dialog_parent(),
+        )
         return False
 
     def _guard_field_form(self) -> bool:
@@ -275,8 +101,7 @@ class ReleaseMixin:
             self._set_hint("Bitte zuerst einen Entwurf laden.")
             return
         try:
-            if self.__dict__.get("_dirty", False):
-                self._save_meta_to_draft(push_undo=True)
+            self._save_meta_to_draft(push_undo=True)
             report = self._rules.validate_draft(self.current_draft_path)
             self._render_validation_report(report)
             self._log("=== Strukturprüfung ===")
@@ -301,8 +126,7 @@ class ReleaseMixin:
             self._set_hint("Assay-Schlüssel ist erforderlich.")
             return
         try:
-            if self.__dict__.get("_dirty", False):
-                self._save_meta_to_draft(push_undo=False)
+            self._save_meta_to_draft(push_undo=False)
             diff = self._rules.diff_draft_vs_active(key, self.current_draft_path)
             self._log(f"[DIFF] mode={diff.get('mode')} ruleset={diff.get('ruleset_file')}")
             changes = diff.get("changes", [])
@@ -313,9 +137,6 @@ class ReleaseMixin:
                     self._log(f"  - {ch.get('path')}: active={ch.get('active')} -> draft={ch.get('draft')}")
                 if len(changes) > 80:
                     self._log(f"  ... {len(changes) - 80} weitere Änderungen")
-            show_details = getattr(self, "_show_advanced", None)
-            if callable(show_details):
-                show_details("log")
             self._set_hint(f"Änderungen angezeigt ({len(changes)} Änderungen).")
         except Exception as e:
             messagebox.showerror("Fehler", str(e))
@@ -334,98 +155,216 @@ class ReleaseMixin:
             self._set_hint("Test-PDF und Assay-Schlüssel sind erforderlich.")
             return
 
-        if not self._quick_validate("Extraktionstest"):
+        try:
+            metadata = self._draft_meta_inputs() if self._dirty else None
+        except Exception as exc:
+            self._invalidate_authoring_test()
+            messagebox.showerror("Speichern", str(exc), parent=self._dialog_parent())
             return
+        target = self._authoring_target()
+        self.request_authoring_test(target, origin=self, is_current=lambda: self._authoring_target() == target,
+                                    metadata=metadata)
 
-        self._set_busy(True, "Extraktionstest läuft …")
-        rules = self._rules
-        draft_path = self.current_draft_path
-        threading.Thread(
-            target=self._preview_thread,
-            args=(rules, pdf, key, draft_path),
-            daemon=True,
-        ).start()
+    def _authoring_target(self) -> tuple[str, str, str]:
+        return str(self.current_draft_path or ""), self.var_new_assay_key.get().strip(), self.var_pdf.get().strip()
 
-    def _preview_thread(self, rules: object, pdf: str, key: str, draft_path: str | None) -> None:
-        try:
-            out = rules.preview_extract(pdf, key, draft_path=draft_path)
-            payload = json.dumps(out, ensure_ascii=False, indent=2)
-            self.after(0, lambda p=payload: self._finish_preview_success(p))
-        except Exception as e:
-            msg = str(e)
-            self.after(0, lambda m=msg: self._finish_preview_error(m))
+    def _invalidate_authoring_test(self, *_args, origin=None) -> None:
+        if origin is not None and origin is not getattr(self, "_proof_origin", None):
+            return
+        self._proof_generation = getattr(self, "_proof_generation", 0) + 1
+        self._proof_request = None
+        self._proof_result = None
+        self._proof_target = None
+        self._proof_origin = None
+        self._completion_visible = False
+        if hasattr(self, "tree_authoring_values"):
+            clear_authoring_result(self, "Auswahl oder Entwurf geändert – bitte Extraktion testen")
+        self._sync_authoring_controls()
 
-    def _finish_preview_success(self, payload: str) -> None:
-        try:
-            self._log("=== Extraktionstest ===")
-            self._log(payload)
-            self._set_hint("Extraktionstest erfolgreich.")
-        finally:
+    def _sync_authoring_controls(self) -> None:
+        for name in ("btn_inventory_discard", "btn_draft_discard"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.configure(state="disabled" if self._busy or (name == "btn_draft_discard" and not self.current_draft_path) else "normal")
+        if hasattr(self, "editor_action_flow"):
+            for button in self.editor_action_flow._controls:
+                button.configure(state="disabled" if self._busy else "normal")
+            self.btn_rule_undo.configure(state="normal" if self._undo_stack and not self._busy else "disabled")
+            self.btn_rule_redo.configure(state="normal" if self._redo_stack and not self._busy else "disabled")
+            self.btn_inventory_new.configure(state="disabled" if self._busy else "normal")
+            self._update_field_commit_button()
+        if hasattr(self, "btn_rule_test"):
+            target = self._authoring_target()
+            self.btn_rule_test.configure(state="normal" if all(target) and not self._busy else "disabled")
+        if hasattr(self, "btn_activate"):
+            self.btn_activate.configure(state="normal" if self.authoring_target_ready(self._authoring_target(), origin=self) else "disabled")
+            if hasattr(self, "editor_footer_flow"):
+                visible = bool(getattr(self, "_completion_visible", False))
+                self.editor_footer_flow.set_visible(self.btn_activate, visible)
+                self.btn_completion.configure(style="RuleSuite.Secondary.TButton" if visible else "RuleSuite.Primary.TButton")
+
+    def authoring_target_ready(self, target, *, origin=None) -> bool:
+        result = getattr(self, "_proof_result", None)
+        if self._busy or not result or result.get("status") != "ready" or target != getattr(self, "_proof_target", None):
+            return False
+        if origin is not None and origin is not getattr(self, "_proof_origin", None):
+            return False
+        # Readiness is cached presentation state. External byte/source changes
+        # are checked in the worker and again in the core's activation lock.
+        return True
+
+    def request_authoring_test(self, target, *, origin, is_current, on_complete=None, metadata=None) -> bool:
+        if self._busy or self._task_runner.is_active("editor-rule-test"):
+            return False
+        self._invalidate_authoring_test()
+        self._proof_target, self._proof_origin = target, origin
+        rules, context = self._rules, self._context_generation
+        request = (self._proof_generation, context, target, origin)
+        self._proof_request = request
+        self._set_busy(True, "Regeltest läuft …")
+        if origin is self:
+            clear_authoring_result(self, "Regeltest läuft …")
+            self._show_rule_results()
+
+        def finish(result=None, error=None):
+            if self._closed:
+                return
             self._set_busy(False, "Bereit")
+            current = request == self._proof_request and rules is self._rules and context == self._context_generation and is_current()
+            if request == self._proof_request:
+                self._proof_request = None
+            if current and error is None:
+                self._proof_result = result
+                if metadata is not None:
+                    self._dirty = False
+                if origin is self:
+                    render_authoring_result(self, result)
+                self._set_hint("Regeltest abgeschlossen. Aktivierung erfolgt nur ausdrücklich." if result.get("status") == "ready" else "Regeltest fehlgeschlagen. Bitte die markierten Felder nacharbeiten.")
+            elif current:
+                self._proof_result = None
+                self._set_hint(f"Regeltest fehlgeschlagen: {error}")
+                if origin is self:
+                    clear_authoring_result(self, "Regeltest fehlgeschlagen")
+            if on_complete is not None:
+                on_complete(result if current and error is None else None)
+            self._sync_authoring_controls()
 
-    def _finish_preview_error(self, msg: str) -> None:
-        try:
-            self._log(f"[ERROR] preview: {msg}")
-            self._set_hint("Extraktionstest fehlgeschlagen. Siehe Protokoll.")
-        finally:
+        draft, key, pdf = target
+        def work():
+            if metadata is not None:
+                rules.update_draft_meta(draft, **metadata)
+            return rules.create_authoring_proof(key, draft, pdf)
+
+        accepted = self._task_runner.submit("editor-rule-test", work,
+            on_success=lambda result: finish(result=result), on_error=lambda error: finish(error=error))
+        if not accepted:
             self._set_busy(False, "Bereit")
+            self._invalidate_authoring_test()
+        return accepted
+
+    def _capture_authoring_completion(self, draft):
+        target = getattr(self, "_proof_target", None)
+        if target is not None and os.path.normcase(os.path.abspath(target[0])) == os.path.normcase(os.path.abspath(draft)) and self.authoring_target_ready(target):
+            return target, self._proof_result
+        return None
+
+    def _adopt_authoring_completion(self, completion) -> None:
+        if completion is None:
+            return
+        target, result = completion
+        self.var_pdf.set(target[2])
+        if self._authoring_target() != target:
+            return
+        self._proof_target, self._proof_result, self._proof_origin = target, result, self
+        self._completion_visible = True
+        render_authoring_result(self, result)
+        self._show_rule_results()
+        self._sync_authoring_controls()
 
     def on_activate(self) -> None:
-        if self.__dict__.get("_busy", False) or not self._guard_field_form():
+        if self._busy:
+            self._set_hint("Eine Prüfung läuft bereits. Bitte kurz warten.")
             return
-        if not self.current_draft_path:
-            self._set_hint("Bitte zuerst einen Entwurf laden.")
+        if not self.authoring_target_ready(self._authoring_target(), origin=self):
+            self._invalidate_authoring_test()
+            self._set_hint("Bitte zuerst die gewählte Test-PDF mit 'Extraktion testen' prüfen.")
             return
-        if self.__dict__.get("_dirty", False) or self.__dict__.get("_field_form_dirty", False):
-            self._invalidate_authoring_proof()
-            messagebox.showerror("Aktivierung blockiert", "Ungespeicherte Änderungen: zuerst mit PDFs prüfen.")
-            return
-
+        # Activation never resolves a dirty form by writing it first. The
+        # explicit test action is the only route back to a fresh proof.
         key = self.var_new_assay_key.get().strip()
         name = self.var_new_assay_name.get().strip()
         if not key or not name:
             self._set_hint("Assay-Schlüssel und Assay-Name sind erforderlich.")
             return
 
-        # A clean, proven draft is inspected without serialization. Dirty UI
-        # state needs an explicit new PDF check before final confirmation.
-        if not self._quick_validate("Aktivierung", save=False):
+        if self._dirty or self._field_form_dirty:
+            self._invalidate_authoring_test()
+            self._set_hint("Entwurf geändert – bitte Extraktion testen.")
             return
+        target, rules, context = self._authoring_target(), self._rules, self._context_generation
+        generation = self._proof_generation
+        tested_identity = tuple(self._proof_result.get(field) for field in ("attempt_id", "proof_sha256"))
+        self._set_busy(True, "Aktivierung wird geprüft …")
 
-        if not self._check_authoring_readiness_for_activate():
-            return
+        def current():
+            return (not self._closed and rules is self._rules and context == self._context_generation
+                    and generation == self._proof_generation and target == self._authoring_target())
 
-        diff = self._rules.diff_draft_vs_active(key, self.current_draft_path)
-        mode = diff.get("mode")
-        if mode not in {"create", "update"}:
-            messagebox.showerror("Aktivierung blockiert", "Der aktuelle Aktivierungsmodus ist nicht eindeutig.")
-            return
-        change_count = len(diff.get("changes", []))
-        action_text = (
-            f"Bestehendes Assay {key} wird überschrieben.\n\n"
-            if mode == "update"
-            else f"Neues Assay {key} wird angelegt und in index.json eingetragen.\n\n"
-        )
-        confirm = (
-            action_text
-            + f"Fortfahren?\nName: {name}\nÄnderungen: {change_count}\n\n"
-            + "Hinweis: 'Änderungen anzeigen' zeigt die Unterschiede vorab."
-        )
-        if not messagebox.askyesno("Aktivierung bestätigen", confirm):
-            return
+        def failed(error):
+            if not self._closed:
+                self._activation_pending = False
+                self._set_busy(False, "Bereit")
+                if current():
+                    self._invalidate_authoring_test()
+                    messagebox.showerror("Aktivierung blockiert", str(error) + "\nBitte Extraktion testen.", parent=self._dialog_parent())
 
-        try:
-            if mode == "update":
-                path = self._rules.activate_draft(key, self.current_draft_path)
-                self._log(f"Aktualisiert: {path}")
-            else:
-                path = self._rules.activate_new_draft(key, name, self.current_draft_path)
-                self._log(f"Neues Assay aktiviert: {path}")
-            self._set_hint("Aktivierung abgeschlossen.")
-            self._proof_set("var_proof_status", "Aktivierung abgeschlossen. Änderungen benötigen eine neue PDF-Prüfung.")
-            self._proof_needs_recheck = True
-            if self.__dict__.get("btn_activate") is not None:
-                self.btn_activate.configure(state="disabled")
-            self._reload_assays()
-        except Exception as e:
-            messagebox.showerror("Fehler", str(e))
+        def prepare():
+            proof = rules.verify_authoring_proof(key, target[0])
+            if not proof.get("ok"):
+                raise RuntimeError(", ".join(proof.get("errors", ())) or "Nachweis fehlt")
+            receipt = proof.get("proof", {})
+            if tuple(receipt.get(field) for field in ("attempt_id", "proof_sha256")) != tested_identity:
+                raise RuntimeError("authoring_proof_attempt_changed")
+            diff = rules.diff_draft_vs_active(key, target[0])
+            if receipt.get("version") == 2 and diff.get("mode") != receipt.get("activation_baseline", {}).get("mode"):
+                raise RuntimeError("authoring_proof_active_mapping_changed")
+            return diff, receipt
+
+        def prepared(preparation):
+            diff, receipt = preparation
+            self._set_busy(False, "Bereit")
+            if not current():
+                return
+            action = "Bestehende Regel aktualisieren" if diff.get("mode") == "update" else "Neue Regel aktivieren"
+            case_context = getattr(self, "_identity_case_context", None)
+            case_bound = bool(case_context and case_context.get("assay_key") == key and case_context.get("draft_path") == target[0])
+            follow_up = ("\n\nDanach werden ausschließlich die betroffenen PDF-Importaufträge dieses Kennungsfalls erneut verarbeitet. "
+                         "Fehlende oder weiterhin fehlerhafte Quellen bleiben unter Änderungen offen.") if case_bound else ""
+            if not messagebox.askyesno("Aktivierung bestätigen",
+                    f"{action}?\n\nAssay: {name}\nSchlüssel: {key}\nÄnderungen: {len(diff.get('changes', ())) }{follow_up}",
+                    parent=self._dialog_parent()) or not current():
+                return
+            self._activation_pending = True
+            self._set_busy(True, "Regel wird aktiviert …")
+
+            def activated(path):
+                if self._closed:
+                    return
+                self._activation_pending = False
+                self._set_busy(False, "Bereit")
+                self._reload_assays()
+                if current():
+                    self._log(f"Aktiviert: {path}")
+                    self._invalidate_authoring_test()
+                    self._set_hint("Aktivierung abgeschlossen.")
+                    callback = getattr(self, "_identity_activation_callback", None)
+                    if case_bound and callable(callback) and case_context == getattr(self, "_identity_case_context", None):
+                        callback(case_context)
+
+            if not self._task_runner.submit("editor-activate", lambda: rules.activate_draft(key, target[0], assay_name=name,
+                                            authoring_proof=receipt, expected_mode=diff.get("mode")),
+                                            on_success=activated, on_error=failed):
+                failed(RuntimeError("Aktivierung konnte nicht gestartet werden."))
+
+        if not self._task_runner.submit("editor-activate-check", prepare, on_success=prepared, on_error=failed):
+            failed(RuntimeError("Aktivierungsprüfung konnte nicht gestartet werden."))

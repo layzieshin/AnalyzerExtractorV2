@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List
 
 from .model import QueueJob
-from .queue import JobQueue
+from .queue import JobQueue, release_attempt
 
 __all__ = [
     "QueueJob",
@@ -16,6 +16,8 @@ __all__ = [
     "recover_stale_jobs",
     "retry_failed_job",
     "verify_job_content_sha256",
+    "release_job_attempt",
+    "reconcile_completed_job",
 ]
 
 
@@ -55,12 +57,21 @@ def claim_next_job(
     processing_ttl_s: float | None = None,
     claim_lock_ttl_s: float | None = None,
     max_attempts: int | None = None,
+    job_id: str | None = None,
+    retry_failed: bool = False,
+    expected_sha256: str | None = None,
+    expected_pdf_path: str | None = None,
+    store_path: str | None = None,
+    device_id: str | None = None,
+    managed_attempt: bool = False,
 ) -> QueueJob | None:
     return _queue(
         processing_ttl_s=processing_ttl_s,
         claim_lock_ttl_s=claim_lock_ttl_s,
         max_attempts=max_attempts,
-    ).claim_next_job(project_root, worker_id)
+    ).claim_next_job(project_root, worker_id, job_id=job_id, retry_failed=retry_failed,
+                     expected_sha256=expected_sha256, expected_pdf_path=expected_pdf_path, store_path=store_path,
+                     device_id=device_id, managed_attempt=managed_attempt)
 
 
 def mark_job_done(
@@ -69,9 +80,10 @@ def mark_job_done(
     worker_id: str = "",
     *,
     claim_lock_ttl_s: float | None = None,
+    attempt_id: str | None = None,
 ) -> QueueJob:
     return _queue(claim_lock_ttl_s=claim_lock_ttl_s).mark_job_done(
-        project_root, job_id, worker_id=worker_id
+        project_root, job_id, worker_id=worker_id, attempt_id=attempt_id
     )
 
 
@@ -82,9 +94,10 @@ def mark_job_failed(
     worker_id: str = "",
     *,
     claim_lock_ttl_s: float | None = None,
+    attempt_id: str | None = None,
 ) -> QueueJob:
     return _queue(claim_lock_ttl_s=claim_lock_ttl_s).mark_job_failed(
-        project_root, job_id, error, worker_id=worker_id
+        project_root, job_id, error, worker_id=worker_id, attempt_id=attempt_id
     )
 
 
@@ -95,9 +108,10 @@ def mark_job_pending(
     worker_id: str = "",
     *,
     claim_lock_ttl_s: float | None = None,
+    attempt_id: str | None = None,
 ) -> QueueJob:
     return _queue(claim_lock_ttl_s=claim_lock_ttl_s).mark_job_pending(
-        project_root, job_id, reason, worker_id=worker_id
+        project_root, job_id, reason, worker_id=worker_id, attempt_id=attempt_id
     )
 
 
@@ -138,3 +152,14 @@ def verify_job_content_sha256(
 def list_jobs(project_root: str, *, create_missing: bool = True) -> List[QueueJob]:
     """List queue records; create_missing=False performs no directory writes."""
     return JobQueue().list_jobs(project_root, create_missing=create_missing)
+
+
+def release_job_attempt(attempt_id: str) -> None:
+    """Release only this process/thread's exact attempt lease, not a path lock."""
+    release_attempt(attempt_id)
+
+
+def reconcile_completed_job(project_root, job_id, *, expected_sha256, expected_pdf_path, store_path, device_id,
+                            claim_lock_ttl_s=None):
+    return _queue(claim_lock_ttl_s=claim_lock_ttl_s).reconcile_completed_job(project_root, job_id,
+        expected_sha256=expected_sha256, expected_pdf_path=expected_pdf_path, store_path=store_path, device_id=device_id)
