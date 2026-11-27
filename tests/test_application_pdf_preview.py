@@ -266,7 +266,7 @@ def test_controller_rejects_missing_or_ambiguous_report_pdf(tmp_path, monkeypatc
     def get_detail(report_id, *, store_path):
         assert (report_id, store_path) == ("r", displayed_store)
         resolved.append((report_id, store_path))
-        return SimpleNamespace(report_id="r", path_status=path_status, current_pdf_path=str(path), pdf_path="")
+        return SimpleNamespace(report_id="r", path_status=path_status, current_pdf_path=str(path), pdf_path="", pdf_sha256="")
     def unexpected_render(report_id, pdf_path, *, page_index, zoom):
         pytest.fail("A missing or ambiguous PDF source must never reach the renderer")
     monkeypatch.setattr(controller, "get_report_detail", get_detail)
@@ -291,7 +291,7 @@ def test_controller_uses_current_archived_path_for_every_page(tmp_path, monkeypa
     def get_detail(report_id, *, store_path):
         assert (report_id, store_path) == ("r", displayed_store)
         resolved.append((report_id, store_path))
-        return SimpleNamespace(report_id="r", path_status="resolved", current_pdf_path=str(source[0]), pdf_path=str(tmp_path / "missing-original.pdf"))
+        return SimpleNamespace(report_id="r", path_status="resolved", current_pdf_path=str(source[0]), pdf_path=str(tmp_path / "missing-original.pdf"), pdf_sha256="")
     def render(report_id, pdf_path, *, page_index, zoom):
         calls.append((report_id, pdf_path, page_index, zoom))
         return pages[page_index]

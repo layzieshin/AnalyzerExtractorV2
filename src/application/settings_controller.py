@@ -35,6 +35,7 @@ _ALLOWED_KEYS = frozenset(
         "watch_recursive",
         "device_id",
         "operator_initials",
+        "archive_mode",
     }
 )
 
@@ -64,6 +65,7 @@ class SettingsController:
             watch_recursive=False,
             device_id=runtime.device_id,
             operator_initials="",
+            archive_mode=runtime.archive_mode,
         )
         path = self.settings_path()
         if not path.is_file():
@@ -89,6 +91,7 @@ class SettingsController:
                 watch_recursive=overrides["watch_recursive"],
                 device_id=overrides["device_id"],
                 operator_initials=overrides["operator_initials"],
+                archive_mode=overrides["archive_mode"],
             )
         except ValueError as exc:
             raise SettingsValidationError(str(exc)) from exc
@@ -102,7 +105,7 @@ class SettingsController:
             raise SettingsValidationError("sqlite_path_required")
         require_paths = settings.watch_enabled if require_watch_paths is None else require_watch_paths
         if require_paths:
-            _validate_watch_paths(settings.watch_input_path, settings.watch_backup_path)
+            _validate_watch_paths(settings.watch_input_path, settings.watch_backup_path, archive_mode=settings.archive_mode)
 
     def canonical_output_dir(self) -> Path:
         return self._project_root / "output" / "final"
@@ -211,6 +214,8 @@ class SettingsController:
             "device_id": settings.device_id,
             "operator_initials": settings.operator_initials,
         }
+        if settings.archive_mode == "monthly" or load_runtime_config(self._project_root).archive_mode == "monthly":
+            payload["archive_mode"] = settings.archive_mode
         temp_path = path.with_suffix(path.suffix + ".tmp")
         try:
             temp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -239,9 +244,13 @@ def _normalize_watch_path_key(path: str | Path) -> str:
     return os.path.normcase(str(Path(normalized).resolve(strict=False)))
 
 
-def _validate_watch_paths(watch_input_path: str, watch_backup_path: str) -> None:
+def _validate_watch_paths(watch_input_path: str, watch_backup_path: str, *, archive_mode="immediate") -> None:
     if not str(watch_input_path or "").strip():
         raise SettingsValidationError("watch_input_path_required")
+    if archive_mode == "monthly":
+        if not Path(watch_input_path).is_absolute():
+            raise SettingsValidationError("monthly_input_absolute_path_required")
+        return
     if not str(watch_backup_path or "").strip():
         raise SettingsValidationError("watch_backup_path_required")
     input_path = Path(watch_input_path).resolve(strict=False)
@@ -273,6 +282,7 @@ def _read_settings_overrides(payload: dict[str, Any], *, base: DesktopSettings) 
         "watch_recursive": base.watch_recursive,
         "device_id": base.device_id,
         "operator_initials": base.operator_initials,
+        "archive_mode": base.archive_mode,
     }
     watch_dir_value: str | None = None
     watch_input_value: str | None = None
@@ -288,6 +298,10 @@ def _read_settings_overrides(payload: dict[str, Any], *, base: DesktopSettings) 
             if not isinstance(value, str):
                 raise SettingsValidationError("invalid_sqlite_path_type")
             overrides["sqlite_path"] = value
+        elif key == "archive_mode":
+            if value not in {"immediate", "monthly"}:
+                raise SettingsValidationError("invalid_archive_mode")
+            overrides["archive_mode"] = value
         elif key == "watch_dir":
             if not isinstance(value, str):
                 raise SettingsValidationError("invalid_watch_input_path_type")

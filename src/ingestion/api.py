@@ -34,6 +34,9 @@ from .service import (
     validate_watch_path_pair,
 )
 from .store import get_record, list_records
+from .monthly_models import ArchiveGroup, ArchiveSource, MonthlyArchiveError, MonthlyArchivePreview
+from .monthly_archive import commit_monthly_archive, preview_monthly_archive, recover_monthly_archive
+from .locations import find_pdf_locations, register_pdf_location, verified_pdf_location, verified_pdf_source
 
 EnqueueCallable = Callable[[str, str, str | None], QueueJob]
 
@@ -65,6 +68,11 @@ __all__ = [
     "retry_archive",
     "run_watch_scan_cycle",
     "validate_watch_path_pair",
+    "ArchiveGroup", "ArchiveSource", "MonthlyArchiveError", "MonthlyArchivePreview",
+    "commit_monthly_archive", "preview_monthly_archive", "recover_monthly_archive",
+    "find_pdf_locations", "register_pdf_location",
+    "verified_pdf_location",
+    "verified_pdf_source",
 ]
 
 

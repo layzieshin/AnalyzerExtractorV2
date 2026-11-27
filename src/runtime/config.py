@@ -47,6 +47,7 @@ class RuntimeConfig:
     sqlite_path: str | None = None
     watch_dir: str | None = None
     device_id: str | None = None
+    archive_mode: str = "immediate"
     scan_interval_s: float = 3.0
     watch_stable_window_s: float = 1.0
     worker_poll_interval_s: float = 2.0
@@ -60,6 +61,8 @@ class RuntimeConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "output_mode", "sqlite")
+        if self.archive_mode not in {"immediate", "monthly"}:
+            raise ValueError("invalid_archive_mode")
 
     @property
     def enable_excel(self) -> bool:
@@ -95,6 +98,7 @@ def load_runtime_config(project_root: str | Path) -> RuntimeConfig:
         sqlite_path=sqlite_path,
         watch_dir=watch_dir,
         device_id=device_id,
+        archive_mode=os.getenv("ARE_ARCHIVE_MODE", "immediate").strip().lower() or "immediate",
         scan_interval_s=scan_interval,
         watch_stable_window_s=watch_stable_window,
         worker_poll_interval_s=worker_poll_interval,

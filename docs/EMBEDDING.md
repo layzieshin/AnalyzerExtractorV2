@@ -32,6 +32,36 @@ Dieses Dokument beschreibt die stabile Python-Oberflaeche von AREV2 fuer spaeter
 - Errors: `ApplicationError`, `ApplicationWatchError`, `PathOpenError`, `ReportNotFoundError`, `SettingsLoadError`, `SettingsValidationError`, `SettingsSaveError`, `ValidationInputError`, `ValidationConflictError`
 - `SettingsController.load()` liest alte `both`-/`excel`-Werte ohne Dateiaenderung als effektives `sqlite`; normales `save` persistiert SQLite und erhaelt die anderen Settings. Unbekannte JSON-Modi bleiben `SettingsValidationError`, Syntaxfehler `SettingsLoadError`. Runtime-/Processing-Konfigurationen fallen auch bei unbekannten Modi sicher auf SQLite zurueck.
 
+### Monthly archive and verified PDF locations (2.4.0)
+
+- `DesktopSettings.archive_mode` / `ARE_ARCHIVE_MODE`: `immediate` (kompatibler
+  Standard) oder `monthly` (flacher Eingang, keine Sofortarchivierung, kein
+  Archivpfad erforderlich; bestätigte ältere Importinstanzen behalten ihre Route).
+- `ResultsController.preview_monthly_archive(*, cutoff, input_path=None,
+  archive_path=None, store_path=None, res_assignments=None, without_res=(),
+  context_guard=None)` ist schreibfrei. `commit_monthly_archive(preview, *,
+  selected_group_ids=None, res_assignments=None, without_res=(),
+  operator_initials="", context_guard=None)` prüft erneut und kopiert alle
+  Gruppenmitglieder vor Entfernung. `recover_monthly_archive(*, store_path=None,
+  context_guard=None)` setzt ausschließlich bestätigte Journale fort.
+- `ResultsController.find_report_pdf(report_id, search_path, *, store_path,
+  context_guard=None)` und `RuleSuiteController.find_identity_pdf(...)` suchen
+  eine explizite Datei oder rekursiv einen Ordner nach dem vollständigen
+  gespeicherten SHA. Kein Treffer/Mehrdeutigkeit schreibt keine Zuordnung.
+  Öffnen, Vorschau und Neuanalyse nutzen nur verifizierte Orte, keine
+  unbestätigte Rückkehr zu einem inzwischen ersetzten Original.
+- `src.ingestion.api` besitzt `MonthlyArchivePreview`, `ArchiveGroup`,
+  `ArchiveSource`, `MonthlyArchiveError` sowie die entsprechenden Vorschau-,
+  Commit-, Recovery- und Location-APIs. Es liest selbst keine Ergebnisdatenbank;
+  ein `evidence_reader` liefert die aktuell gebundenen Nachweise.
+- `verify_completed_job(..., include_outputs=True)` ergänzt `run_ids` und
+  `duplicate_pending`; Standardantworten bleiben unverändert. Offene Duplikate
+  sind ausdrücklich kein fachlicher Abschluss für das Monatsarchiv.
+- `submit(..., source_pdf_path=None)` ist additiv für einen belegten aktuellen
+  Ort bei unverändertem Originalpfad und zwingendem `expected_sha256`. Die
+  tatsächlichen verifizierten Bytes werden ausgewertet; Job-/ResultStore-
+  Provenienz behält den Originalpfad.
+
 ### Application reanalysis extensions (Package 3b)
 
 Package 3b adds the following methods on the existing `ResultsController`:

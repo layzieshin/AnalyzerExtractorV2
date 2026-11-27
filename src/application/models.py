@@ -26,6 +26,7 @@ class DesktopSettings:
     watch_recursive: bool = False
     device_id: str | None = None
     operator_initials: str = ""
+    archive_mode: str = "immediate"
 
     def __init__(
         self,
@@ -39,6 +40,7 @@ class DesktopSettings:
         watch_backup_path: str = "",
         watch_recursive: bool = False,
         operator_initials: str = "",
+        archive_mode: str = "immediate",
     ) -> None:
         resolved_input = _resolve_watch_input_path(watch_dir, watch_input_path)
         if not isinstance(operator_initials, str):
@@ -51,6 +53,9 @@ class DesktopSettings:
         object.__setattr__(self, "watch_recursive", bool(watch_recursive))
         object.__setattr__(self, "device_id", device_id)
         object.__setattr__(self, "operator_initials", operator_initials.strip())
+        if archive_mode not in {"immediate", "monthly"}:
+            raise ValueError("invalid_archive_mode")
+        object.__setattr__(self, "archive_mode", archive_mode)
 
     @property
     def watch_dir(self) -> str:

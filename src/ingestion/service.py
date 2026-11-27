@@ -282,7 +282,10 @@ def register_import(
     watch_input_path: str = "",
     watch_backup_path: str = "",
     source_label: str = "ingestion",
+    archive_mode: str = "immediate",
 ) -> RegisterImportResult:
+    if archive_mode not in {"immediate", "monthly"}:
+        raise IngestionError("invalid_archive_mode")
     path = Path(pdf_path)
     if not path.is_file():
         raise IngestionError(f"pdf_not_found: {path}")
@@ -329,7 +332,7 @@ def register_import(
         except Exception as exc:
             raise IngestionError(str(exc)) from exc
 
-        archive_status = ARCH_NOT_REQUIRED if source_kind == SOURCE_MANUAL else ARCH_PENDING
+        archive_status = ARCH_NOT_REQUIRED if source_kind == SOURCE_MANUAL or archive_mode == "monthly" else ARCH_PENDING
         record = create_record(
             source_kind=source_kind,
             original_path=str(path),
@@ -340,13 +343,14 @@ def register_import(
             watch_input_path=watch_input_path,
             watch_backup_path=watch_backup_path,
             archive_status=archive_status,
+            archive_mode=archive_mode,
         )
         record = update_record(
             record,
             processing_status=_map_queue_status(job.status),
             last_error=job.last_error,
         )
-        if source_kind == SOURCE_WATCH_FOLDER and job.status == "DONE":
+        if source_kind == SOURCE_WATCH_FOLDER and job.status == "DONE" and archive_mode != "monthly":
             planned = plan_archive_target(record, Path(watch_backup_path))
             record = update_record(
                 record,
@@ -416,7 +420,7 @@ def reconcile_processing_for_job(
             continue
         record = update_record(record, processing_status=proc_status, last_error=error)
         record = save_record(project_root, record)
-        if proc_status == PROC_DONE and record.source_kind == SOURCE_WATCH_FOLDER:
+        if proc_status == PROC_DONE and record.source_kind == SOURCE_WATCH_FOLDER and record.archive_mode != "monthly":
             backup = Path(record.watch_backup_path)
             if record.planned_archive_path:
                 record = maybe_archive_record(project_root, record)
@@ -437,6 +441,8 @@ def reconcile_processing_for_job(
 
 
 def maybe_archive_record(project_root: str | Path, record: ImportRecord) -> ImportRecord:
+    if record.archive_mode == "monthly":
+        return record
     if record.source_kind != SOURCE_WATCH_FOLDER:
         return record
     if record.processing_status != PROC_DONE:
@@ -463,6 +469,8 @@ def reconcile_archive_recovery(project_root: str | Path, watch_backup_path: str)
     backup_dir = Path(watch_backup_path)
     updated: list[ImportRecord] = []
     for record in list_records(project_root):
+        if record.archive_mode == "monthly":
+            continue
         if record.source_kind != SOURCE_WATCH_FOLDER:
             continue
         if record.archive_status in {ARCH_ARCHIVED, ARCH_NOT_REQUIRED}:
@@ -477,6 +485,8 @@ def retry_archive(project_root: str | Path, ingestion_id: str) -> ImportRecord:
     record = get_record(project_root, ingestion_id)
     if record is None:
         raise IngestionError(f"ingestion_not_found: {ingestion_id}")
+    if record.archive_mode == "monthly":
+        raise IngestionError("Monatsmodus: Bitte Ergebnisse > Eingang aufräumen verwenden.")
     if record.source_kind != SOURCE_WATCH_FOLDER:
         raise IngestionError("archive_retry_not_applicable")
     if record.processing_status != PROC_DONE:
@@ -508,12 +518,13 @@ def resolve_current_path(
     matches = find_by_job_and_original_path(project_root, job_id, source_path)
     if len(matches) == 1:
         record = matches[0]
-        return PathResolution(
+        from .locations import resolve_recorded_location
+        return resolve_recorded_location(project_root, PathResolution(
             source_pdf_path=record.original_path,
             current_pdf_path=record.current_path,
             ingestion_id=record.ingestion_id,
             path_status=PATH_RESOLVED,
-        )
+        ), job_id, record.content_sha256)
     if len(matches) > 1:
         return PathResolution(
             source_pdf_path=source_path,
@@ -521,12 +532,13 @@ def resolve_current_path(
             ingestion_id="",
             path_status=PATH_AMBIGUOUS,
         )
-    return PathResolution(
+    from .locations import resolve_recorded_location
+    return resolve_recorded_location(project_root, PathResolution(
         source_pdf_path=source_path,
         current_pdf_path=source_path,
         ingestion_id="",
         path_status=PATH_LEGACY,
-    )
+    ), job_id)
 
 
 def _watch_cycle_lock(project_root: str | Path) -> Path:
@@ -545,8 +557,16 @@ def run_watch_scan_cycle(
     enqueue: EnqueueCallable,
     state: StabilityScannerState | None = None,
     recursive: bool = False,
+    archive_mode: str = "immediate",
 ) -> WatchCycleResult:
-    validate_watch_path_pair(watch_input_path, watch_backup_path)
+    if archive_mode not in {"immediate", "monthly"}:
+        raise IngestionError("invalid_archive_mode")
+    if archive_mode == "monthly":
+        from .monthly_archive import _normal_roots
+        _normal_roots(watch_input_path, watch_input_path)
+        recursive = False
+    else:
+        validate_watch_path_pair(watch_input_path, watch_backup_path)
     lock_path = _watch_cycle_lock(project_root)
     if not try_acquire_exclusive(lock_path, 120.0):
         return WatchCycleResult(enabled=True, busy=True, outcomes=())
@@ -554,7 +574,7 @@ def run_watch_scan_cycle(
     scanner_state = state or StabilityScannerState()
     outcomes: list[WatchScanOutcome] = []
     try:
-        recovery = reconcile_archive_recovery(project_root, watch_backup_path)
+        recovery = () if archive_mode == "monthly" else reconcile_archive_recovery(project_root, watch_backup_path)
         watch_dir = Path(watch_input_path)
         stable_pdfs = observe_stable_pdfs(
             watch_dir,
@@ -572,6 +592,7 @@ def run_watch_scan_cycle(
                     watch_input_path=watch_input_path,
                     watch_backup_path=watch_backup_path,
                     source_label="watch-folder",
+                    archive_mode=archive_mode,
                 )
                 outcomes.append(
                     WatchScanOutcome(

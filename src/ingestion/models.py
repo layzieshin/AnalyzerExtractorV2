@@ -48,6 +48,7 @@ class ImportRecord:
     archived_at_utc: str = ""
     last_error: str = ""
     archive_error: str = ""
+    archive_mode: str = "immediate"
 
 
 @dataclass(frozen=True)

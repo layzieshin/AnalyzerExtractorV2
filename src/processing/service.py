@@ -143,7 +143,12 @@ def process_next_pending(
 def _process_claimed_job(root, config, job, wid, effective_submit, expected_sha256):
     lock_kwargs = {"claim_lock_ttl_s": config.queue_claim_lock_ttl_s, "attempt_id": job.attempt_id}
     try:
-        verify_job_content_sha256(str(root), job.job_id, claim_lock_ttl_s=config.queue_claim_lock_ttl_s)
+        source_path = job.pdf_path
+        if job.identity_binding:
+            from src.ingestion.api import verified_pdf_location
+            source_path = verified_pdf_location(root, job.pdf_path, job.content_sha256)
+        if Path(source_path).resolve() == Path(job.pdf_path).resolve():
+            verify_job_content_sha256(str(root), job.job_id, claim_lock_ttl_s=config.queue_claim_lock_ttl_s)
     except Exception as e:
         marked = mark_job_failed(
             str(root),
@@ -166,6 +171,8 @@ def _process_claimed_job(root, config, job, wid, effective_submit, expected_sha2
         # case retry must carry the claimed identity to the real parser copy;
         # never fall back to a path-only call after a TypeError.
         source_binding = {"expected_sha256": job.content_sha256} if expected_sha256 is not None or job.identity_binding else {}
+        if Path(source_path).resolve() != Path(job.pdf_path).resolve():
+            source_binding["source_pdf_path"] = source_path
         bound = job.identity_binding
         res = effective_submit(
             job.pdf_path,

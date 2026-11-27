@@ -238,16 +238,27 @@ class _SettingsViewLogicStub:
         self._var_watch_input = _FakeVar("")
         self._var_watch_backup = _FakeVar("")
         self._var_watch_recursive = _FakeVar(False)
+        self._var_archive_mode = _FakeVar("immediate")
         self._var_sqlite = _FakeVar("")
         self._var_device = _FakeVar("")
         self._var_operator_initials = _FakeVar("")
         self._device_combo = SimpleNamespace(configure=lambda **_k: None)
         self._lbl_timing = SimpleNamespace(configure=lambda **_k: None)
+        def mode_control():
+            options = {}
+            return SimpleNamespace(configure=lambda **values: options.update(values), options=options)
+        self._backup_entry = mode_control()
+        self._backup_pick = mode_control()
+        self._backup_clear = mode_control()
+        self._recursive_check = mode_control()
+        self._archive_hint = mode_control()
+        self._schedule_layout = lambda: None
         for method_name in (
             "_on_field_edited",
             "is_dirty",
             "mark_saved_generation",
             "_apply_settings_values",
+            "_archive_mode_changed",
             "_render_devices",
             "_render_timing",
             "render_settings",
@@ -2563,6 +2574,26 @@ def test_settings_view_normalizes_legacy_excel_to_sqlite_on_save() -> None:
     SettingsView._apply_settings_values(view, _sample_settings_namespace(output_mode="excel"))
     assert not hasattr(view, "_var_excel_after_validation")
     assert SettingsView.collect_settings(view, device_id_map={}).output_mode == "sqlite"
+
+
+def test_settings_view_mode_change_uses_real_callback_and_preserves_unsaved_generation() -> None:
+    view = _make_settings_view_logic_stub()
+    SettingsView._apply_settings_values(view, _sample_settings_namespace(archive_mode="monthly"))
+    controls = (view._backup_entry, view._backup_pick, view._backup_clear, view._recursive_check)
+    assert view._var_archive_mode.get() == "monthly" and not view.is_dirty()
+    assert all(control.options["state"] == "disabled" for control in controls)
+    assert "Altimporte" in view._archive_hint.options["text"]
+    saved_generation = view.edit_generation
+    view._var_archive_mode.set("immediate")
+    view._archive_mode_changed()
+    view.mark_saved_generation(saved_generation)
+    assert view.is_dirty() and view.edit_generation > saved_generation
+    assert all(control.options["state"] == "normal" for control in controls)
+    collected = SettingsView.collect_settings(view, device_id_map={})
+    assert collected.archive_mode == "immediate" and collected.output_mode == "sqlite"
+    SettingsView.render_settings(view, _sample_settings_namespace(archive_mode="monthly"), devices=(),
+        timing=WatchTimingSettings(scan_interval_s=3.0, stable_window_s=2.0))
+    assert view._var_archive_mode.get() == "immediate" and view.is_dirty()
 
 
 def test_settings_view_clean_first_render_none_device_id_falls_back_to_first_active() -> None:

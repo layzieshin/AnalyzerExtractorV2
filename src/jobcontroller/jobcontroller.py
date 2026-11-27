@@ -31,23 +31,33 @@ class JobController:
         device_id: str | None = None,
         *,
         expected_sha256: str | None = None,
+        source_pdf_path: str | None = None,
     ):
         options = {"output_mode": output_mode, "sqlite_path": sqlite_path, "lock_ttl_s": lock_ttl_s,
                    "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms, "sqlite_retry_count": sqlite_retry_count,
                    "sqlite_retry_sleep_s": sqlite_retry_sleep_s, "device_id": device_id}
         if expected_sha256 is None:
+            if source_pdf_path is not None:
+                return self._result("FAILED", "", pdf_path, {"error": "relocated_source_requires_full_sha256"})
             return self._submit_pipeline(pdf_path, project_root, **options)
         if not isinstance(expected_sha256, str):
             return self._result("FAILED", "", pdf_path, {"error": "expected_sha256_invalid"})
         expected = expected_sha256.lower()
         if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
             return self._result("FAILED", "", pdf_path, {"error": "expected_sha256_invalid"})
+        if source_pdf_path is not None:
+            from src.ingestion.api import verified_pdf_location
+            try:
+                if self._path_key(verified_pdf_location(project_root, pdf_path, expected)) != self._path_key(source_pdf_path):
+                    raise ValueError("relocated_source_unproven")
+            except (OSError, RuntimeError, ValueError):
+                return self._result("FAILED", expected[:16], pdf_path, {"error": "relocated_source_unproven"})
         # Capture before even an already-DONE decision. The live pathname is
         # never the parser source of a SHA-bound attempt, including A→B→A.
         with tempfile.TemporaryDirectory(prefix="arev2-bound-processing-source-") as temporary:
             snapshot = Path(temporary) / "source.pdf"
             try:
-                shutil.copyfile(pdf_path, snapshot)
+                shutil.copyfile(source_pdf_path or pdf_path, snapshot)
             except FileNotFoundError:
                 return self._result("FAILED", expected[:16], pdf_path, {"error": "source_changed_since_ingest"})
             except OSError as exc:
@@ -55,7 +65,7 @@ class JobController:
             if not self._matches_source_sha(snapshot, expected):
                 return self._result("FAILED", expected[:16], pdf_path, {"error": "source_changed_since_ingest"})
             return self._submit_pipeline(pdf_path, project_root, **options,
-                source_snapshot=snapshot, expected_sha256=expected)
+                source_snapshot=snapshot, expected_sha256=expected, source_current_path=source_pdf_path)
 
     def _submit_pipeline(
         self,
@@ -71,18 +81,20 @@ class JobController:
         *,
         source_snapshot: Path | None = None,
         expected_sha256: str | None = None,
+        source_current_path: str | None = None,
     ):
         root = Path(project_root)
         pdf = Path(pdf_path)
+        live_source = Path(source_current_path or pdf_path)
         try:
             mode = self._normalize_output_mode(output_mode)
         except Exception as e:
             return self._result("FAILED", "", str(pdf), {"error": str(e)})
 
         if source_snapshot is not None and (not self._matches_source_sha(source_snapshot, expected_sha256)
-                                            or not self._matches_source_sha(pdf, expected_sha256)):
+                                            or not self._matches_source_sha(live_source, expected_sha256)):
             return self._result("FAILED", expected_sha256[:16], str(pdf), {"error": "source_changed_since_ingest"})
-        if not pdf.exists():
+        if not live_source.exists():
             return self._result("FAILED", "", str(pdf), {"error": "pdf_not_found"})
 
         pdf_sha256 = expected_sha256 if source_snapshot is not None else self._sha256_file(pdf)
@@ -147,7 +159,7 @@ class JobController:
 
         try:
             # Recheck under the pipeline lock without migrating frozen evidence.
-            if source_snapshot is not None and not self._matches_source_sha(pdf, expected_sha256):
+            if source_snapshot is not None and not self._matches_source_sha(live_source, expected_sha256):
                 return self._result("FAILED", job_id, str(pdf), {"error": "source_changed_since_ingest"})
             if binding:
                 current_binding = list_assay_identity_job_bindings(str(root)).get(job_id)
@@ -345,7 +357,7 @@ class JobController:
                     self._plan_assay(rec, ruleset, write_item, "not_required")
                 )
 
-            if self._sha256_file(pdf) != pdf_sha256:
+            if self._sha256_file(live_source) != pdf_sha256:
                 raise RuntimeError("source_pdf_changed_during_processing")
             if Path(index_path).read_bytes() != index_bytes:
                 raise RuntimeError("rules_index_changed_during_processing")

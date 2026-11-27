@@ -22,16 +22,20 @@ class WatchdogService:
         scan_interval_s: float = 3.0,
         stable_window_s: float = 1.0,
         watch_backup_path: str = "",
+        archive_mode: str = "immediate",
     ) -> None:
         self.project_root = project_root
         self.watch_dir = Path(watch_dir)
         self.scan_interval_s = scan_interval_s
         self.stable_window_s = stable_window_s
         self.watch_backup_path = watch_backup_path
+        if archive_mode not in {"immediate", "monthly"}:
+            raise IngestionError("invalid_archive_mode")
+        self.archive_mode = archive_mode
         self._scanner_state = StabilityScannerState()
 
     def scan_once(self) -> List[QueueJob]:
-        if not str(self.watch_backup_path or "").strip():
+        if self.archive_mode != "monthly" and not str(self.watch_backup_path or "").strip():
             raise IngestionError("watch_backup_path_required")
 
         created: List[QueueJob] = []
@@ -59,6 +63,7 @@ class WatchdogService:
                 watch_input_path=str(self.watch_dir),
                 watch_backup_path=self.watch_backup_path,
                 source_label="watchdog",
+                **({"archive_mode": "monthly"} if self.archive_mode == "monthly" else {}),
             )
 
         for job in list_jobs(self.project_root):

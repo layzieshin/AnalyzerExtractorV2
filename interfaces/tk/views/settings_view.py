@@ -136,6 +136,13 @@ class SettingsView(ttk.Frame):
         ttk.Label(body, text="Änderungen werden erst mit „Einstellungen speichern“ übernommen.", style="Settings.Muted.TLabel").pack(anchor="w", pady=(0, 12))
         self._var_watch_enabled = tk.BooleanVar(value=False)
         ttk.Checkbutton(body, text="Automatischen Ordnerimport aktivieren", variable=self._var_watch_enabled, style="Settings.TCheckbutton").pack(anchor="w")
+        self._var_archive_mode = tk.StringVar(value="immediate")
+        mode = ttk.Frame(body, style="CardInner.TFrame")
+        mode.pack(fill="x", pady=(8, 0))
+        ttk.Radiobutton(mode, text="Sofortarchiv (bisheriger Ablauf)", variable=self._var_archive_mode, value="immediate",
+                        command=self._archive_mode_changed).pack(anchor="w")
+        ttk.Radiobutton(mode, text="Monatsarchiv · später unter Ergebnisse aufräumen", variable=self._var_archive_mode, value="monthly",
+                        command=self._archive_mode_changed).pack(anchor="w")
         self._path_fields = ttk.Frame(body, style="CardInner.TFrame")
         self._path_fields.pack(fill="x", pady=(12, 8))
         self._path_fields.columnconfigure(0, weight=1, uniform="paths")
@@ -160,11 +167,20 @@ class SettingsView(ttk.Frame):
         self._archive_hint = ttk.Label(self._backup_field, text="Bei automatischem Ordnerimport erforderlich.", style="Settings.Muted.TLabel", wraplength=420)
         self._archive_hint.pack(anchor="w")
         self._var_watch_recursive = tk.BooleanVar(value=False)
-        ttk.Checkbutton(body, text="Unterordner einbeziehen", variable=self._var_watch_recursive, style="Settings.TCheckbutton").pack(anchor="w", pady=(4, 12))
+        self._recursive_check = ttk.Checkbutton(body, text="Unterordner einbeziehen (nur Sofortarchiv)", variable=self._var_watch_recursive, style="Settings.TCheckbutton")
+        self._recursive_check.pack(anchor="w", pady=(4, 12))
         ttk.Label(body, text="Initialen als Vorschlag", style="Settings.Muted.TLabel").pack(anchor="w", pady=(0, 5))
         self._var_operator_initials = tk.StringVar()
         ttk.Entry(body, textvariable=self._var_operator_initials, width=16, style="Settings.TEntry", font=("Segoe UI", 9)).pack(anchor="w")
         ttk.Label(body, text="Vorschlag für die Ergebnis-Validierung. Keine Benutzerverwaltung.", style="Settings.Muted.TLabel").pack(anchor="w", pady=(5, 8))
+
+    def _archive_mode_changed(self):
+        monthly = self._var_archive_mode.get() == "monthly"
+        for widget in (self._backup_entry, self._backup_pick, self._backup_clear, self._recursive_check):
+            widget.configure(state="disabled" if monthly else "normal")
+        self._archive_hint.configure(text=("Monatsziel ist der Eingang selbst (YYYY/MM_Monat/res); kein Sofortarchiv und kein Unterordnerscan. "
+            "Bereits registrierte Altimporte behalten ihre bestätigte Sofortarchivroute." if monthly else "Bei automatischem Ordnerimport erforderlich."))
+        self._schedule_layout()
 
     def _build_devices_tab(self, body: ttk.Frame) -> None:
         heading = ttk.Frame(body, style="CardInner.TFrame")
@@ -386,6 +402,7 @@ class SettingsView(ttk.Frame):
             self._var_watch_input,
             self._var_watch_backup,
             self._var_watch_recursive,
+            self._var_archive_mode,
             self._var_sqlite,
             self._var_device,
             self._var_operator_initials,
@@ -404,6 +421,8 @@ class SettingsView(ttk.Frame):
             self._var_watch_input.set(settings.watch_input_path)
             self._var_watch_backup.set(settings.watch_backup_path)
             self._var_watch_recursive.set(settings.watch_recursive)
+            self._var_archive_mode.set(getattr(settings, "archive_mode", "immediate"))
+            self._archive_mode_changed()
             self._var_sqlite.set(settings.sqlite_path)
             self._var_operator_initials.set(str(getattr(settings, "operator_initials", "") or ""))
         finally:
@@ -477,6 +496,7 @@ class SettingsView(ttk.Frame):
             watch_input_path=self._var_watch_input.get().strip(),
             watch_backup_path=self._var_watch_backup.get().strip(),
             watch_recursive=bool(self._var_watch_recursive.get()),
+            archive_mode=self._var_archive_mode.get(),
             device_id=device_id or None,
             operator_initials=self._var_operator_initials.get().strip(),
         )
