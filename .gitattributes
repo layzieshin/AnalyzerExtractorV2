@@ -1,0 +1,12 @@
+# Preserve the approved byte identity of these existing Windows rules. Newly
+# authored rules in this release already have their approved LF representation.
+"rules/Anti-PR3-hn-hr IgG.json" text eol=crlf
+"rules/Anti-MPO IgG.json" text eol=crlf
+"rules/Anti-Nucleosomes IgG.json" text eol=crlf
+"rules/ANA Screen IgG.json" text eol=crlf
+"rules/Rheumatoid Factor IgG.json" text eol=crlf
+"rules/Rheumatoid Factor IgM.json" text eol=crlf
+"rules/Anti-DFS70 IgG.json" text eol=crlf
+"rules/Anti-TPO IgG.json" text eol=crlf
+"rules/Rheumatoid Factor IgA.json" text eol=crlf
+"rules/Anti-ENA PoolPlus IgG.json" text eol=crlf
