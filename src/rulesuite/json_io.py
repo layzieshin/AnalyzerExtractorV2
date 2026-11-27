@@ -42,7 +42,12 @@ def _read_json_object(path: Path) -> Dict[str, Any]:
 
 
 def _safe_key(assay_key: str) -> str:
-    return assay_key.replace("(", "").replace(")", "").replace("/", "_")
+    key = str(assay_key)
+    cleaned = key.replace("(", "").replace(")", "")
+    if (not cleaned.strip() or any(char in key for char in ("/", "\\", ":", "\x00"))
+            or ".." in key or cleaned in {".", ".."}):
+        raise RuleSuiteError("path_outside_allowed_directory: invalid_assay_key")
+    return cleaned
 
 
 def _safe_filename(name: str) -> str:

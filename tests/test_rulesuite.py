@@ -3664,3 +3664,19 @@ def test_discard_draft_rejects_parent_junction_or_symlink_without_touching_targe
         # Only the explicit test redirect is removed, never its target tree.
         drafts.rmdir() if os.name == "nt" else drafts.unlink()
         foreign.rename(drafts)
+
+
+@pytest.mark.parametrize("identifier", ["()", " ", ".", "..", "/", "\\", ":", "\x00"])
+def test_draft_filename_key_rejects_non_identifiers(identifier):
+    from src.rulesuite.errors import RuleSuiteError
+    from src.rulesuite.json_io import _safe_key
+
+    with pytest.raises(RuleSuiteError, match="invalid_assay_key"):
+        _safe_key(identifier)
+
+
+def test_draft_filename_key_preserves_valid_assay_identity():
+    from src.rulesuite.json_io import _safe_key
+
+    assert _safe_key("(238a)") == "238a"
+    assert _safe_key("DEMO-1") == "DEMO-1"
