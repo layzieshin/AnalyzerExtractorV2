@@ -29,6 +29,7 @@ def create_desktop_services(project_root: str | Path) -> DesktopAppServices:
         results=results,
         rules=RuleSuiteController(root, settings_provider=provider, authoring_source_reader=results._authoring_sources,
                                   identity_job_retry=extraction.retry_identity_job,
+                                  identity_source_location=extraction.identity_pdf_location,
                                   identity_jobs_reader=lambda: extraction.list_processing_items(create_missing=False)),
         settings=settings,
     )

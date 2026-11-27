@@ -31,6 +31,16 @@ Der direkte RuleSuite-Arbeitsplatz nutzt ein Feld-/Markierungsraster, einen mitt
 - Ergebnisvalidation (append-only): `src/resultvalidation/api.py`
 - Runtime/Pfade: `src/runtime/api.py`
 
+Das optionale Monatsarchiv (2.4.0) bleibt beim Ingestion-Owner. `ResultsController`
+liefert storegebundene PDF-/SQLite-/Validierungsnachweise, Ingestion erstellt
+schreibfreie Vorschauen und führt die bestätigten Kopier-/Entfernungsschritte mit
+exklusivem Journal und Wiederaufnahme aus. Der Monatsmodus scannt nur lose
+Dateien; Eingang und Archivstamm dürfen identisch sein. Verifizierte neue
+PDF-Orte stehen separat unter `storage/ingestion/locations`; historische
+Ergebnisse, Jobbelege, Regelprüfnachweise und Originalpfade bleiben unverändert.
+Tk orchestriert diese Datei-/PDF-Arbeit ausschließlich über Hintergrundaufträge.
+Bedienvertrag: [Monatsarchiv und Wiederfinden](MONTHLY_ARCHIVE.md).
+
 ## SQLite-Ausgabe, Validierung und historische Evidenz (Paket 3a)
 
 Owner bleibt `src/jobcontroller`; es gibt keinen neuen Persistenzowner, CLI-Pfad oder Planstand.

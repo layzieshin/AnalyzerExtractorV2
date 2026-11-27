@@ -85,12 +85,30 @@ class RuleSuiteController:
     def __init__(self, project_root: str | Path, *, settings_provider: Callable[[], DesktopSettings] | None = None,
                  authoring_source_reader: Callable[..., Iterator[dict[str, Any]]] | None = None,
                  identity_job_retry: Callable[..., Any] | None = None,
-                 identity_jobs_reader: Callable[[], Any] | None = None) -> None:
+                 identity_jobs_reader: Callable[[], Any] | None = None,
+                 identity_source_location: Callable[..., str] | None = None) -> None:
         self._project_root = Path(project_root).resolve()
         self._settings_provider = settings_provider
         self._authoring_source_reader = authoring_source_reader
         self._identity_job_retry = identity_job_retry
         self._identity_jobs_reader = identity_jobs_reader
+        self._identity_source_location = identity_source_location
+
+    def _identity_current_path(self, case, source, *, search_path=None, context_guard=None):
+        if self._identity_source_location is None:
+            if search_path:
+                raise RuleSuiteError("PDF-Wiederfinden ist in diesem Kontext nicht verfügbar.")
+            return source["pdf_path"]
+        return self._identity_source_location(source["job_id"], pdf_path=source["pdf_path"],
+            expected_sha256=source["pdf_sha256"], device_id=source["device_id"], store_path=case["store_path"], search_path=search_path,
+            **({"context_guard": context_guard} if context_guard is not None else {}))
+
+    def find_identity_pdf(self, case_id, source_id, search_path, *, store_path, expected_identity_token, context_guard=None):
+        case = self._identity_action_case(case_id, store_path=store_path, expected_identity_token=expected_identity_token)
+        source = next((row for row in case["sources"] if row["source_id"] == source_id), None)
+        if source is None:
+            raise RuleSuiteError("identity_case_source_selection_changed")
+        return self._identity_current_path(case, source, search_path=search_path, context_guard=context_guard)
 
     @property
     def project_root(self) -> Path:
@@ -264,7 +282,10 @@ class RuleSuiteController:
                         status = "Zuordnung offen" if case["status"] != "activated" else "Wiederholung offen"
                 elif self._identity_jobs_reader is not None and queued is None and not done:
                     message = "Kein ursprünglicher Importauftrag vorhanden. Die unveränderte PDF über den normalen Import erneut einreichen."
-                available = Path(source["pdf_path"]).is_file()
+                try:
+                    available = Path(self._identity_current_path(case, source)).is_file()
+                except (OSError, RuntimeError, ValueError):
+                    available = False
                 if not available and not done:
                     message = "Die ursprüngliche PDF ist nicht mehr verfügbar."
                 sources.append(AssayIdentitySourceItem(source["source_id"], job_id, source["pdf_path"],
@@ -297,11 +318,11 @@ class RuleSuiteController:
         data = self.load_draft(draft)
         if data.get("assay_key") != case["assay_key"]:
             raise RuleSuiteError("identity_case_draft_identity_changed")
-        selected = next((source for source in case["sources"] if source["source_id"] == source_id), None) if source_id else next((source for source in case["sources"] if Path(source["pdf_path"]).is_file()), None)
+        selected = next((source for source in case["sources"] if source["source_id"] == source_id), None) if source_id else next(iter(case["sources"]), None)
         pdf_path, message = "", "Test-PDF bitte im Arbeitsplatz wählen."
         if selected is not None:
             try:
-                path, _payload, sha = self._rule_pdf_source(selected["pdf_path"])
+                path, _payload, sha = self._rule_pdf_source(self._identity_current_path(case, selected))
                 if sha != selected["pdf_sha256"]:
                     raise RuleSuiteError("identity_case_source_changed")
                 pdf_path, message = str(path), ""
@@ -317,7 +338,7 @@ class RuleSuiteController:
         source = next((row for row in case["sources"] if row["source_id"] == source_id), None)
         if source is None:
             raise RuleSuiteError("identity_case_source_selection_changed")
-        path, _payload, sha = self._rule_pdf_source(source["pdf_path"])
+        path, _payload, sha = self._rule_pdf_source(self._identity_current_path(case, source))
         if sha != source["pdf_sha256"]:
             raise RuleSuiteError("identity_case_source_changed")
         open_path(path, opener=path_opener)

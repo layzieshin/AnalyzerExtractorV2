@@ -17,7 +17,7 @@ def _same_json(left, right):
     return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(right, sort_keys=True, allow_nan=False)
 
 
-def verify_completed_job(project_root, job_id, *, expected_sha256, expected_pdf_path, store_path, device_id):
+def verify_completed_job(project_root, job_id, *, expected_sha256, expected_pdf_path, store_path, device_id, include_outputs=False):
     """Return an honest receipt without importing or changing historical data.
 
     Inserted/already-persisted rows and real duplicate candidates are supported.
@@ -96,7 +96,11 @@ def verify_completed_job(project_root, job_id, *, expected_sha256, expected_pdf_
             if duplicate and (row.get("existing_run_id") != output["existing_run_id"]
                               or output["existing_run_id"] not in evidence["runs"]):
                 return result
-        return {"complete": True, "reason": "", "kind": "sqlite_plan" if plan is not None else "legacy_sqlite_receipt"}
+        result = {"complete": True, "reason": "", "kind": "sqlite_plan" if plan is not None else "legacy_sqlite_receipt"}
+        if include_outputs:
+            result.update(run_ids=sorted({output["run_id"] for _, output in outputs if output["status"] != "duplicate_pending"}),
+                          duplicate_pending=any(output["status"] == "duplicate_pending" for _, output in outputs))
+        return result
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return result
     except Exception as exc:

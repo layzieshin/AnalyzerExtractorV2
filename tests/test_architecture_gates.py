@@ -52,6 +52,7 @@ EXPECTED_PHASE3_UI_FILES = frozenset(
         "interfaces/tk/widgets/__init__.py",
         "interfaces/tk/widgets/common.py",
         "interfaces/tk/widgets/dialogs.py",
+        "interfaces/tk/widgets/monthly_archive_dialog.py",
     }
 )
 APPLICATION_ROOT = PROJECT_ROOT / "src" / "application"

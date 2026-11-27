@@ -10,10 +10,11 @@ from interfaces.tk.widgets.common import Card, EmptyState, MultiSelectFilter, Sc
 class ChangesView(ttk.Frame):
     """Real store-bound ID cases, using only immutable application items."""
 
-    def __init__(self, master, *, on_refresh, on_confirm, on_open_editor, on_open_pdf, on_retry):
+    def __init__(self, master, *, on_refresh, on_confirm, on_open_editor, on_open_pdf, on_retry, on_find_pdf=None):
         super().__init__(master, style="Content.TFrame")
         self._on_refresh, self._on_confirm = on_refresh, on_confirm
         self._on_open_editor, self._on_open_pdf, self._on_retry = on_open_editor, on_open_pdf, on_retry
+        self._on_find_pdf = on_find_pdf or (lambda: None)
         self._items, self._by_id, self._store_path = (), {}, ""
         self._selected_id, self._source_id, self._selection_generation = "", "", 0
         self._busy, self._layout_id, self._compact = False, None, None
@@ -108,8 +109,12 @@ class ChangesView(ttk.Frame):
         self.tree_sources.bind("<Double-1>", lambda _e: self._on_open_pdf() if self.selected_source() and self.selected_source().available else None)
         self._source_context = ttk.Label(self._detail_body, style="Changes.Muted.TLabel")
         self._source_context.pack(fill="x", pady=(6, 7))
-        self.btn_open_pdf = ttk.Button(self._detail_body, text="PDF öffnen", command=self._on_open_pdf, style="Changes.TButton")
-        self.btn_open_pdf.pack(anchor="w", pady=(0, 14))
+        pdf_actions = ttk.Frame(self._detail_body, style="CardInner.TFrame")
+        pdf_actions.pack(fill="x", pady=(0, 14))
+        self.btn_open_pdf = ttk.Button(pdf_actions, text="PDF öffnen", command=self._on_open_pdf, style="Changes.TButton")
+        self.btn_open_pdf.pack(side="left")
+        self.btn_find_pdf = ttk.Button(pdf_actions, text="PDF wiederfinden", command=self._on_find_pdf, style="Changes.TButton")
+        self.btn_find_pdf.pack(side="left", padx=(8, 0))
         self._assignment = ttk.Frame(self._detail_body, style="CardInner.TFrame")
         ttk.Label(self._assignment, text="Bekannten Assay ausdrücklich zuordnen", style="Changes.Title.TLabel").pack(anchor="w", pady=(0, 6))
         self._candidate_var = tk.StringVar(self)
@@ -255,6 +260,7 @@ class ChangesView(ttk.Frame):
             button.configure(state="normal" if item and candidate and not self._busy else "disabled")
         self.btn_open_draft.configure(state="normal" if item and item.draft_path and not self._busy else "disabled")
         self.btn_open_pdf.configure(state="normal" if source and source.available and not self._busy else "disabled")
+        self.btn_find_pdf.configure(state="normal" if source and not self._busy else "disabled")
         self.btn_retry.configure(state="normal" if item and item.can_retry and not self._busy else "disabled")
 
     def invalidate_store_context(self):

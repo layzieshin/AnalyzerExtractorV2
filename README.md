@@ -1,6 +1,7 @@
 # PDF Ergebnis-Extractor (Projekt)
 
-- Projektversion: **2.0.0**; aktueller Prüf-/Freigabestand unter `docs/TESTBASELINE.md`
+- Projektversion: **2.4.0**; aktueller Prüf-/Freigabestand unter `docs/TESTBASELINE.md`
+- Neu: [Monatsarchiv und PDF wiederfinden](docs/MONTHLY_ARCHIVE.md) – **Ergebnisse → Eingang aufräumen**, optionaler Monatsmodus unter **Einstellungen → Import**. Der bisherige Sofortarchivmodus bleibt kompatibel.
 - Windows 11 Zielumgebung
 - `src/` ist Project Root (in PyCharm markieren)
 - Public APIs existieren ausschließlich in `src/<module>/api.py`

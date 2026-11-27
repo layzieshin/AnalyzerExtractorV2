@@ -91,6 +91,7 @@ def record_to_dict(record: ImportRecord) -> dict[str, Any]:
         "archived_at_utc": record.archived_at_utc,
         "last_error": record.last_error,
         "archive_error": record.archive_error,
+        "archive_mode": record.archive_mode,
     }
 
 
@@ -109,6 +110,8 @@ def _normalize_sha256(value: str, field: str = "content_sha256") -> str:
 
 
 def record_from_dict(data: dict[str, Any]) -> ImportRecord:
+    if data.get("archive_mode", "immediate") not in {"immediate", "monthly"}:
+        raise IngestionStoreError("invalid_archive_mode")
     if int(data.get("schema_version", 0)) != SCHEMA_VERSION:
         raise IngestionStoreError(f"unsupported_schema_version: {data.get('schema_version')}")
     required = (
@@ -187,6 +190,7 @@ def record_from_dict(data: dict[str, Any]) -> ImportRecord:
         archived_at_utc=str(data.get("archived_at_utc") or ""),
         last_error=str(data.get("last_error") or ""),
         archive_error=str(data.get("archive_error") or ""),
+        archive_mode=str(data.get("archive_mode") or "immediate"),
     )
 
 
@@ -317,7 +321,10 @@ def create_record(
     watch_input_path: str = "",
     watch_backup_path: str = "",
     archive_status: str | None = None,
+    archive_mode: str = "immediate",
 ) -> ImportRecord:
+    if archive_mode not in {"immediate", "monthly"}:
+        raise IngestionStoreError("invalid_archive_mode")
     now = _now_iso()
     resolved = str(Path(original_path).resolve(strict=False))
     fingerprint = compute_fingerprint(
@@ -342,6 +349,7 @@ def create_record(
         updated_at_utc=now,
         processing_status=PROC_REGISTERED,
         archive_status=archive_status,
+        archive_mode=archive_mode,
         file_fingerprint=fingerprint,
         file_size=file_size,
         file_mtime_ns=file_mtime_ns,

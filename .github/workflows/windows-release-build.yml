@@ -55,14 +55,14 @@ jobs:
           dist = root / 'packaging/dist_output'
           delivery = pathlib.Path(os.environ['RUNNER_TEMP'], 'release-delivery')
           delivery.mkdir()
-          name = 'AnalyzerResultExtractorV2-v2.3.0-windows-x64.zip'
+          name = 'AnalyzerResultExtractorV2-v2.4.0-windows-x64.zip'
           package = delivery / name
           shutil.copyfile(dist / 'AnalyzerResultExtractorV2.zip', package)
           with zipfile.ZipFile(package) as z:
               assert z.testzip() is None
               prefix = 'AnalyzerResultExtractorV2/'
               info = json.loads(z.read(prefix+'build-info.json'))
-              assert info['version'] == '2.3.0' and info['base_commit'] == os.environ['GITHUB_SHA'] and info['dirty_snapshot'] is False, info['source_identity']
+              assert info['version'] == '2.4.0' and info['base_commit'] == os.environ['GITHUB_SHA'] and info['dirty_snapshot'] is False, info['source_identity']
               assert z.getinfo(prefix+'AnalyzerResultExtractorV2.exe').file_size > 0
               index = json.loads(z.read(prefix+'rules/index.json'))['assays']
               files = {r['ruleset_file'] for r in index}

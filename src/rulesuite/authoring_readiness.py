@@ -458,10 +458,18 @@ def _verify_authoring_proof_v2(root: Path, key: str, draft: Path, proof: Dict[st
         if outcome.get("field_keys") != fields or outcome.get("field_states") != {field: "extracted" for field in fields}:
             errors.append(f"authoring_proof_{label}_fields_incomplete")
         try:
-            path = _require_pdf(str(outcome.get("path") or ""), label)
+            from src.ingestion.api import verified_pdf_location
+            original = str(outcome.get("path") or "")
+            source = outcome.get("source", {}) if label == "secondary" else {}
+            if source.get("kind") in {"current_import", "result_history"} and source.get("original_path"):
+                if source.get("sha256") != outcome.get("sha256"):
+                    errors.append("authoring_proof_source_changed")
+                else:
+                    original = source["original_path"]
+            path = Path(verified_pdf_location(root, original, str(outcome.get("sha256") or "")))
             if _sha256_file(path) != outcome.get("sha256"):
                 errors.append(f"authoring_proof_{label}_changed")
-        except (OSError, AuthoringReadinessError):
+        except (OSError, RuntimeError, ValueError):
             errors.append(f"authoring_proof_{label}_missing")
     if proof.get("secondary", {}).get("status") == "passed":
         if proof["secondary"].get("sha256") == proof.get("primary", {}).get("sha256"):
@@ -485,6 +493,13 @@ def _verify_source_state(root: Path, source: Dict[str, Any]) -> list[str]:
         return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     try:
+        from src.ingestion.api import verified_pdf_location
+        if source.get("ingestion_id"):
+            known_record = get_import_record(root, source["ingestion_id"])
+            if known_record is not None and resolve_current_path(root, known_record.processing_job_id, known_record.original_path).path_status == "ambiguous":
+                return ["authoring_proof_source_changed"]
+        effective_path = Path(verified_pdf_location(root, source.get("original_path") or source["path"], source["sha256"])).resolve()
+        relocated = effective_path != Path(source["path"]).resolve()
         if source["kind"] == "current_import" and not source.get("ingestion_id"):
             return ["authoring_proof_source_invalid"]
         if source.get("ingestion_id"):
@@ -492,15 +507,16 @@ def _verify_source_state(root: Path, source: Dict[str, Any]) -> list[str]:
             if record is None or record.processing_job_id != source.get("job_id") or str(record.content_sha256).lower() != source.get("sha256"):
                 return ["authoring_proof_source_changed"]
             path, original = Path(record.current_path).resolve(), Path(record.original_path).resolve()
-            if path != Path(source["path"]).resolve() or original != Path(source.get("original_path", "")).resolve():
+            relocated = effective_path != path
+            if (not relocated and path != Path(source["path"]).resolve()) or original != Path(source.get("original_path", "")).resolve():
                 return ["authoring_proof_source_changed"]
-            if record.archive_status not in {"NOT_REQUIRED", "PENDING"} or record.archived_at_utc or (path != original and record.archive_status != "NOT_REQUIRED"):
+            if not relocated and (record.archive_status not in {"NOT_REQUIRED", "PENDING"} or record.archived_at_utc or (path != original and record.archive_status != "NOT_REQUIRED")):
                 return ["authoring_proof_source_changed"]
-            if any(raw and (path == Path(raw).resolve() or path.is_relative_to(Path(raw).resolve()))
+            if not relocated and any(raw and (path == Path(raw).resolve() or path.is_relative_to(Path(raw).resolve()))
                    for raw in (record.watch_backup_path, record.archive_target, record.planned_archive_path)):
                 return ["authoring_proof_source_changed"]
             resolved = resolve_current_path(root, record.processing_job_id, record.original_path)
-            if resolved.path_status != "resolved" or resolved.ingestion_id != source["ingestion_id"] or Path(resolved.current_pdf_path).resolve() != Path(source["path"]).resolve():
+            if resolved.path_status != "resolved" or resolved.ingestion_id != source["ingestion_id"] or Path(resolved.current_pdf_path).resolve() != effective_path:
                 return ["authoring_proof_source_changed"]
         if source["kind"] == "result_history":
             spec = {"driver": "sqlite", "path": source["store_path"]}
@@ -512,7 +528,7 @@ def _verify_source_state(root: Path, source: Dict[str, Any]) -> list[str]:
                 return ["authoring_proof_source_changed"]
             original = row["original_result"]
             resolved = resolve_current_path(root, row["job_id"], original["pdf_path"])
-            if resolved.path_status == "ambiguous" or resolved.ingestion_id != source.get("ingestion_id", "") or Path(resolved.current_pdf_path).resolve() != Path(source["path"]).resolve():
+            if resolved.path_status in {"ambiguous", "unavailable"} or resolved.ingestion_id != source.get("ingestion_id", "") or Path(resolved.current_pdf_path).resolve() != effective_path:
                 return ["authoring_proof_source_changed"]
             if str(original.get("pdf_sha256") or "").lower() != source["sha256"]:
                 return ["authoring_proof_source_changed"]

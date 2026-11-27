@@ -1680,6 +1680,8 @@ class AnalyzerDesktopApp(tk.Tk):
             on_back=self._show_results_list,
             on_occurrence_selected=lambda _occ_id: None,
             on_open_validation=self._open_selected_validation,
+            on_monthly_archive=self._open_monthly_archive,
+            on_find_pdf=self._find_report_pdf,
         )
         self._views["statistics"] = StatisticsView(
             content,
@@ -1693,7 +1695,7 @@ class AnalyzerDesktopApp(tk.Tk):
         )
         self._views["changes"] = ChangesView(content, on_refresh=self.refresh_current_view,
             on_confirm=self._confirm_identity_case, on_open_editor=self._open_identity_editor,
-            on_open_pdf=self._open_identity_pdf, on_retry=self._retry_identity_case)
+            on_open_pdf=self._open_identity_pdf, on_retry=self._retry_identity_case, on_find_pdf=self._find_identity_pdf)
         self._views["validation"] = ValidationView(
             content,
             on_refresh=self.refresh_current_view,
@@ -2817,6 +2819,117 @@ class AnalyzerDesktopApp(tk.Tk):
         self._report_detail_request = None
         self._report_detail_generation = self.__dict__.get("_report_detail_generation", 0) + 1
         self._views["results"].show_list()
+
+    def _pick_pdf_search_path(self):
+        folder = messagebox.askyesnocancel("PDF wiederfinden", "In einem Ordner einschließlich Unterordnern suchen?\n\nJa: Ordner wählen · Nein: konkrete PDF wählen", parent=self)
+        if folder is None:
+            return ""
+        return (filedialog.askdirectory(parent=self, title="Ordner nach exaktem PDF-SHA durchsuchen") if folder else
+                filedialog.askopenfilename(parent=self, title="Original-PDF wiederfinden", filetypes=[("PDF", "*.pdf")]))
+
+    def _find_report_pdf(self):
+        if not self._require_services():
+            return
+        view = self._views["results"]
+        descriptor = view.current_detail_descriptor()
+        report_id, store = descriptor
+        if not report_id or not store or not self._ui_store_matches(store):
+            return
+        scope = self._refresh_scope()
+        path = self._pick_pdf_search_path()
+        if not path:
+            return
+        def current():
+            return scope == self._refresh_scope() and self._ui_store_matches(store) and view.current_detail_descriptor() == descriptor
+        def work():
+            if not current():
+                raise ValueError("Auswahl oder Ergebnisspeicher geändert. Bitte neu wählen.")
+            return self._services.results.find_report_pdf(report_id, path, store_path=store, context_guard=current)
+        self._task_runner.submit("report-pdf-find", work,
+            on_success=lambda _path: self._start_report_detail(report_id, store, selected_guard=False) if current() else None,
+            on_error=lambda exc: self._show_task_error(exc) if current() else None)
+
+    def _find_identity_pdf(self):
+        if not self._require_services():
+            return
+        view = self._views["changes"]
+        item, source = view.selected_case(), view.selected_source()
+        if item is None or source is None or not self._ui_store_matches(item.store_path):
+            return
+        scope, descriptor = self._refresh_scope(), view.selection_context()
+        path = self._pick_pdf_search_path()
+        if not path:
+            return
+        def work():
+            if not self._identity_selection_current(scope, descriptor):
+                raise ValueError("Fallauswahl geändert. Bitte neu wählen.")
+            return self._services.rules.find_identity_pdf(item.case_id, source.source_id, path,
+                store_path=item.store_path, expected_identity_token=item.identity_token,
+                context_guard=lambda: self._identity_selection_current(scope, descriptor))
+        self._task_runner.submit("identity-pdf-find", work,
+            on_success=lambda _path: self.refresh_current_view() if self._identity_selection_current(scope, descriptor) else None,
+            on_error=lambda exc: self._show_task_error(exc) if self._identity_selection_current(scope, descriptor) else None)
+
+    def _open_monthly_archive(self):
+        if not self._require_services():
+            return
+        from interfaces.tk.widgets.monthly_archive_dialog import MonthlyArchiveDialog
+        store = self._settings.sqlite_path
+        store_generation = self.__dict__.get("_store_generation", 0)
+        def valid():
+            return self.__dict__.get("_store_generation", 0) == store_generation and self._ui_store_matches(store)
+        def preview(dialog, cutoff, assignments, exceptions):
+            generation = dialog.generation
+            dialog.set_busy(True, "Dateien und echte Import-/Validierungsnachweise werden geprüft …")
+            def work():
+                if not valid():
+                    raise ValueError("Ergebnisspeicher geändert. Dialog bitte neu öffnen.")
+                return self._services.results.preview_monthly_archive(cutoff=cutoff, store_path=store,
+                    res_assignments=assignments, without_res=exceptions, context_guard=lambda: valid() and not dialog.closed)
+            def done(plan=None, error=None):
+                if not dialog.winfo_exists():
+                    return
+                dialog.set_busy(False)
+                if not valid() or dialog.generation != generation:
+                    dialog._details.configure(text="Auswahl geändert. Bitte Vorschau neu prüfen.")
+                elif error:
+                    dialog._details.configure(text=str(error))
+                else:
+                    dialog.render_preview(plan)
+            if not self._task_runner.submit("monthly-archive-preview", work,
+                on_success=lambda plan: done(plan=plan), on_error=lambda exc: done(error=exc)):
+                dialog.set_busy(False, "Eine Prüfung läuft bereits. Bitte danach erneut versuchen.")
+        def commit(dialog, plan, selected, assignments, exceptions, initials):
+            dialog.set_busy(True, "Ausgewählte Gruppen werden zuerst vollständig kopiert und geprüft …", write=True)
+            def work():
+                if not valid():
+                    raise ValueError("Ergebnisspeicher geändert. Dialog bitte neu öffnen.")
+                return self._services.results.commit_monthly_archive(plan, selected_group_ids=selected,
+                    res_assignments=assignments, without_res=exceptions, operator_initials=initials, context_guard=lambda: valid() and not dialog.closed)
+            def done(result=None, error=None):
+                if not dialog.winfo_exists():
+                    return
+                dialog.set_busy(False, str(error) if error else f"{len(result)} Gruppe(n) vollständig archiviert. Neue Vorschau möglich.")
+                dialog._invalidate()
+                if valid() and self._current_view == "results":
+                    self.refresh_current_view()
+            if not self._task_runner.submit("monthly-archive-commit", work,
+                on_success=lambda result: done(result=result), on_error=lambda exc: done(error=exc)):
+                dialog.set_busy(False, "Ein Ablagevorgang läuft bereits. Bitte dessen Abschluss abwarten.")
+        def recover(dialog):
+            if not self._show_confirm_dialog(dialog, "Wiederaufnahme", "Nur bereits bestätigte Archivvorgänge anhand ihrer exakten Quellen-/Zielbelege fortsetzen?"):
+                return
+            dialog.set_busy(True, "Vorbereitete Kopien und unveränderte Nachweise werden geprüft …", write=True)
+            def work():
+                if not valid():
+                    raise ValueError("Ergebnisspeicher geändert. Dialog bitte neu öffnen.")
+                return self._services.results.recover_monthly_archive(store_path=store, context_guard=valid)
+            if not self._task_runner.submit("monthly-archive-recovery", work,
+                on_success=lambda result: dialog.set_busy(False, f"{len(result)} Vorgang/Vorgänge vollständig abgeglichen.") if dialog.winfo_exists() else None,
+                on_error=lambda exc: dialog.set_busy(False, str(exc)) if dialog.winfo_exists() else None):
+                dialog.set_busy(False, "Eine Wiederaufnahme läuft bereits. Bitte deren Abschluss abwarten.")
+        MonthlyArchiveDialog(self, on_preview=preview, on_commit=commit, on_recover=recover,
+            initial_cutoff=datetime.now().date().isoformat(), initials=self._settings.operator_initials)
 
     def _open_report_pdf(self) -> None:
         if not self._require_services():

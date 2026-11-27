@@ -19,6 +19,7 @@ __all__ = [
     "retry_excel_export",
     "submit",
     "verify_completed_job",
+    "inspect_pdf_archive_identity",
 ]
 
 
@@ -63,6 +64,7 @@ def submit(
     device_id: str | None = None,
     *,
     expected_sha256: str | None = None,
+    source_pdf_path: str | None = None,
 ) -> JobResult:
     """Public API (JobController)
 
@@ -87,6 +89,7 @@ def submit(
         sqlite_retry_sleep_s=sqlite_retry_sleep_s,
         device_id=device_id,
         **({"expected_sha256": expected_sha256} if expected_sha256 is not None else {}),
+        **({"source_pdf_path": source_pdf_path} if source_pdf_path is not None else {}),
     )
 
 
@@ -100,11 +103,16 @@ def get_job_evidence(
         expected_pdf_sha256=expected_pdf_sha256, expected_pdf_path=expected_pdf_path, include_context=include_context)
 
 
-def verify_completed_job(project_root, job_id, *, expected_sha256, expected_pdf_path, store_path, device_id):
+def verify_completed_job(project_root, job_id, *, expected_sha256, expected_pdf_path, store_path, device_id, include_outputs=False):
     """Read-only full SQLite processing receipt; no validation or reimport."""
     from .completion import verify_completed_job as verify
     return verify(project_root, job_id, expected_sha256=expected_sha256, expected_pdf_path=expected_pdf_path,
-                  store_path=store_path, device_id=device_id)
+                  store_path=store_path, device_id=device_id, **({"include_outputs": True} if include_outputs else {}))
+
+
+def inspect_pdf_archive_identity(pdf_path, *, expected_sha256, known_assay_keys=(), project_root=None):
+    from .source_identity import inspect_pdf_archive_identity as inspect
+    return inspect(pdf_path, expected_sha256=expected_sha256, known_assay_keys=known_assay_keys, project_root=project_root)
 
 
 def processing_eligibility_error(project_root: str | Path | None, job_id: str, *, require_evidence: bool = False) -> str:

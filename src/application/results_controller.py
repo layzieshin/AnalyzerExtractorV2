@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import tempfile
 from dataclasses import asdict, replace
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -476,21 +477,74 @@ class ResultsController:
             validation_index=index,
         )
 
+    def _monthly_reader(self, spec, context_guard=None):
+        from .monthly_evidence import read_archive_evidence
+        def read(paths):
+            if context_guard is not None and not context_guard():
+                raise ValueError("Auswahl oder Speichergeneration wurde geändert.")
+            result = read_archive_evidence(self, self._capture_store(spec["path"]), paths, context_guard=context_guard)
+            if context_guard is not None and not context_guard():
+                raise ValueError("Auswahl oder Speichergeneration wurde geändert.")
+            return result
+        return read
+
+    def preview_monthly_archive(self, *, cutoff: str, input_path: str | None = None, archive_path: str | None = None,
+                                store_path: str | None = None, res_assignments=None, without_res=(), context_guard=None):
+        from src.ingestion.api import preview_monthly_archive
+        from .monthly_evidence import read_archive_evidence
+        spec = self._capture_store(store_path)
+        settings = self._settings_provider()
+        return preview_monthly_archive(self._project_root,
+            input_path=input_path if input_path is not None else settings.watch_input_path,
+            archive_path=archive_path if archive_path is not None else (settings.watch_input_path if settings.archive_mode == "monthly" else settings.watch_backup_path),
+            store_path=spec["path"], cutoff=cutoff, res_assignments=res_assignments, without_res=without_res,
+            evidence_reader=self._monthly_reader(spec, context_guard))
+
+    def commit_monthly_archive(self, preview, *, selected_group_ids=None, res_assignments=None, without_res=(), operator_initials="", context_guard=None):
+        from src.ingestion.api import commit_monthly_archive
+        from .monthly_evidence import read_archive_evidence
+        spec = self._capture_store(preview.store_path)
+        return commit_monthly_archive(self._project_root, preview, selected_group_ids=selected_group_ids,
+            res_assignments=res_assignments, without_res=without_res, operator_initials=operator_initials,
+            evidence_reader=self._monthly_reader(spec, context_guard))
+
+    def recover_monthly_archive(self, *, store_path=None, context_guard=None):
+        from src.ingestion.api import recover_monthly_archive
+        from .monthly_evidence import read_archive_evidence
+        spec = self._capture_store(store_path)
+        return recover_monthly_archive(self._project_root, store_path=spec["path"],
+            evidence_reader=self._monthly_reader(spec, context_guard))
+
+    def find_report_pdf(self, report_id, search_path, *, store_path, context_guard=None):
+        from src.ingestion.api import find_pdf_locations, register_pdf_location
+        spec = self._capture_store(store_path)
+        report = get_report_runs(spec, report_id)
+        originals = {(row.get("original_result") or row).get("pdf_path", "") for row in (report or {}).get("runs", [])}
+        hashes = {(row.get("original_result") or row).get("pdf_sha256", "") for row in (report or {}).get("runs", [])}
+        if len(originals) != 1 or len(hashes) != 1 or len(next(iter(hashes), "")) != 64:
+            raise PathOpenError("Vollständige eindeutige Originalidentität fehlt.")
+        candidates = find_pdf_locations(search_path, next(iter(hashes)))
+        if len(candidates) != 1:
+            raise PathOpenError("Keine oder mehrere bytegleiche PDFs gefunden. Bitte eine konkrete Datei wählen.")
+        self._capture_store(spec["path"])
+        return register_pdf_location(self._project_root, next(iter(originals)), next(iter(hashes)), candidates[0], context_guard=context_guard)
+
     @staticmethod
     def _metadata_hash(value: object) -> str:
         return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def _local_import_source(self, record: object, store_path: str) -> dict[str, Any] | None:
-        if record.archive_status not in {"NOT_REQUIRED", "PENDING"} or record.archived_at_utc:
+        resolved = resolve_current_path(self._project_root, record.processing_job_id, record.original_path)
+        path = Path(resolved.current_pdf_path).resolve() if resolved.current_pdf_path else Path(record.current_path).resolve()
+        relocated = path != Path(record.current_path).resolve()
+        if not relocated and (record.archive_status not in {"NOT_REQUIRED", "PENDING"} or record.archived_at_utc):
             return None
-        path = Path(record.current_path).resolve()
         original = Path(record.original_path).resolve()
-        if path != original and record.archive_status != "NOT_REQUIRED":
+        if not relocated and path != original and record.archive_status != "NOT_REQUIRED":
             return None
         for raw in (record.watch_backup_path, record.archive_target, record.planned_archive_path):
-            if raw and (path == Path(raw).resolve() or path.is_relative_to(Path(raw).resolve())):
+            if not relocated and raw and (path == Path(raw).resolve() or path.is_relative_to(Path(raw).resolve())):
                 return None
-        resolved = resolve_current_path(self._project_root, record.processing_job_id, record.original_path)
         if resolved.path_status != "resolved" or resolved.ingestion_id != record.ingestion_id or Path(resolved.current_pdf_path).resolve() != path:
             return None
         if not re.fullmatch(r"[0-9a-fA-F]{64}", record.content_sha256):
@@ -553,6 +607,15 @@ class ResultsController:
             if detail.ingestion_id:
                 record = get_import_record(self._project_root, detail.ingestion_id)
                 source = self._local_import_source(record, store_path) if record is not None else None
+            elif detail.path_status == "resolved" and path != Path(detail.pdf_path).resolve():
+                from src.ingestion.api import verified_pdf_location
+                expected = str(row.get("original_result", {}).get("pdf_sha256") or "")
+                try:
+                    verified = verified_pdf_location(self._project_root, detail.pdf_path, expected, job_id=detail.job_id)
+                    if Path(verified).resolve() == path:
+                        source = {"local": True, "path": str(path), "sha256": expected}
+                except (OSError, RuntimeError, ValueError):
+                    pass
             elif detail.path_status == "legacy_fallback" and path == Path(detail.pdf_path).resolve():
                 # Unknown archival status is not positive evidence. The known
                 # current workspace input area is the conservative legacy case.
@@ -574,7 +637,7 @@ class ResultsController:
                 continue
             if source["sha256"] != str(row.get("original_result", {}).get("pdf_sha256") or "").lower():
                 continue
-            source.update(kind="result_history", report_id=report_id, run_id=int(row["id"]), store_path=store_path, job_id=str(row.get("job_id") or ""),
+            source.update(kind="result_history", original_path=next(iter(originals)), report_id=report_id, run_id=int(row["id"]), store_path=store_path, job_id=str(row.get("job_id") or ""),
                           selection_token=str(row.get("selection_token") or ""), revision_id=int(row.get("revision_id") or 0),
                           ruleset_file=str(row.get("ruleset_file") or ""), ruleset_sha256=str(selected.get("rule_sha256") or ""),
                           source_rule_sha256=str(provenance.get("rule_sha256") or ""), source_project_root=source_root,
@@ -783,6 +846,16 @@ class ResultsController:
             raise ReportNotFoundError(f"report_not_found: {report_id}")
         if detail.path_status == "ambiguous":
             raise PathOpenError("report_pdf_ambiguous")
+        if detail.path_status == "unavailable":
+            raise PathOpenError("report_pdf_missing")
+        if len(detail.pdf_sha256 or "") == 64:
+            from src.ingestion.api import verified_pdf_source
+            try:
+                with verified_pdf_source(self._project_root, detail.pdf_path, detail.pdf_sha256, job_id=detail.job_id) as (current, _stream):
+                    open_path(current, opener=self._path_opener)
+                    return current
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise PathOpenError("PDF fehlt oder entspricht nicht dem gespeicherten Original-SHA.") from exc
         pdf_path = str(detail.current_pdf_path or detail.pdf_path or "").strip()
         if not pdf_path:
             raise PathOpenError("report_pdf_missing")
@@ -798,6 +871,22 @@ class ResultsController:
             raise PdfPreviewError("Der Bericht ist nicht mehr verfuegbar. Bitte aktualisieren.")
         if detail.path_status == "ambiguous":
             raise PdfPreviewError("Die PDF-Quelle ist nicht eindeutig. Bitte den Import klaeren.")
+        if detail.path_status == "unavailable":
+            raise PdfPreviewError("Der verifizierte PDF-Ort ist nicht mehr verfügbar. Bitte PDF wiederfinden.")
+        if len(detail.pdf_sha256 or "") == 64:
+            from src.ingestion.api import verified_pdf_source
+            from .pdf_preview import MAX_PDF_BYTES
+            try:
+                with verified_pdf_source(self._project_root, detail.pdf_path, detail.pdf_sha256, job_id=detail.job_id) as (_current, stream):
+                    payload = stream.read(MAX_PDF_BYTES + 1)
+                if len(payload) > MAX_PDF_BYTES:
+                    raise ValueError("PDF überschreitet 128 MB.")
+                with tempfile.TemporaryDirectory(prefix="arev2-report-snapshot-") as temporary:
+                    snapshot = Path(temporary) / "source.pdf"
+                    snapshot.write_bytes(payload)
+                    return render_pdf_page(detail.report_id, str(snapshot), page_index=page_index, zoom=zoom)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise PdfPreviewError("PDF fehlt oder entspricht nicht dem gespeicherten Original-SHA.") from exc
         path = str(detail.current_pdf_path or detail.pdf_path or "").strip()
         if not path or not Path(path).is_file():
             raise PdfPreviewError("Die PDF-Quelle wurde nicht gefunden. Bitte den Import pruefen.")

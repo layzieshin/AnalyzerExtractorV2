@@ -135,7 +135,8 @@ class ExtractionController:
         watch_input = settings.watch_input_path
         watch_backup = settings.watch_backup_path
         try:
-            validate_watch_path_pair(watch_input, watch_backup)
+            if settings.archive_mode != "monthly":
+                validate_watch_path_pair(watch_input, watch_backup)
         except Exception as exc:
             raise ApplicationWatchError(str(exc)) from exc
 
@@ -156,6 +157,7 @@ class ExtractionController:
                 enqueue=self._make_enqueue_callable(),
                 state=self._watch_scanner_state,
                 recursive=settings.watch_recursive,
+                **({"archive_mode": "monthly"} if settings.archive_mode == "monthly" else {}),
             )
         except IngestionError as exc:
             raise ApplicationWatchError(str(exc)) from exc
@@ -249,6 +251,25 @@ class ExtractionController:
         result = process_next_pending(self._project_root, config, submit_func=self._submit_func,
             job_id=job_id, retry_failed=True, expected_sha256=expected_sha256, expected_pdf_path=pdf_path)
         return _to_processing_outcome(result)
+
+    def identity_pdf_location(self, job_id, *, pdf_path, expected_sha256, store_path, device_id, search_path=None, context_guard=None):
+        from src.ingestion.api import find_pdf_locations, register_pdf_location, verified_pdf_location
+        settings = self._settings_provider()
+        if Path(settings.sqlite_path).resolve() != Path(store_path).resolve():
+            raise ValueError("identity_case_store_changed")
+        evidence = get_job_evidence(self._project_root, job_id, expected_pdf_sha256=expected_sha256, expected_pdf_path=pdf_path, include_context=False)
+        if evidence is None or not evidence.state_available or evidence.device_id != device_id:
+            raise ValueError("identity_case_source_evidence_missing")
+        if evidence.store_path and Path(evidence.store_path).resolve() != Path(store_path).resolve():
+            raise ValueError("identity_case_source_store_changed")
+        if search_path:
+            candidates = find_pdf_locations(search_path, expected_sha256)
+            if len(candidates) != 1:
+                raise ValueError("Keine oder mehrere bytegleiche PDFs gefunden. Bitte eine konkrete Datei wählen.")
+            if Path(self._settings_provider().sqlite_path).resolve() != Path(store_path).resolve():
+                raise ValueError("identity_case_store_changed")
+            return register_pdf_location(self._project_root, pdf_path, expected_sha256, candidates[0], context_guard=context_guard)
+        return verified_pdf_location(self._project_root, pdf_path, expected_sha256)
 
     def list_ingestion_instances(self) -> list[IngestionInstanceItem]:
         queue_by_job = {job.job_id: job for job in list_processing_jobs(self._project_root)}

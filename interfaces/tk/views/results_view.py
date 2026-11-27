@@ -33,6 +33,8 @@ class ResultsView(ttk.Frame):
         on_back: Callable[[], None],
         on_occurrence_selected: Callable[[str], None],
         on_open_validation: Callable[[], None] | None = None,
+        on_monthly_archive: Callable[[], None] | None = None,
+        on_find_pdf: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master, style="Content.TFrame")
         self._on_refresh = on_refresh
@@ -42,6 +44,8 @@ class ResultsView(ttk.Frame):
         self._on_back = on_back
         self._on_occurrence_selected = on_occurrence_selected
         self._on_open_validation = on_open_validation or (lambda: None)
+        self._on_monthly_archive = on_monthly_archive or (lambda: None)
+        self._on_find_pdf = on_find_pdf or (lambda: None)
         self._detail_report_id: str = ""
         self._current_detail: ReportDetail | None = None
         self._occurrences: dict[str, ReportRunOccurrence] = {}
@@ -87,7 +91,11 @@ class ResultsView(ttk.Frame):
         self._page_title.grid(row=1, column=0, sticky="w", pady=(4, 2))
         subtitle = ttk.Label(header, text="Berichte, Messwerte und Validierungshistorie nachschlagen.", style="PageSubtitle.TLabel", wraplength=700)
         subtitle.grid(row=2, column=0, sticky="w")
-        ttk.Button(header, text="Aktualisieren", command=self._on_refresh, style="Results.TButton").grid(row=1, column=1, sticky="e", padx=(10, 0))
+        header_actions = ttk.Frame(header, style="Content.TFrame")
+        header_actions.grid(row=1, column=1, sticky="e", padx=(10, 0))
+        self._btn_monthly_archive = ttk.Button(header_actions, text="Eingang aufräumen", command=self._on_monthly_archive, style="Results.TButton")
+        self._btn_monthly_archive.pack(side="left", padx=(0, 8))
+        ttk.Button(header_actions, text="Aktualisieren", command=self._on_refresh, style="Results.TButton").pack(side="left")
         header.bind("<Configure>", lambda event: subtitle.configure(wraplength=max(200, event.width - 140)))
 
         self._list_panel = ttk.Frame(self, style="Content.TFrame")
@@ -178,6 +186,7 @@ class ResultsView(ttk.Frame):
         self._btn_open_pdf = ttk.Button(self._detail_actions, text="Original-PDF öffnen", command=self._on_open_pdf, state="disabled", style="Results.TButton")
         self._detail_action_buttons = (
             self._btn_open_validation, self._btn_open_pdf,
+            ttk.Button(self._detail_actions, text="PDF wiederfinden", command=self._on_find_pdf, style="Results.TButton"),
             ttk.Button(self._detail_actions, text="Ausgabeordner öffnen", command=self._on_open_output_folder, style="Ghost.Results.TButton"),
             ttk.Button(self._detail_actions, text="Detail schließen", command=self._on_back, style="Ghost.Results.TButton"),
             ttk.Button(self._detail_actions, text="Aktualisieren", command=self._on_refresh, style="Results.TButton"),
